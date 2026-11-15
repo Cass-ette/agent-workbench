@@ -8,6 +8,7 @@ macOS SwiftUI manager for the isolated Claude Code entry at `127.0.0.1:8081`.
 - Remember the selected profile, model, workspace, and session mode.
 - Choose a recent or new working directory and start a new, continued, or resumed Claude session.
 - Run the selected Claude or Codex process directly in the embedded SwiftTerm PTY. The app does not type launch commands into an existing agent session.
+- Use the four-corner button in the terminal header to enter macOS full screen; the running PTY stays attached to the same agent process.
 - Switch between Claude and Codex in one window. Codex gets a per-key isolated `CODEX_HOME`, provider config, and session history, so the regular `~/.codex` installation is not changed.
 - Keep all manager keys and Claude settings in the existing private local config directory.
 

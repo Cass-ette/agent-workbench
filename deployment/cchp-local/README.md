@@ -5,12 +5,12 @@
 ## 要求
 
 - macOS 14 或更新版本
-- Docker Desktop 已安装并运行
+- [Docker Desktop for Mac](https://www.docker.com/products/docker-desktop/) 已安装并运行
 - 本目录中的 `compose.yml`、`.env.example` 和启动脚本放在同一个目录
 
 ## 首次启动
 
-双击 `setup.command`。脚本会为这台电脑生成全新的数据库口令、Token pepper 和主密钥，保存在权限为 `600` 的 `.env` 文件，然后拉取镜像并启动 CCHP。首次使用时在浏览器打开的控制台完成自己的账户设置。
+双击 `setup.command`。脚本会为这台电脑生成全新的数据库口令、Token pepper 和主密钥，保存在权限为 `600` 的 `.env` 文件，然后从 CCHP 官方 GHCR 拉取固定版本的多架构镜像并启动服务。首次使用时在浏览器打开的控制台完成自己的账户设置。镜像不会预先塞入 ZIP，因此首次启动需要网络连接并下载约数百 MB 的镜像。
 
 之后在 CCHP 控制台添加自己的上游供应商 Key，再创建一把下游 LLM 调用 Key。管理器中只填写下游 Key；不要把上游 Key 填入管理器或 Claude/Codex 环境变量。
 

@@ -1,0 +1,116 @@
+name: cch-plus
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.31.0-pg18
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=timescaledb,pg_stat_statements
+      - -c
+      - pg_stat_statements.max=10000
+      - -c
+      - track_io_timing=on
+    environment:
+      POSTGRES_USER: hub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: app
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - cch_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v2.0.2
+    restart: unless-stopped
+    ulimits:
+      memlock: -1
+    volumes:
+      - cch_df:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    image: ghcr.io/cch-hq/cch-plus:latest
+    entrypoint: ["/usr/local/bin/migrate"]
+    command: ["apply"]
+    environment:
+      APP_ENV: production
+      ATLAS_DATABASE_URL: postgres://hub:${POSTGRES_PASSWORD:?}@postgres:5432/app?sslmode=disable
+      CCHP_DATABASE_RUNTIME_ROLE: cchp_runtime
+      CCHP_DATABASE_RUNTIME_PASSWORD: ${CCHP_DATABASE_RUNTIME_PASSWORD:?}
+      CCH_MASTER_KEY: ${CCH_MASTER_KEY:?}
+      CCH_SCRATCH_DIR: /var/cache/cchp
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  cchp:
+    image: ghcr.io/cch-hq/cch-plus:latest
+    restart: unless-stopped
+    stop_grace_period: 930s
+    command: ["api", "--role=all", "--control-addr=:8080", "--addr=:8081"]
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgres://cchp_runtime:${CCHP_DATABASE_RUNTIME_PASSWORD:?}@postgres:5432/app?sslmode=disable
+      CCHP_DATABASE_RUNTIME_ROLE: cchp_runtime
+      DRAGONFLY_URL: redis://dragonfly:6379/0
+      CCH_TOKEN_PEPPER: ${CCH_TOKEN_PEPPER:?}
+      CCH_MASTER_KEY: ${CCH_MASTER_KEY:?}
+      DRAGONFLY_KEY_SECRET: ${DRAGONFLY_KEY_SECRET:?}
+      CCH_PUBLIC_BASE_URL: ${CCH_PUBLIC_BASE_URL:?}
+      CCH_CONTROL_PLANE_ALLOWED_ORIGINS: ${CCH_PUBLIC_BASE_URL:?}
+      CCH_GATEWAY_PUBLIC_URL: ${CCH_GATEWAY_PUBLIC_URL:?}
+      CCH_INSECURE_DEPLOYMENT: ${CCH_INSECURE_DEPLOYMENT:-false}
+      CCH_SIEM_MODE: disabled
+      CCH_ALLOW_EMPTY_ROUTING_BOOTSTRAP: "true"
+      CCH_ARCHIVE_INTERNAL_URL: http://127.0.0.1:8091
+      CCH_REPLAY_NODE_ID: cchp
+      CCH_REPLAY_OWNER_PROXY_NODES: cchp=http://127.0.0.1:8081
+      CCHP_DATABASE_STORAGE_SOURCE: filesystem
+      CCHP_DATABASE_STORAGE_PATH: /var/lib/cchp/database
+    volumes:
+      - cch_objectstore:/var/lib/cchp/data/objectstore
+      - cch_task_results:/var/lib/cchp/data/task-results
+      - cch_archive:/var/lib/cchp/node
+      - cch_scratch:/var/cache/cchp
+      - cch_pg:/var/lib/cchp/database:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/gateway
+        - healthcheck
+        - --url=http://127.0.0.1:8081/readyz
+        - --url=http://127.0.0.1:8080/readyz
+        - --url=http://127.0.0.1:8082/readyz
+      interval: 10s
+      timeout: 15s
+      retries: 12
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  cch_pg:
+  cch_df:
+  cch_objectstore:
+  cch_task_results:
+  cch_archive:
+  cch_scratch:

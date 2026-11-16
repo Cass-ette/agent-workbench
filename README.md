@@ -2,6 +2,8 @@
 
 macOS SwiftUI manager for the isolated Claude Code entry at `127.0.0.1:8081`.
 
+The repository now includes a no-secret CCHP deployment template under `deployment/cchp-local/`. It creates a separate local CCHP database and runtime key material for each user; it never packages the author's `.env`, Docker volumes, upstream provider keys, or downstream keys.
+
 ## Features
 
 - Save multiple local CCHP downstream keys and load the model allowlist for the selected key.
@@ -20,8 +22,14 @@ Codex launch uses the local CCHP Responses-compatible endpoint and passes `CCH_A
 
 ## Build
 
-Requirements: macOS 14+, Swift 6.2+, Python 3, Claude Code at `~/.local/bin/claude`, and the local CCHP service at `127.0.0.1:8081`.
+Requirements: macOS 14+, Swift 6.2+, Python 3, Claude Code at `~/.local/bin/claude`, and the local CCHP service at `127.0.0.1:8081`. The build script produces a universal arm64/x86_64 application.
 
-Run `./build-app.command`. The app bundle is written to `build/CCHP Model Manager.app`.
+Run `./build-app.command`. The app bundle is written to `build/CCHP Model Manager.app`. Run `./package-friend.command` to create a ZIP containing the app and a fresh local CCHP setup template. This ad-hoc signed build is not notarized; broad distribution requires an Apple Developer ID signature and notarization.
 
 The app includes the macOS SwiftTerm source at commit `282c3c3a932b55c129628876b70f37d993af1615` (tag `1.99.3`) under its MIT license. The local target omits SwiftTerm's unrelated cross-platform package dependencies, which otherwise make SwiftPM fetch their complete Git histories on macOS. License and provenance are in `Vendor/SwiftTerm/UPSTREAM.md`.
+
+## Friend deployment
+
+Run `deployment/cchp-local/setup.command` on the friend's Mac after installing and starting Docker Desktop. The script generates a new `.env`, starts the official CCHP containers, and opens the local control panel. The friend then adds their own upstream provider keys in CCHP and creates a downstream LLM key for this manager. The manager must receive the downstream key, never the upstream key.
+
+The related project [ding113/claude-code-hub](https://github.com/ding113/claude-code-hub) is a separate MIT-licensed CC Hub implementation. It is not the CCHP Plus image used by the deployment template. Its documented public endpoint is primarily OpenAI Chat Completions and it does not promise the Anthropic Messages plus OpenAI Responses translation that this manager currently relies on, so it should not be substituted without a protocol compatibility test.

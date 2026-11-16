@@ -1,4 +1,5 @@
 .build/
+.build-*/
 .swiftpm/
 build/
 DerivedData/
@@ -6,3 +7,4 @@ DerivedData/
 *.xcuserstate
 __pycache__/
 *.py[cod]
+deployment/cchp-local/.env

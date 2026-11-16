@@ -14,6 +14,24 @@
 
 之后在 CCHP 控制台添加自己的上游供应商 Key，再创建一把下游 LLM 调用 Key。管理器中只填写下游 Key；不要把上游 Key 填入管理器或 Claude/Codex 环境变量。
 
+推荐按这个顺序操作：
+
+1. 打开 `http://localhost:8080`，完成本机 CCHP 的首次管理员初始化。
+2. 在供应商管理中创建供应商、配置端点，并把自己的上游 API Key 保存在 CCHP 中。
+3. 在供应商分组和路由中限制模型范围；免费分组不要意外包含付费路由。
+4. 在下游 LLM 密钥页面创建一把客户端调用 Key，按需要绑定分组。
+5. 打开 `CCHP Model Manager.app`，添加这把下游调用 Key，选择模型和工作目录后启动 Claude 或 Codex。
+
+官方文档：
+
+- [Docker Compose 安装](https://cch-plus.com/en/docs/installation/docker-compose)
+- [供应商端点](https://cch-plus.com/en/docs/providers/endpoints)
+- [供应商密钥](https://cch-plus.com/en/docs/providers/keys)
+- [供应商分组](https://cch-plus.com/en/docs/providers/groups)
+- [下游 LLM 密钥](https://cch-plus.com/en/docs/guide/llm-keys)
+- [Claude Code 客户端](https://cch-plus.com/en/docs/guide/claude-code)
+- [Codex 客户端](https://cch-plus.com/en/docs/guide/codex)
+
 管理地址为 `http://localhost:8080`，模型网关为 `http://127.0.0.1:8081/v1`。两个端口只绑定本机回环地址，不对局域网或公网开放。
 
 ## 日常启停
@@ -27,4 +45,4 @@
 
 每台电脑都应独立生成 `.env`、建立自己的数据库并填自己的 API Key。不要复制你的 `.env`、Docker 数据卷或完整调用密钥给朋友。`.env` 已被仓库忽略。
 
-容器镜像版本目前沿用官方 Compose 文件中的 `latest` 标签；正式分享安装包前，建议固定到经过验证的版本或 digest，并在升级前备份数据库。
+容器镜像已固定到当前核对的多架构 digest，对应 CCHP Plus `1.0.14+build.53`。升级镜像前请先备份数据库，并重新核对兼容性。

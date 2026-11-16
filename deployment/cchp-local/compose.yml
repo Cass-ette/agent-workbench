@@ -40,7 +40,7 @@ services:
       retries: 10
 
   migrate:
-    image: ghcr.io/cch-hq/cch-plus:latest
+    image: ghcr.io/cch-hq/cch-plus@sha256:4a6d5441ef5f044f3d428a041663d032e8e138752f9e372335dd3fd5e9f71dd0
     entrypoint: ["/usr/local/bin/migrate"]
     command: ["apply"]
     environment:
@@ -55,7 +55,7 @@ services:
         condition: service_healthy
 
   cchp:
-    image: ghcr.io/cch-hq/cch-plus:latest
+    image: ghcr.io/cch-hq/cch-plus@sha256:4a6d5441ef5f044f3d428a041663d032e8e138752f9e372335dd3fd5e9f71dd0
     restart: unless-stopped
     stop_grace_period: 930s
     command: ["api", "--role=all", "--control-addr=:8080", "--addr=:8081"]

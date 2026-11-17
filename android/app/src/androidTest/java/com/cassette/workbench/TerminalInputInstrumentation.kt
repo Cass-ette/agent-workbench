@@ -164,6 +164,11 @@ class TerminalInputInstrumentation : Instrumentation() {
         scrollButton(view, true)
         until("up button scrolls Shell") { eval(view, "terminal.buffer.active.viewportY").toInt() < before }
         check(model.termux.request("/test/state").getInt("inputs") == inputs) { "Shell scrolling sent command history keys" }
+        eval(view, "window.jumpToBottom('claude');window.jumpToBottom('codex');window.jumpToBottom('shell');true")
+        until("jump to bottom moves Shell viewport") { eval(view, "terminal.buffer.active.viewportY === terminal.buffer.active.baseY") == "true" }
+        check(model.termux.request("/test/state").getInt("inputs") == inputs) { "Jump to bottom sent a shortcut to a Shell" }
+        eval(view, "window.scrollByButton(-1);true")
+        until("restore scrolled Shell before down button") { eval(view, "terminal.buffer.active.viewportY").toInt() < before }
         scrollButton(view, false)
         until("down button scrolls Shell") { eval(view, "terminal.buffer.active.viewportY").toInt() == before }
         eval(view, "terminal.scrollToLine(Math.floor(terminal.buffer.active.baseY/2));true")
@@ -179,6 +184,10 @@ class TerminalInputInstrumentation : Instrumentation() {
         val script = "${args.getString("workspace")}/scroll_tui.py"
         runOnMainSync { model.send(id, "'${python.replace("'", "'\\''")}' '${script.replace("'", "'\\''")}'\r") }
         until("full-screen TUI ready") { tuiTop(view) == 80 && eval(view, "terminal.buffer.active.type === 'alternate' && terminal.modes.mouseTrackingMode === 'any'") == "true" }
+        eval(view, "window.jumpToBottom('claude');true")
+        until("Claude bottom uses Ctrl+End") { tuiTop(view) == 100 }
+        runOnMainSync { model.send(id, "r") }
+        until("reset after Claude bottom") { tuiTop(view) == 80 }
         scrollButton(view, true)
         until("up button scrolls TUI history") { tuiTop(view) in 0..79 }
         val up = tuiTop(view)
@@ -213,12 +222,17 @@ class TerminalInputInstrumentation : Instrumentation() {
         scrollButton(view, true)
         until("binary mouse reports reach TUI") { tuiTop(view) in 0..79 }
         check(eval(view, "terminal.buffer.active.getLine(0).translateToString(true).includes('UNEXPECTED=0')") == "true") { "Scrolling sent unexpected input" }
+        runOnMainSync { model.send(id, "cr") }
+        until("Codex transcript fixture ready") { tuiTop(view) == 80 && eval(view, "terminal.modes.mouseTrackingMode === 'none' && terminal.buffer.active.getLine(0).translateToString(true).includes('T R A N S C R I P T')") == "true" }
+        eval(view, "window.jumpToBottom('codex');true")
+        until("Codex transcript bottom uses End") { tuiTop(view) == 100 }
+        check(eval(view, "terminal.buffer.active.getLine(1).translateToString(true).includes('UNEXPECTED=0')") == "true") { "Codex received the wrong bottom shortcut" }
         runOnMainSync { model.send(id, "q") }
         until("TUI exits back to Shell") { eval(view, "terminal.buffer.active.type === 'normal' && terminal.modes.mouseTrackingMode === 'none'") == "true" }
         eval(view, "window.writeChunk(btoa('SPLIT_'+String.fromCharCode(0xe7)));window.writeChunk(btoa(String.fromCharCode(0x95,0x8c)+'_END'));true")
         until("UTF-8 byte split survives output chunks") { eval(view, "Array.from({length:terminal.buffer.active.length},(_,i)=>terminal.buffer.active.getLine(i)?.translateToString(true)||'').some(line=>line.includes('SPLIT_界_END'))") == "true" }
     }
-    private fun tuiTop(view: WebView): Int = eval(view, "Number((terminal.buffer.active.getLine(0)?.translateToString(true)||'').match(/TUI_TOP=(\\d+)/)?.[1]??-1)").toInt()
+    private fun tuiTop(view: WebView): Int = eval(view, "Number(Array.from({length:3},(_,i)=>terminal.buffer.active.getLine(i)?.translateToString(true)||'').join(' ').match(/TUI_TOP=(\\d+)/)?.[1]??-1)").toInt()
     private fun scrollButton(view: WebView, up: Boolean) {
         eval(view, "document.getElementById('${if (up) "scroll-up" else "scroll-down"}').click();true")
     }

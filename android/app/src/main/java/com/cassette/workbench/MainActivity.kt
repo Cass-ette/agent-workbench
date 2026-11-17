@@ -22,6 +22,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -429,21 +430,23 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
     var fontDelta by remember { mutableIntStateOf(0) }
     var keyboardRequest by remember { mutableIntStateOf(0) }
     var scrollRequest by remember { mutableIntStateOf(0) }
+    var bottomRequest by remember { mutableIntStateOf(0) }
     Column(modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             listOf("Esc" to "\u001b", "Tab" to "\t", "Ctrl+C" to "\u0003").forEach { (title, value) ->
                 TextButton(onClick = { model.send(session.id, value) }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text(title, fontSize = 11.sp) }
             }
             TextButton(onClick = { scrollRequest-- }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text("↑", fontSize = 11.sp) }
             TextButton(onClick = { scrollRequest++ }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text("↓", fontSize = 11.sp) }
+            TextButton(onClick = { bottomRequest++ }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 48.dp)) { Text("底部", fontSize = 11.sp) }
             TextButton(onClick = { keyboardRequest++ }, contentPadding = PaddingValues(2.dp), modifier = Modifier.widthIn(min = 40.dp)) { Text("键盘", fontSize = 11.sp) }
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(8.dp))
             TextButton(onClick = { fontDelta++ }, contentPadding = PaddingValues(3.dp), modifier = Modifier.width(30.dp)) { Text("A+") }
             TextButton(onClick = { fontDelta-- }, contentPadding = PaddingValues(3.dp), modifier = Modifier.width(30.dp)) { Text("A−") }
             IconButton(onClick = { closing = true }, modifier = Modifier.width(34.dp)) { Icon(Icons.Outlined.Close, "关闭此终端") }
         }
         Box(Modifier.weight(1f).fillMaxWidth().heightIn(min = 220.dp)) {
-            TerminalSurface(model, session, fontDelta, keyboardRequest, scrollRequest, Modifier.fillMaxSize())
+            TerminalSurface(model, session, fontDelta, keyboardRequest, scrollRequest, bottomRequest, Modifier.fillMaxSize())
         }
         if (session.exitCode != null) Text("终端已退出：${session.exitCode}", style = MaterialTheme.typography.labelSmall)
     }
@@ -451,10 +454,10 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
         confirmButton = { TextButton(onClick = { closing = false; model.close(session.id) }) { Text("结束终端") } }, dismissButton = { TextButton(onClick = { closing = false }) { Text("取消") } })
 }
 
-private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var scrollRequest: Int = 0)
+private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var scrollRequest: Int = 0, var bottomRequest: Int = 0)
 
 @SuppressLint("SetJavaScriptEnabled")
-@Composable private fun TerminalSurface(model: WorkbenchModel, session: TerminalSession, fontDelta: Int, keyboardRequest: Int, scrollRequest: Int, modifier: Modifier) {
+@Composable private fun TerminalSurface(model: WorkbenchModel, session: TerminalSession, fontDelta: Int, keyboardRequest: Int, scrollRequest: Int, bottomRequest: Int, modifier: Modifier) {
     val context = LocalContext.current
     var ready by remember { mutableStateOf(false) }
     val cursor = remember { TerminalCursor() }
@@ -511,6 +514,10 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
                 if (cursor.scrollRequest != scrollRequest) {
                     view.evaluateJavascript("window.scrollByButton(${scrollRequest - cursor.scrollRequest})", null)
                     cursor.scrollRequest = scrollRequest
+                }
+                if (cursor.bottomRequest != bottomRequest) {
+                    view.evaluateJavascript("window.jumpToBottom(${JSONObject.quote(session.client)})", null)
+                    cursor.bottomRequest = bottomRequest
                 }
             }
         })

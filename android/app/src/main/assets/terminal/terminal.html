@@ -102,5 +102,16 @@ window.scrollByTouch = pixels => {
   if (lines) {touchRemainder-=lines*cellHeight;scrollLines(lines);}
 };
 window.scrollByButton = pages => scrollLines(Math.max(3,Math.floor(terminal.rows/2))*pages);
+window.jumpToBottom = client => {
+  const b=terminal.buffer.active;
+  const lines=Array.from({length:terminal.rows},(_,i)=>b.getLine(b.baseY+i)?.translateToString(true)||'');
+  const codexTranscript=lines.slice(0,3).some(line=>/^\s*\/\s*T\s*R\s*A\s*N\s*S\s*C\s*R\s*I\s*P\s*T\s*\//.test(line)) && lines.some(line=>/home\/end.*to jump/i.test(line));
+  // Codex's inline view uses terminal scrollback; its transcript pager uses End.
+  // Claude owns its full-screen history and advertises Ctrl+End. Avoid sending
+  // either shortcut to an ordinary Shell or editing a Codex input draft.
+  if (client==='claude' && appOwnsScroll()) terminal.input('\x1b[1;5F');
+  else if (client==='codex' && codexTranscript) terminal.input('\x1b[F');
+  terminal.scrollToBottom(); updateScrollBar();
+};
 new ResizeObserver(resize).observe(document.body); window.addEventListener('resize',resize); resize(); terminal.focus(); Workbench.ready();
 </script></body></html>

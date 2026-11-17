@@ -10,12 +10,16 @@ def main():
     fd = sys.stdin.fileno()
     previous = termios.tcgetattr(fd)
     top, unexpected = 80, 0
+    codex_mode = False
     pending = b""
 
     def draw():
         rows = os.get_terminal_size(fd).lines
-        text = [f"TUI_TOP={top} UNEXPECTED={unexpected}"]
-        text += [f"Conversation line {top + n}" for n in range(rows - 1)]
+        text = ["/ T R A N S C R I P T /"] if codex_mode else []
+        text += [f"TUI_TOP={top} UNEXPECTED={unexpected}"]
+        text += [f"Conversation line {top + n}" for n in range(rows - len(text) - (1 if codex_mode else 0))]
+        if codex_mode:
+            text += ["up/down to scroll - home/end to jump"]
         os.write(1, ("\x1b[2J\x1b[H" + "\r\n".join(text)).encode())
 
     try:
@@ -25,6 +29,15 @@ def main():
         while True:
             pending += os.read(fd, 4096)
             while pending:
+                shortcut = next((s for s in (b"\x1b[1;5F", b"\x1b[F") if pending.startswith(s)), None)
+                if shortcut:
+                    if (shortcut == b"\x1b[F") == codex_mode:
+                        top = 100
+                    else:
+                        unexpected += 1
+                    pending = pending[len(shortcut):]
+                    draw()
+                    continue
                 match = re.match(rb"\x1b\[<(\d+);\d+;\d+[Mm]", pending)
                 if match:
                     button = int(match[1])
@@ -40,6 +53,9 @@ def main():
                         return
                     if key == ord("b"):
                         os.write(1, b"\x1b[?1006l")
+                    elif key == ord("c"):
+                        codex_mode = True
+                        os.write(1, b"\x1b[?1006l\x1b[?1003l")
                     elif key == ord("r"):
                         top = 80
                     else:

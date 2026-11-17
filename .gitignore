@@ -8,3 +8,17 @@ DerivedData/
 __pycache__/
 *.py[cod]
 deployment/cchp-local/.env
+/windows/node_modules/
+/windows/dist/
+/windows/src-tauri/target/
+/windows/release-assets/
+/android/.gradle/
+/android/.kotlin/
+/android/local.properties
+/android/**/build/
+/output/
+.env
+.env.*
+!.env.example
+*.keystore
+*.jks

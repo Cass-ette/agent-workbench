@@ -1,0 +1,39 @@
+{
+  "models": {
+    "deepseek-flash": {
+      "model": "deepseek-flash",
+      "charges": {
+        "cache_read": "0.003",
+        "prompt": "0.15",
+        "completion": "0.6"
+      },
+      "upper_charges": {
+        "cache_read": "0.006",
+        "prompt": "0.3",
+        "completion": "1.2"
+      },
+      "tracks": [],
+      "source": "DeepSeek 官方",
+      "group_ids": []
+    },
+    "deepseek-v4-pro": {
+      "model": "deepseek-v4-pro",
+      "charges": {
+        "cache_read": "0.022",
+        "prompt": "0.66",
+        "completion": "1.98"
+      },
+      "upper_charges": {
+        "cache_read": "0.044",
+        "prompt": "1.32",
+        "completion": "3.96"
+      },
+      "tracks": [],
+      "source": "DeepSeek 官方",
+      "group_ids": []
+    }
+  },
+  "source_kind": "official",
+  "source_url": "https://api-docs.deepseek.com/quick_start/pricing",
+  "fetched_at": 1794898005
+}

@@ -1,0 +1,6 @@
+[
+  {"name":"cache_is_input_and_reasoning_is_output","counts":{"input_tokens":1000,"output_tokens":100,"cached_input_tokens":600,"cache_creation_input_tokens":100,"reasoning_output_tokens":90,"context_known":true},"quote":{"charges":{"prompt":"2","completion":"10","cache_read":"0.2","cache_write":"2.5"},"tracks":[]},"low":0.00197,"high":0.00197},
+  {"name":"explicit_zero_is_free","counts":{"input_tokens":1000000,"output_tokens":100000},"quote":{"charges":{"prompt":"0","completion":"0"},"tracks":[]},"low":0,"high":0},
+  {"name":"official_time_band_range","counts":{"input_tokens":1000000,"output_tokens":0},"quote":{"charges":{"prompt":"0.15","completion":"0.6"},"upper_charges":{"prompt":"0.3","completion":"1.2"},"tracks":[]},"low":0.15,"high":0.3},
+  {"name":"unknown_context_has_tier_range","counts":{"input_tokens":200,"output_tokens":0,"context_known":false},"quote":{"charges":{"prompt":"2","completion":"10"},"tracks":[{"triggers":[],"factors":{"prompt":"1"}},{"triggers":[{"kind":"input_tokens_above","threshold":100,"inclusive":false}],"factors":{"prompt":"2"}}]},"low":0.0004,"high":0.0008}
+]

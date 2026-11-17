@@ -1,4 +1,15 @@
-# CCHP Model Manager
+# Claude & Codex Agent 工作台
+
+## Windows 下载与上手
+
+Windows 朋友请从 [Windows 发布页](https://github.com/Cass-ette/claude-cchp-manager/releases/tag/windows-v0.1.3) 下载 `Agent-Workbench-Windows-x64-0.1.3-setup.exe`。普通使用无需安装 Rust、Visual Studio 或克隆源码；仍需安装准备使用的 Claude Code / Codex CLI，并提供自己的兼容网关地址和调用 Key。
+
+- [Windows 中文快速上手与排错](windows/QUICKSTART.zh-CN.md)
+- [Windows 源码、开发与构建说明](windows/README.md)
+- 本项目采用 [MIT 许可证](LICENSE)，第三方组件保留各自许可证。
+- 每个人使用自己的配置和凭据；`127.0.0.1` 指使用者当前的电脑，不会自动连接作者的网关。
+
+## macOS
 
 macOS SwiftUI manager for the isolated Claude Code entry at `127.0.0.1:8081`.
 

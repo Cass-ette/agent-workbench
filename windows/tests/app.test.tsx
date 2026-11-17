@@ -1,0 +1,125 @@
+import { StrictMode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import App from "../src/App";
+
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+
+vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("@xterm/xterm", () => ({ Terminal: class {} }));
+vi.mock("@xterm/addon-fit", () => ({ FitAddon: class {} }));
+
+const models = Array.from({ length: 430 }, (_, index) => `test-model-${String(index + 1).padStart(3, "0")}`);
+
+beforeEach(() => {
+  invoke.mockReset();
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "load_app_state") {
+      return {
+        config: {
+          profiles: [{ id: "fixture-profile", name: "测试配置", gateway: "http://127.0.0.1:8081" }],
+          selected_profile_id: "fixture-profile",
+          client: "claude",
+          model: models[0],
+          workspace: "C:\\test-project",
+        },
+        config_path: "test-settings.json",
+      };
+    }
+    if (command === "models_for_profile") return models;
+    return undefined;
+  });
+});
+
+afterEach(cleanup);
+
+async function openApp() {
+  render(<StrictMode><App /></StrictMode>);
+  await screen.findByText("430 个可用");
+  return screen.getAllByRole<HTMLSelectElement>("combobox")[0];
+}
+
+describe("工作会话配置", () => {
+  it("已有配置但模型列表读取失败时保留原模型，并可刷新重试", async () => {
+    const normalInvoke = invoke.getMockImplementation()!;
+    let reachable = false;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "models_for_profile" && !reachable) throw "连接网关失败";
+      return normalInvoke(command, args);
+    });
+    render(<StrictMode><App /></StrictMode>);
+
+    await screen.findByText("模型列表读取失败：连接网关失败");
+    expect(screen.queryByRole("option", { name: "先添加调用配置" })).toBeNull();
+    expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "选择模型" }).value).toBe(models[0]);
+    expect(screen.getAllByText("测试配置", { selector: "strong" }).length).toBeGreaterThan(0);
+
+    reachable = true;
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
+    await screen.findByText("430 个可用");
+    expect(screen.queryByText("模型列表读取失败：连接网关失败")).toBeNull();
+  });
+
+  it("网关返回空列表时提示无模型，并保留已保存的模型", async () => {
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) =>
+      command === "models_for_profile" ? [] : normalInvoke(command, args));
+    render(<StrictMode><App /></StrictMode>);
+
+    await screen.findByText("网关未返回可用模型");
+    expect(screen.queryByRole("option", { name: "先添加调用配置" })).toBeNull();
+    expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "选择模型" }).value).toBe(models[0]);
+  });
+
+  it("刷新失败时保留上次成功读取的列表与当前选择", async () => {
+    const picker = await openApp();
+    fireEvent.change(picker, { target: { value: models[10] } });
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "models_for_profile") throw "临时网络故障";
+      return normalInvoke(command, args);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
+    await screen.findByText("模型列表读取失败：临时网络故障");
+    expect(picker.value).toBe(models[10]);
+    expect(screen.getByText("430 个可用")).toBeTruthy();
+    expect(picker.options.length).toBe(430);
+  });
+
+  it("连续切换模型后仍显示工作区，并保存最后所选模型", async () => {
+    const picker = await openApp();
+    fireEvent.change(picker, { target: { value: models[1] } });
+    fireEvent.change(picker, { target: { value: models[2] } });
+
+    expect(screen.getByRole("heading", { name: "启动工作会话" })).toBeTruthy();
+    expect(picker.value).toBe(models[2]);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_preferences", {
+      request: { client: "claude", model: models[2], workspace: "C:\\test-project" },
+    }));
+  });
+
+  it("编辑项目路径后仍显示工作区，并保存新路径", async () => {
+    await openApp();
+    fireEvent.change(screen.getByLabelText("项目目录"), { target: { value: "C:\\another-project" } });
+
+    expect(screen.getByRole("heading", { name: "启动工作会话" })).toBeTruthy();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_preferences", {
+      request: { client: "claude", model: models[0], workspace: "C:\\another-project" },
+    }));
+  });
+
+  it("搜索并选择列表后部的模型后，清空或改变搜索仍保留当前模型", async () => {
+    const picker = await openApp();
+    const search = screen.getByPlaceholderText("搜索模型");
+    fireEvent.change(search, { target: { value: models[399] } });
+    fireEvent.change(picker, { target: { value: models[399] } });
+    fireEvent.change(search, { target: { value: "" } });
+    expect(picker.value).toBe(models[399]);
+
+    fireEvent.change(search, { target: { value: "no-matching-model" } });
+    expect(picker.value).toBe(models[399]);
+    expect(screen.getByRole("heading", { name: "启动工作会话" })).toBeTruthy();
+  });
+});

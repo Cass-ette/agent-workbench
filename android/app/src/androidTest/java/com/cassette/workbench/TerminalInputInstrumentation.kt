@@ -1,0 +1,176 @@
+package com.cassette.workbench
+
+import android.app.Activity
+import android.app.Instrumentation
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.os.Bundle
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.webkit.WebView
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.Lifecycle
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+
+/** Emulator-only test against a loopback PTY fixture; never uses model APIs or real keys. */
+class TerminalInputInstrumentation : Instrumentation() {
+    private lateinit var args: Bundle
+    override fun onCreate(arguments: Bundle?) { args = arguments ?: Bundle(); start() }
+
+    override fun onStart() {
+        if (args.getString("device_smoke") == "true") {
+            DeviceRuntimeSmoke(this).run()
+            return
+        }
+        val result = Bundle()
+        var activity: Activity? = null
+        var model: WorkbenchModel? = null
+        var browser: WebView? = null
+        var resultCode = Activity.RESULT_CANCELED
+        val prefs = targetContext.getSharedPreferences("workbench", Context.MODE_PRIVATE)
+        val credentials = targetContext.getSharedPreferences("credentials", Context.MODE_PRIVATE)
+        val originalPrefs = prefs.all.toMap()
+        val originalCredentials = credentials.all.toMap()
+        try {
+            check(Build.MODEL.startsWith("sdk_gphone")) { "Run only on the test emulator" }
+            val store = ProfileStore(targetContext)
+            store.saveBridgePort(args.getString("bridge_port", "19887").toInt())
+            store.saveSecret("bridge", "workbench-ui-fixture-token-only-00000000")
+            store.saveSessions(org.json.JSONArray())
+            store.saveOptions(TaskOptions(workspace = args.getString("workspace") ?: error("Missing fixture directory")))
+            activity = startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            val active = activity as MainActivity
+            runOnMainSync { model = ViewModelProvider(active)[WorkbenchModel::class.java] }
+            until("bridge connected") { model!!.connected }
+            val gatewayModels = GatewayClient.models("http://127.0.0.1:${args.getString("bridge_port", "19887")}/test/gateway", "metadata-test-key")
+            check(gatewayModels == listOf("synthetic-model")) { "Gateway authentication regression" }
+            runOnMainSync { model!!.launch(shell = true) }
+            until("terminal created") { model!!.sessions.isNotEmpty() }
+            until("WebView attached") { runOnMainSync { browser = findWebView(active.window.decorView) }; browser != null }
+            val view = browser!!
+            until("terminal ready") { eval(view, "typeof window.writeChunk === 'function'") == "true" }
+            check(eval(view, "terminal.rows > 2 && terminal.cols > 10") == "true") { "Terminal has no usable size" }
+            until("shell prompt") { eval(view, "terminal.buffer.active.length > 0 && Array.from({length: terminal.rows}, (_,i)=>terminal.buffer.active.getLine(i)?.translateToString(true)||'').join('\\n').includes('WB_TEST')") == "true" }
+            val sessionId = model!!.sessions.single().id
+            val state = model!!.termux.request("/test/state")
+            val pid = state.getJSONObject("sessions").getJSONObject(sessionId).getLong("pid")
+            val creates = state.getInt("creates")
+            // A pending command keeps running while the UI is stopped.
+            runOnMainSync { model!!.send(sessionId, "sleep 2; printf '\\102\\107\\137\\117\\113\\n'\r") }
+            sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)
+            until("Activity stopped") { !active.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) }
+            Thread.sleep(400) // Drain any request already in flight at onStop.
+            val beforeBackground = model!!.termux.request("/test/state").getInt("reads")
+            Thread.sleep(2400)
+            check(model!!.termux.request("/test/state").getInt("reads") == beforeBackground) { "App kept polling while backgrounded" }
+            runOnMainSync { active.startActivity(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)) }
+            until("reconnected on foreground") { model!!.connected && !model!!.bridgeReconnecting }
+            until("background command output restored") { hasLine(view, "BG_OK") }
+            check(model!!.sessions.single().id == sessionId) { "Resume replaced the original session" }
+            check(model!!.termux.request("/test/state").getJSONObject("sessions").getJSONObject(sessionId).getLong("pid") == pid) { "Resume replaced the Shell process" }
+            // An ordinary read failure plus a failed health check must recover without a tap.
+            model!!.termux.request("/test/state", "POST", org.json.JSONObject().put("reads", 1).put("health", 1))
+            until("temporary disconnection") { !model!!.connected && model!!.bridgeReconnecting }
+            until("automatic bridge recovery") { model!!.connected && !model!!.bridgeReconnecting }
+            check(model!!.sessions.single().id == sessionId) { "Transient failure removed the session" }
+            check(model!!.termux.request("/test/state").getInt("creates") == creates) { "Reconnection created a duplicate terminal" }
+            val xy = IntArray(2)
+            runOnMainSync { view.getLocationOnScreen(xy) }
+            val now = android.os.SystemClock.uptimeMillis()
+            sendPointerSync(MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, (xy[0] + 30).toFloat(), (xy[1] + 30).toFloat(), 0))
+            sendPointerSync(MotionEvent.obtain(now, now + 50, MotionEvent.ACTION_UP, (xy[0] + 30).toFloat(), (xy[1] + 30).toFloat(), 0))
+            waitForIdleSync()
+            var committed = false
+            runOnMainSync {
+                val connection = view.onCreateInputConnection(EditorInfo())
+                check(connection != null) { "WebView did not expose an input connection" }
+                committed = connection.commitText("printf '\\127\\102\\137\\111\\116\\120\\125\\124\\137\\117\\113\\n'", 1)
+            }
+            runOnMainSync {
+                val connection = view.onCreateInputConnection(EditorInfo())!!
+                connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+                connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+            }
+            check(committed) { "IME rejected committed text" }
+            until("IME input executed by Shell and echoed") {
+                eval(view, "Array.from({length: terminal.buffer.active.length}, (_,i)=>terminal.buffer.active.getLine(i)?.translateToString(true)||'').some(line=>line.trim()==='WB_INPUT_OK')") == "true"
+            }
+            runOnMainSync {
+                val connection = view.onCreateInputConnection(EditorInfo())!!
+                connection.commitText("printf '", 1)
+                connection.setComposingText("zhong", 1)
+                connection.setComposingText("中文", 1)
+                connection.commitText("中文", 1)
+                connection.finishComposingText()
+                connection.commitText("\\n'", 1)
+                connection.performEditorAction(EditorInfo.IME_ACTION_DONE)
+            }
+            until("Chinese composition committed once") { hasLine(view, "中文") }
+            runOnMainSync {
+                val connection = view.onCreateInputConnection(EditorInfo())!!
+                connection.commitText("printf 'DELETE_OX", 1)
+                connection.deleteSurroundingText(1, 0)
+                connection.commitText("K\\n'", 1)
+                connection.performEditorAction(EditorInfo.IME_ACTION_DONE)
+            }
+            until("IME backspace removes one character") { hasLine(view, "DELETE_OK") }
+            val screenshot = java.io.File(targetContext.getExternalFilesDir(null), "terminal-input-test.png")
+            screenshot.outputStream().use { uiAutomation.takeScreenshot().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            runOnMainSync { model!!.close(model!!.sessions.single().id) }
+            until("last terminal removed") { model!!.sessions.isEmpty() }
+            check(store.sessionRows().length() == 0) { "Closed terminal was persisted" }
+            result.putString("stream", "PASS: no background polling, original PID/session restored, background command continued, transient failure auto-recovered without duplicate Shell, IME text/Enter/Chinese/backspace, last-tab close\n")
+            result.putString("result", "PASS")
+            resultCode = Activity.RESULT_OK
+        } catch (cause: Throwable) {
+            browser?.let { view -> result.putString("terminal_debug", eval(view, "JSON.stringify({active:document.activeElement?.className,value:document.querySelector('textarea')?.value,rows:terminal.rows,lines:Array.from({length:terminal.buffer.active.length},(_,i)=>terminal.buffer.active.getLine(i)?.translateToString(true)||'')})")) }
+            result.putString("session_id", model?.sessions?.firstOrNull()?.id ?: "")
+            result.putString("stream", "FAIL: ${cause.message}\n${cause.stackTraceToString()}")
+            result.putString("result", "FAIL")
+        } finally {
+            model?.sessions?.toList().orEmpty().forEach { session -> runCatching { model!!.termux.request("/sessions/${session.id}", "DELETE") } }
+            runOnMainSync { activity?.finish() }
+            waitForIdleSync()
+            restore(prefs, originalPrefs)
+            restore(credentials, originalCredentials)
+        }
+        finish(resultCode, result)
+    }
+
+    private fun restore(prefs: android.content.SharedPreferences, values: Map<String, *>) {
+        val editor = prefs.edit().clear()
+        values.forEach { (key, value) -> when (value) {
+            is String -> editor.putString(key, value)
+            is Int -> editor.putInt(key, value)
+            is Long -> editor.putLong(key, value)
+            is Boolean -> editor.putBoolean(key, value)
+            is Float -> editor.putFloat(key, value)
+            is Set<*> -> @Suppress("UNCHECKED_CAST") editor.putStringSet(key, value as Set<String>)
+        } }
+        editor.commit()
+    }
+    private fun findWebView(view: View): WebView? {
+        if (view is WebView) return view
+        if (view is ViewGroup) for (i in 0 until view.childCount) findWebView(view.getChildAt(i))?.let { return it }
+        return null
+    }
+    private fun eval(view: WebView, expression: String): String {
+        val latch = CountDownLatch(1)
+        var value = ""
+        runOnMainSync { view.evaluateJavascript(expression) { value = it; latch.countDown() } }
+        check(latch.await(3, TimeUnit.SECONDS)) { "WebView JavaScript timed out" }
+        return value
+    }
+    private fun hasLine(view: WebView, line: String) = eval(view,
+        "Array.from({length:terminal.buffer.active.length},(_,i)=>terminal.buffer.active.getLine(i)?.translateToString(true)||'').some(line=>line.trim()===${org.json.JSONObject.quote(line)})") == "true"
+    private fun until(label: String, condition: () -> Boolean) {
+        val end = android.os.SystemClock.uptimeMillis() + 12000
+        do { if (condition()) return; Thread.sleep(100) } while (android.os.SystemClock.uptimeMillis() < end)
+        error("Timed out waiting for $label")
+    }
+}

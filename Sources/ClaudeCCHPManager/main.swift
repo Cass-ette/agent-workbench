@@ -6,7 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             guard let window = NSApp.windows.first(where: { $0.isVisible }) else { return }
-            window.title = "CCHP Model Manager"
+            window.title = "Agent 工作台"
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.isOpaque = false
@@ -26,8 +26,7 @@ struct ClaudeCCHPManagerApp: App {
         WindowGroup {
             ManagerView(model: model)
                 .frame(minWidth: 960, minHeight: 680)
-                .preferredColorScheme(.dark)
-                .tint(Color(red: 0.42, green: 0.82, blue: 0.68))
+                .tint(.accentColor)
                 .task { await model.load() }
         }
         .windowStyle(.hiddenTitleBar)

@@ -5,16 +5,17 @@ struct ManagerView: View {
     @ObservedObject var model: ManagerModel
     @State private var isAddProfilePresented = false
     @State private var isTerminalFullScreen = false
+    @State private var isTaskSetupVisible = true
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var isUsagePresented = false
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
-                .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 290)
+                .navigationSplitViewColumnWidth(min: 180, ideal: 205, max: 245)
         } detail: {
             detail
         }
-        .background(.ultraThinMaterial)
         .task {
             if model.profiles.isEmpty && !model.isLoading {
                 await model.load()
@@ -25,11 +26,35 @@ struct ManagerView: View {
             isTerminalFullScreen = false
             columnVisibility = .all
         }
+        .onChange(of: model.terminalSessions.count) { oldValue, newValue in
+            if newValue > oldValue {
+                isTaskSetupVisible = false
+            } else if newValue == 0 {
+                isTaskSetupVisible = true
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(15)) } catch { return }
+                await model.refreshUsage()
+                await model.refreshGatewayUsage()
+                await model.refreshPricing()
+            }
+        }
         .sheet(isPresented: $isAddProfilePresented) {
             AddProfileSheet(model: model)
         }
         .sheet(isPresented: $model.isModelPickerPresented) {
             ModelPickerSheet(model: model)
+        }
+        .sheet(isPresented: $model.isGatewaySettingsPresented) {
+            GatewaySettingsSheet(model: model)
+        }
+        .sheet(isPresented: $model.isTerminalAppearancePresented) {
+            TerminalAppearanceSheet(model: model)
+        }
+        .sheet(isPresented: $model.isBillingSettingsPresented) {
+            BillingSettingsSheet(model: model)
         }
         .confirmationDialog("恢复此会话？", isPresented: $model.isRestoreConfirmationPresented,
                             titleVisibility: .visible) {
@@ -45,26 +70,25 @@ struct ManagerView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Image(systemName: "point.3.connected.trianglepath.dotted")
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(Color.mint)
-                    .frame(width: 34, height: 34)
-                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+                Image(systemName: "terminal")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26, height: 26)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("CCHP")
-                        .font(.system(size: 14, weight: .bold))
-                    Text("模型管理器")
+                    Text("Agent 工作台")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("终端工作区")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 16)
-            .padding(.top, 38)
-            .padding(.bottom, 18)
+            .padding(.top, 14)
+            .padding(.bottom, 20)
 
             HStack {
-                Text("本机调用 Key")
+                Text("调用配置")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -74,7 +98,7 @@ struct ManagerView: View {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.borderless)
-                .help("添加本机 CCHP 调用 Key")
+                .help("添加当前网关签发的调用 Key")
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
@@ -108,14 +132,13 @@ struct ManagerView: View {
                                 .lineLimit(1)
                         } icon: {
                             Image(systemName: "key.horizontal.fill")
-                                .foregroundStyle(profile.id == model.selectedProfileID ? Color.mint : Color.secondary)
+                                .foregroundStyle(profile.id == model.selectedProfileID ? Color.accentColor : Color.secondary)
                         }
                         .tag(profile.id)
                         .help(profile.name)
                     }
                 }
                 .listStyle(.sidebar)
-                .disabled(model.agentRunning)
                 .scrollContentBackground(.hidden)
             }
 
@@ -123,7 +146,7 @@ struct ManagerView: View {
             Divider().opacity(0.35)
             HStack(spacing: 8) {
                 Circle()
-                    .fill(model.isStatusError ? Color.orange : Color.green)
+                    .fill(model.isStatusError ? Color.orange : Color.accentColor)
                     .frame(width: 6, height: 6)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("本机网关")
@@ -133,38 +156,40 @@ struct ManagerView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
+                Button {
+                    model.showGatewaySettings()
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                }
+                .buttonStyle(.borderless)
+                .help("设置本机或远程网关地址")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
         }
-        .background(.ultraThinMaterial)
     }
 
     private var detail: some View {
         VStack(spacing: 0) {
-            header
-                .frame(height: isTerminalFullScreen ? 0 : nil)
-                .opacity(isTerminalFullScreen ? 0 : 1)
-                .allowsHitTesting(!isTerminalFullScreen)
-            Divider().opacity(0.25)
-                .frame(height: isTerminalFullScreen ? 0 : 1)
-            configuration
-                .frame(height: isTerminalFullScreen ? 0 : nil)
-                .opacity(isTerminalFullScreen ? 0 : 1)
-                .allowsHitTesting(!isTerminalFullScreen)
-            Divider().opacity(0.25)
-                .frame(height: isTerminalFullScreen ? 0 : 1)
+            if !isTerminalFullScreen {
+                if !model.terminalSessions.isEmpty && !isTaskSetupVisible {
+                    taskContextBar
+                } else {
+                    configuration
+                }
+                Divider()
+            }
             TerminalPanel(model: model,
                           isFullScreen: isTerminalFullScreen,
-                          onToggleFullScreen: toggleTerminalFullScreen)
-                .padding(isTerminalFullScreen ? 0 : 16)
+                          onToggleFullScreen: toggleTerminalFullScreen,
+                          isEmpty: model.terminalSessions.isEmpty,
+                          onChooseWorkspace: model.chooseWorkspace)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            statusBar
-                .frame(height: isTerminalFullScreen ? 0 : nil)
-                .opacity(isTerminalFullScreen ? 0 : 1)
-                .allowsHitTesting(!isTerminalFullScreen)
+            if !isTerminalFullScreen {
+                statusBar
+            }
         }
-        .background(.regularMaterial)
+        .background(.background)
     }
 
     private func toggleTerminalFullScreen() {
@@ -180,181 +205,232 @@ struct ManagerView: View {
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(model.activeClient.title)
-                    .font(.system(size: 21, weight: .semibold))
-                Text(model.activeClient == .codex
-                     ? "\(model.selectedProfile?.name ?? "本机 Key") · 独立 CODEX_HOME"
-                     : (model.selectedProfile?.name ?? "选择本机调用 Key"))
-                    .font(.system(size: 11))
+    private var taskContextBar: some View {
+        HStack(spacing: 12) {
+            Image(systemName: model.selectedTerminal?.client == .codex ? "terminal.fill" : "bubble.left.and.bubble.right.fill")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("当前终端")
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
+                Text("\(model.selectedTerminal?.client.title ?? "Agent") · \(model.selectedTerminal?.model ?? "") · \(model.selectedTerminal?.workspaceName ?? "") · \(model.runningSessionCount) 个运行中")
+                    .font(.system(size: 11, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
             Spacer()
+            Button {
+                isTaskSetupVisible = true
+            } label: {
+                Label("配置任务", systemImage: "slider.horizontal.3")
+            }
+            .buttonStyle(.borderless)
+            .help("展开模型、项目和会话配置")
+            Button {
+                model.requestLaunch()
+            } label: {
+                Label("新建任务", systemImage: "plus")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(model.selectedProfile == nil || model.selectedModel.isEmpty || model.workspace.isEmpty || model.isLoadingModels)
+            .help("使用当前任务配置新增一个独立终端")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .background(.bar)
+    }
+
+    private var configuration: some View {
+        HStack(spacing: 10) {
             Picker("客户端", selection: $model.activeClient) {
                 ForEach(ClientKind.allCases) { client in
                     Text(client.title).tag(client)
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 150)
-            .help("选择要启动的客户端；两者使用隔离配置")
-            .disabled(model.agentRunning)
-            Spacer()
+            .frame(width: 130)
+            .help("选择要启动的 Agent")
+
+            Button {
+                model.modelSearch = ""
+                model.isModelPickerPresented = true
+            } label: {
+                Label {
+                    Text(model.selectedModel.isEmpty ? (model.isLoadingModels ? "正在读取模型" : "选择模型") : model.selectedModel)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } icon: {
+                    Image(systemName: "cpu")
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.models.isEmpty)
+            .frame(minWidth: 150, idealWidth: 205, maxWidth: 235)
+            .help("\(model.models.count) 个可用模型")
+
+            Button {
+                model.chooseWorkspace()
+            } label: {
+                Label {
+                    Text(model.workspace.isEmpty ? "选择项目目录" : URL(fileURLWithPath: model.workspace).lastPathComponent)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } icon: {
+                    Image(systemName: "folder")
+                }
+            }
+            .buttonStyle(.bordered)
+            .frame(minWidth: 130, maxWidth: .infinity)
+            .help(model.workspace.isEmpty ? "选择 Agent 工作目录" : model.workspace)
+
+            Menu {
+                ForEach(SessionMode.allCases) { mode in
+                    Button {
+                        model.sessionMode = mode
+                    } label: {
+                        if model.sessionMode == mode {
+                            Label(mode.title, systemImage: "checkmark")
+                        } else {
+                            Text(mode.title)
+                        }
+                    }
+                }
+            } label: {
+                Label(model.sessionMode.compactTitle, systemImage: "clock.arrow.circlepath")
+            }
+            .menuStyle(.borderlessButton)
+            .help(model.sessionMode == .new ? "选择新会话或恢复方式" : "恢复会话会转发历史内容，并可能产生费用")
+
             Button {
                 model.requestLaunch()
             } label: {
-                Label("启动 \(model.activeClient.title)", systemImage: "play.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .padding(.horizontal, 4)
+                Label("启动", systemImage: "play.fill")
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(model.agentRunning || model.selectedProfile == nil || model.selectedModel.isEmpty || model.workspace.isEmpty || model.isLoadingModels)
+            .disabled(model.selectedProfile == nil || model.selectedModel.isEmpty || model.workspace.isEmpty || model.isLoadingModels)
             .keyboardShortcut(.return, modifiers: [.command])
-            .help("按当前 Key、模型、目录和会话方式启动")
         }
-        .padding(.horizontal, 22)
-        .padding(.top, 42)
-        .padding(.bottom, 15)
-    }
-
-    private var configuration: some View {
-        HStack(alignment: .top, spacing: 22) {
-            VStack(alignment: .leading, spacing: 7) {
-                fieldLabel("模型")
-                Button {
-                    model.modelSearch = ""
-                    model.isModelPickerPresented = true
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "cpu")
-                            .foregroundStyle(Color.mint)
-                        Text(model.selectedModel.isEmpty ? (model.isLoadingModels ? "正在读取…" : "选择模型") : model.selectedModel)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 5)
-                        if model.isLoadingModels { ProgressView().controlSize(.small) }
-                        else { Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary) }
-                    }
-                    .font(.system(size: 12, design: .monospaced))
-                    .padding(.horizontal, 11)
-                    .frame(height: 36)
-                    .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
-                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(.white.opacity(0.09), lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                .disabled(model.models.isEmpty || model.agentRunning)
-                Text("\(model.models.count) 个可用模型")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-            }
-            .frame(minWidth: 210, maxWidth: 320)
-
-            VStack(alignment: .leading, spacing: 7) {
-                fieldLabel("工作目录")
-                HStack(spacing: 8) {
-                    Button {
-                        model.chooseWorkspace()
-                    } label: {
-                        HStack(spacing: 7) {
-                            Image(systemName: "folder")
-                                .foregroundStyle(Color.orange.opacity(0.9))
-                            Text(model.workspace.isEmpty ? "选择文件夹" : URL(fileURLWithPath: model.workspace).lastPathComponent)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer(minLength: 2)
-                            Image(systemName: "arrow.up.forward.app").font(.system(size: 10)).foregroundStyle(.tertiary)
-                        }
-                        .font(.system(size: 12))
-                        .padding(.horizontal, 11)
-                        .frame(height: 36)
-                        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
-                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(.white.opacity(0.09), lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.workspace)
-                    .disabled(model.agentRunning)
-
-                    Menu {
-                        ForEach(model.workspaces, id: \.self) { path in
-                            Button(URL(fileURLWithPath: path).lastPathComponent) { model.setWorkspace(path) }
-                                .help(path)
-                        }
-                        Divider()
-                        Button("选择其他目录…", systemImage: "folder.badge.plus") { model.chooseWorkspace() }
-                    } label: {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .frame(width: 34, height: 34)
-                            .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
-                    }
-                    .menuStyle(.borderlessButton)
-                    .help("最近使用的目录")
-                .disabled(model.agentRunning)
-                }
-                Text(model.workspace.isEmpty ? "" : model.workspace)
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .frame(minWidth: 210, maxWidth: .infinity)
-
-            VStack(alignment: .leading, spacing: 7) {
-                fieldLabel("会话")
-                Picker("会话", selection: $model.sessionMode) {
-                    ForEach(SessionMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(height: 36)
-                .disabled(model.agentRunning)
-                if model.sessionMode != .new {
-                    Label("恢复时会转发历史内容", systemImage: "arrowshape.turn.up.right")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.orange)
-                } else {
-                    Text("历史按工作目录隔离")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .frame(minWidth: 210, maxWidth: 320)
-
-        }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 14)
-        .background(.ultraThinMaterial)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.bar)
     }
 
     private var statusBar: some View {
         HStack(spacing: 8) {
             Image(systemName: model.isStatusError ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
-                .foregroundStyle(model.isStatusError ? Color.orange : Color.mint)
+                .foregroundStyle(model.isStatusError ? Color.orange : Color.accentColor)
                 .font(.system(size: 11))
             Text(model.statusMessage)
                 .font(.system(size: 10))
                 .foregroundStyle(model.isStatusError ? Color.orange : Color.secondary)
                 .lineLimit(1)
             Spacer()
-            Text("8081")
+            Button { isUsagePresented.toggle() } label: {
+                Text(model.gatewayAccount?.balanceLabel ?? "网关余额 · 未获取")
+                    .font(.system(size: 10)).monospacedDigit().lineLimit(1)
+            }
+            .buttonStyle(.borderless)
+            .help("查看当前配置的账户余额和网关账单")
+            Button { isUsagePresented.toggle() } label: {
+                Text(!model.usageError.isEmpty ? model.usageError : model.usage.sessions.isEmpty ? "Token · 尚无本地记录" :
+                        "历史累计 · 输入 \(usageCount(model.usage.inputTokens)) · 输出 \(usageCount(model.usage.outputTokens)) · \(model.usage.costLabel)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .buttonStyle(.borderless)
+            .help("查看隔离会话历史累计；输入已含缓存，推理属于输出细分。")
+            .popover(isPresented: $isUsagePresented) {
+                UsageDetailsView(model: model)
+            }
+            Button {
+                Task { await model.refreshUsage() }
+            } label: {
+                Image(systemName: model.isLoadingUsage ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.isLoadingUsage)
+            .help("刷新 Token 用量")
+            Text(URL(string: model.gateway)?.port.map(String.init) ?? "网关")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 18)
-        .frame(height: 32)
-        .background(.ultraThinMaterial)
+        .padding(.horizontal, 14)
+        .frame(height: 27)
     }
 
-    private func fieldLabel(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(.secondary)
+}
+
+private struct UsageDetailsView: View {
+    @ObservedObject var model: ManagerModel
+    @State private var page = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Picker("统计来源", selection: $page) {
+                Text("网关余额与账单").tag(0)
+                Text("本地 Token 记录").tag(1)
+                Text("网关售价").tag(2)
+            }.pickerStyle(.segmented)
+            if page == 0 { GatewayBillingPanel(model: model) }
+            else if page == 1 { localUsage }
+            else { ModelPricingPanel(model: model) }
+        }.padding(18).frame(width: 580)
+            .task { await model.refreshGatewayUsage() }
     }
 
+    private var localUsage: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Token 与费用").font(.headline)
+                Spacer()
+                Button("刷新") { Task { await model.refreshUsage() } }
+                    .disabled(model.isLoadingUsage)
+            }
+            Text("隔离会话历史累计 · 恢复会话包含恢复前的记录")
+                .font(.subheadline).foregroundStyle(.secondary)
+            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 6) {
+                GridRow { Text("输入（含缓存）"); Text(usageCount(model.usage.inputTokens)) }
+                GridRow { Text("输出"); Text(usageCount(model.usage.outputTokens)) }
+                GridRow { Text("缓存读取"); Text(usageCount(model.usage.cachedInputTokens)) }
+                GridRow { Text("缓存写入"); Text(usageCount(model.usage.cacheCreationInputTokens)) }
+                GridRow { Text("推理输出"); Text(usageCount(model.usage.reasoningOutputTokens)) }
+            }.font(.system(size: 12, design: .monospaced))
+            Text(model.usage.costLabel).font(.system(size: 12, weight: .medium))
+            Text(model.usage.pricingNotice ?? "缓存是输入的细分，推理是输出的细分，无需重复相加。按当前单价估算，实际扣费以网关账单为准。")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let priced = model.usage.pricedSessions {
+                Text("已计算 \(priced)／\(model.usage.sessions.count) 个会话\((model.usage.unpricedSessions ?? 0) > 0 ? " · 其余待匹配单价" : "")")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if !model.usageError.isEmpty { Text(model.usageError).font(.caption).foregroundStyle(.orange) }
+            if model.usage.unreadableFiles > 0 {
+                Text("\(model.usage.unreadableFiles) 个记录文件无法读取，统计可能不完整。")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            Divider()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    if model.usage.sessions.isEmpty { Text("尚无可用的本地用量记录").foregroundStyle(.secondary) }
+                    ForEach(model.usage.sessions) { session in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(session.client == "codex" ? "Codex" : "Claude") · \(session.model.isEmpty ? "模型未记录" : session.model)")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(session.workspace.isEmpty ? "项目未记录" : session.workspace)
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            Text(String(session.id.suffix(36))).font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
+                            Text("输入 \(usageCount(session.input_tokens)) · 输出 \(usageCount(session.output_tokens)) · 缓存读 \(usageCount(session.cached_input_tokens)) / 写 \(usageCount(session.cache_creation_input_tokens)) · 推理 \(usageCount(session.reasoning_output_tokens))")
+                                .font(.system(size: 10, design: .monospaced)).fixedSize(horizontal: false, vertical: true)
+                            Text(session.costLabel)
+                                .font(.caption).foregroundStyle(.secondary)
+                            if let note = session.pricing_note { Text(note).font(.caption2).foregroundStyle(.secondary) }
+                        }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxHeight: 260)
+        }
+    }
 }
 
 private struct ModelPickerSheet: View {
@@ -367,7 +443,7 @@ private struct ModelPickerSheet: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("选择 \(model.activeClient.title) 模型")
                         .font(.system(size: 18, weight: .semibold))
-                    Text("\(model.models.count) 个模型 · \(model.selectedProfile?.name ?? "")")
+                    Text("\(model.models.count) 个模型 · \(model.selectedProfile?.name ?? "") · 能力标签按名称推断")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -382,22 +458,57 @@ private struct ModelPickerSheet: View {
                 .padding(.horizontal, 18)
                 .padding(.bottom, 10)
 
-            List(model.filteredModels, id: \.self, selection: Binding(
-                get: { model.selectedModel },
-                set: { value in
-                    if let value { model.selectedModel = value; dismiss() }
+            Picker("筛选", selection: $model.modelFilter) {
+                ForEach(ModelFilter.allCases) { filter in
+                    Text(filter.title).tag(filter)
                 }
-            )) { item in
+            }
+            .pickerStyle(.menu)
+            .padding(.horizontal, 18)
+            .padding(.bottom, 10)
+            Text("编程、视觉和图像候选仅按模型 ID 名称推断；上游未提供能力字段时，不能据此确认工具调用或图像能力。")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 18)
+                .padding(.bottom, 8)
+
+            List(model.filteredModels, id: \.self) { item in
                 HStack {
-                    Text(item)
-                        .font(.system(size: 12, design: .monospaced))
-                    Spacer()
-                    if item == model.selectedModel {
-                        Image(systemName: "checkmark")
-                            .foregroundStyle(Color.mint)
+                    Button {
+                        model.selectedModel = item
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(item)
+                                .font(.system(size: 12, design: .monospaced))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 0)
+                            if item == model.selectedModel {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                        }
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Spacer()
+                    Button {
+                        model.toggleFavorite(item)
+                    } label: {
+                        Image(systemName: model.isFavorite(item) ? "bookmark.fill" : "bookmark")
+                            .font(.system(size: 14, weight: .regular))
+                            .foregroundStyle(model.isFavorite(item) ? Color.accentColor : Color.secondary)
+                            .frame(width: 32, height: 32)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(model.isFavorite(item) ? "取消收藏 \(item)" : "收藏 \(item)")
+                    .help(model.isFavorite(item) ? "取消收藏" : "收藏模型")
                 }
-                .tag(item)
+                .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 6))
             }
             .listStyle(.inset)
         }
@@ -406,18 +517,149 @@ private struct ModelPickerSheet: View {
     }
 }
 
+private struct GatewaySettingsSheet: View {
+    @ObservedObject var model: ManagerModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "network")
+                    .foregroundStyle(Color.accentColor)
+                Text("网关连接")
+                    .font(.system(size: 17, weight: .semibold))
+                Spacer()
+                Button { dismiss() } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.borderless)
+                    .help("关闭")
+            }
+            Text(model.selectedProfile == nil || model.selectedProfile?.id == "free"
+                 ? "设置新 Key 使用的默认服务根地址。无需使用 CCHP；Claude 需要 Anthropic Messages 兼容接口，Codex 需要 OpenAI Responses 兼容接口。远程地址必须使用 HTTPS。"
+                 : "修改当前 Key 对应的网关服务根地址。远程地址必须使用 HTTPS。其他 Key 配置和已运行的终端不会改变。")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("http://127.0.0.1:8081", text: $model.gatewayDraft)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button {
+                    Task { await model.saveGateway() }
+                } label: {
+                    if model.isSavingGateway { ProgressView().controlSize(.small) }
+                    else { Text(model.selectedProfile == nil || model.selectedProfile?.id == "free" ? "保存为默认网关" : "保存到当前 Key") }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.gatewayDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isSavingGateway)
+            }
+        }
+        .padding(22)
+        .frame(width: 520)
+    }
+}
+
+private struct TerminalAppearanceSheet: View {
+    @ObservedObject var model: ManagerModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft = TerminalStyleSettings.defaults
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            HStack {
+                Image(systemName: "paintbrush.pointed")
+                    .foregroundStyle(Color.accentColor)
+                Text("共享终端外观")
+                    .font(.system(size: 17, weight: .semibold))
+                Spacer()
+                Menu("配色预设") {
+                    ForEach(TerminalThemePreset.all) { preset in
+                        Button(preset.title) {
+                            draft.foreground = preset.foreground
+                            draft.background = preset.background
+                            draft.cursor = preset.cursor
+                        }
+                    }
+                }
+            }
+            HStack {
+                Text("字体")
+                    .frame(width: 76, alignment: .leading)
+                TextField("SFMono-Regular", text: $draft.fontName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                Stepper("字号 \(Int(draft.fontSize))", value: $draft.fontSize, in: 9...24, step: 1)
+                    .frame(width: 150)
+            }
+            colorRow("文字", value: $draft.foreground)
+            colorRow("背景", value: $draft.background)
+            colorRow("光标", value: $draft.cursor)
+            Stepper("滚动缓冲 \(draft.scrollback) 行", value: $draft.scrollback, in: 500...20_000, step: 500)
+            Text("字体和颜色会同步应用到所有打开的 PTY；滚动缓冲对新建终端生效。此配置不含 Key 或会话信息。")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(model.terminalStyle.configURL.path)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .textSelection(.enabled)
+                .lineLimit(2)
+            if !model.terminalStyle.errorMessage.isEmpty {
+                Text(model.terminalStyle.errorMessage)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.orange)
+            }
+            HStack {
+                Button("打开 JSON") { model.terminalStyle.openConfigFile() }
+                Button("重新读取") {
+                    if model.terminalStyle.reload() { draft = model.terminalStyle.settings }
+                }
+                Spacer()
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("保存并应用") {
+                    model.terminalStyle.update(draft)
+                    if model.terminalStyle.errorMessage.isEmpty { dismiss() }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(22)
+        .frame(width: 520)
+        .onAppear { draft = model.terminalStyle.settings }
+    }
+
+    private func colorRow(_ title: String, value: Binding<String>) -> some View {
+        HStack {
+            Text(title)
+                .frame(width: 76, alignment: .leading)
+            Circle()
+                .fill(Color(nsColor: NSColor(hex: value.wrappedValue)))
+                .frame(width: 16, height: 16)
+            TextField("#RRGGBB", text: value)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11, design: .monospaced))
+                .frame(width: 115)
+        }
+    }
+}
+
 private struct AddProfileSheet: View {
     @ObservedObject var model: ManagerModel
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var key = ""
+    @State private var gateway = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Image(systemName: "key.horizontal")
                     .font(.system(size: 18))
-                    .foregroundStyle(Color.mint)
+                    .foregroundStyle(Color.accentColor)
                 Text("添加本机调用 Key")
                     .font(.system(size: 17, weight: .semibold))
                 Spacer()
@@ -435,14 +677,23 @@ private struct AddProfileSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("本机 CCHP 下游 Key")
+                Text("当前网关的调用 Key")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
-                SecureField("输入隐藏，不要填上游 Key", text: $key)
+                SecureField("输入此网关签发的调用 Key", text: $key)
                     .textFieldStyle(.roundedBorder)
             }
 
-            Label("只查询此 Key 的模型列表；不会发起推理。Key 以权限 600 保存于本机。",
+            VStack(alignment: .leading, spacing: 6) {
+                Text("网关地址")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                TextField("http://127.0.0.1:8081", text: $gateway)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+            }
+
+            Label("只查询当前网关的模型列表；不会发起推理。Key 以权限 600 保存于本机。",
                   systemImage: "lock.shield")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -465,7 +716,7 @@ private struct AddProfileSheet: View {
                 Spacer()
                 Button {
                     Task {
-                        if await model.addProfile(name: name, key: key) {
+                        if await model.addProfile(name: name, key: key, gateway: gateway) {
                             key = ""
                             dismiss()
                         }
@@ -478,9 +729,12 @@ private struct AddProfileSheet: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || key.isEmpty || model.isAddingProfile)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || key.isEmpty || gateway.isEmpty || model.isAddingProfile)
                 .keyboardShortcut(.defaultAction)
             }
+        }
+        .onAppear {
+            if gateway.isEmpty { gateway = model.gateway }
         }
         .padding(22)
         .frame(width: 440)

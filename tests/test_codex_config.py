@@ -17,12 +17,26 @@ SPEC.loader.exec_module(BACKEND)
 
 
 class CodexConfigTests(unittest.TestCase):
+    def test_session_modes_only_resume_when_requested(self):
+        BACKEND.CODEX = Path("/fake/codex")
+        workspace = Path("/tmp/project")
+
+        new_command = BACKEND.build_codex_command("model-a", workspace, "new")
+        continue_command = BACKEND.build_codex_command("model-a", workspace, "continue")
+        resume_command = BACKEND.build_codex_command("model-a", workspace, "resume")
+
+        self.assertNotIn("resume", new_command)
+        self.assertEqual(continue_command[1:3], ["resume", "--last"])
+        self.assertEqual(resume_command[1], "resume")
+        with self.assertRaises(RuntimeError):
+            BACKEND.build_codex_command("model-a", workspace, "unknown")
+
     def test_creates_private_responses_provider_per_key(self):
         with tempfile.TemporaryDirectory() as temporary:
             BACKEND.CODEX_HOME_ROOT = Path(temporary)
 
-            first_home = BACKEND.codex_config("p-test-one", "glm-5.3")
-            second_home = BACKEND.codex_config("p-test-two", "kimi-for-coding-highspeed")
+            first_home = BACKEND.codex_config("p-test-one", "glm-5.3", "http://127.0.0.1:8091")
+            second_home = BACKEND.codex_config("p-test-two", "kimi-for-coding-highspeed", "http://127.0.0.1:8092")
 
             first_path = first_home / "config.toml"
             first_text = first_path.read_text()
@@ -36,14 +50,14 @@ class CodexConfigTests(unittest.TestCase):
             if first is not None:
                 self.assertEqual(first["model"], "glm-5.3")
                 self.assertEqual(first["model_provider"], "cchp_local")
-                self.assertEqual(first["model_providers"]["cchp_local"]["base_url"], "http://127.0.0.1:8081/v1")
+                self.assertEqual(first["model_providers"]["cchp_local"]["base_url"], "http://127.0.0.1:8091/v1")
                 self.assertEqual(first["model_providers"]["cchp_local"]["wire_api"], "responses")
                 self.assertEqual(first["model_providers"]["cchp_local"]["env_key"], "CCH_API_KEY")
                 self.assertEqual(second["model"], "kimi-for-coding-highspeed")
             else:
                 self.assertIn('model = "glm-5.3"', first_text)
                 self.assertIn('model_provider = "cchp_local"', first_text)
-                self.assertIn('base_url = "http://127.0.0.1:8081/v1"', first_text)
+                self.assertIn('base_url = "http://127.0.0.1:8091/v1"', first_text)
                 self.assertIn('wire_api = "responses"', first_text)
                 self.assertIn('env_key = "CCH_API_KEY"', first_text)
                 self.assertIn('model = "kimi-for-coding-highspeed"', second_text)

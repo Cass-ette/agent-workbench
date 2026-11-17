@@ -16,7 +16,7 @@
 
 推荐按这个顺序操作：
 
-1. 打开 `http://localhost:8080`，完成本机 CCHP 的首次管理员初始化。
+1. 打开 `setup.command` 显示的管理地址（默认 `http://localhost:8080`），完成本机 CCHP 的首次管理员初始化。
 2. 在供应商管理中创建供应商、配置端点，并把自己的上游 API Key 保存在 CCHP 中。
 3. 在供应商分组和路由中限制模型范围；免费分组不要意外包含付费路由。
 4. 在下游 LLM 密钥页面创建一把客户端调用 Key，按需要绑定分组。
@@ -32,7 +32,7 @@
 - [Claude Code 客户端](https://cch-plus.com/en/docs/guide/claude-code)
 - [Codex 客户端](https://cch-plus.com/en/docs/guide/codex)
 
-管理地址为 `http://localhost:8080`，模型网关为 `http://127.0.0.1:8081/v1`。两个端口只绑定本机回环地址，不对局域网或公网开放。
+默认管理地址为 `http://localhost:8080`，模型网关为 `http://127.0.0.1:8081/v1`。如果这两个宿主端口被占用，`setup.command` 会自动选择可用端口并写入 `.env`；容器内部端口仍固定为 8080/8081。两个宿主端口只绑定本机回环地址，不对局域网或公网开放。
 
 ## 日常启停
 

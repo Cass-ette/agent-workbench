@@ -85,8 +85,8 @@ services:
       - cch_scratch:/var/cache/cchp
       - cch_pg:/var/lib/cchp/database:ro
     ports:
-      - "127.0.0.1:8080:8080"
-      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:${CCHP_CONTROL_PORT:-8080}:8080"
+      - "127.0.0.1:${CCHP_GATEWAY_PORT:-8081}:8081"
     healthcheck:
       test:
         - CMD

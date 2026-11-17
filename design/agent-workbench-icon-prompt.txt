@@ -1,0 +1,10 @@
+Use case: logo-brand
+Asset type: macOS app icon concept for a terminal-first AI agent workbench.
+Primary request: Create a distinctive, professionally art-directed application icon that communicates several coding agents running in parallel inside one terminal workspace. The recognizable signature is a compact stack of three independent command lanes, with one lane actively running.
+Scene/backdrop: A nearly black graphite field, simple and uninterrupted.
+Subject: Three bold, parallel terminal prompt lanes arranged as a single compact symbol. Each lane has a strong command chevron and a short horizontal command stroke. The top lane is active and ends in one small warm amber block cursor; the two lanes below are quieter, clearly separate sessions.
+Style/medium: Premium macOS developer-tool icon, restrained, confident, geometric, crisp silhouette, deliberate negative space, subtle material depth only if it helps legibility. Designed to read at Dock size.
+Composition/framing: One centered symbol, large and balanced, filling most of a square canvas. No mockup, no device, no surrounding app window, no text or lettering. Do not draw the macOS rounded-square app mask; use a full-bleed background.
+Color palette: Near-black graphite, warm ivory command marks, muted amber cursor. No green, purple, blue, rainbow or gradient palette.
+Constraints: Make the three parallel sessions the unmistakable differentiator from a standard single-terminal app. Keep shapes clean and few. Preserve strong contrast and a simple silhouette at 64 pixels.
+Avoid: Generic AI iconography, brains, neural webs, circuit traces, glowing nodes, orbs, sparkles, robot faces, chat bubbles, neon glow, glossy gradients, traffic-light window controls, tiny UI details, thin hairlines, stock 3D app-icon styling, extra borders, letters, and watermarks.

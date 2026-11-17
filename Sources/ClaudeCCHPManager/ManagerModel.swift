@@ -5,6 +5,7 @@ import Foundation
 struct KeyProfile: Decodable, Identifiable, Hashable {
     let id: String
     let name: String
+    let gateway: String?
 }
 
 struct LastLaunch: Decodable {
@@ -24,12 +25,92 @@ private struct GatewayState: Decodable {
 
 private struct ModelResponse: Decodable {
     let models: [String]
+    let gateway: String?
+}
+
+struct UsageSession: Decodable, Identifiable, Equatable {
+    let id: String
+    let client: String
+    let model: String
+    let workspace: String
+    let input_tokens: Int?
+    let output_tokens: Int?
+    let cached_input_tokens: Int?
+    let cache_creation_input_tokens: Int?
+    let reasoning_output_tokens: Int?
+    let estimated_cost: Double?
+    let estimated_cost_upper: Double?
+    let pricing_note: String?
+    let cost_source: String?
+
+    var costLabel: String { usageCostLabel(estimated_cost, upper: estimated_cost_upper, label: cost_source == "client" ? "客户端估算" : cost_source == "reference" ? "参考估算" : "网关单价估算") }
+}
+
+struct UsageSnapshot: Decodable, Equatable {
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let cachedInputTokens: Int?
+    let cacheCreationInputTokens: Int?
+    let reasoningOutputTokens: Int?
+    let requests: Int
+    let bySource: [String: Int]
+    let pricingStatus: String
+    let estimatedCost: Double?
+    var estimatedCostUpper: Double? = nil
+    var pricedSessions: Int? = nil
+    var unpricedSessions: Int? = nil
+    var pricingNotice: String? = nil
+    let sessions: [UsageSession]
+    let unreadableFiles: Int
+
+    enum CodingKeys: String, CodingKey {
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
+        case cachedInputTokens = "cached_input_tokens"
+        case cacheCreationInputTokens = "cache_creation_input_tokens"
+        case reasoningOutputTokens = "reasoning_output_tokens"
+        case requests
+        case bySource = "by_source"
+        case pricingStatus = "pricing_status"
+        case estimatedCost = "estimated_cost"
+        case estimatedCostUpper = "estimated_cost_upper"
+        case pricedSessions = "priced_sessions"
+        case unpricedSessions = "unpriced_sessions"
+        case pricingNotice = "pricing_notice"
+        case sessions
+        case unreadableFiles = "unreadable_files"
+    }
+
+    static let empty = UsageSnapshot(inputTokens: nil, outputTokens: nil,
+                                     cachedInputTokens: nil, cacheCreationInputTokens: nil,
+                                     reasoningOutputTokens: nil, requests: 0,
+                                     bySource: [:], pricingStatus: "unavailable",
+                                     estimatedCost: nil, sessions: [], unreadableFiles: 0)
+
+    var costLabel: String {
+        let label = pricingStatus.contains("partial") ? "部分会话估算" : pricingStatus.contains("reference") ? "含参考值估算" : pricingStatus.contains("mixed") ? "混合来源估算" : pricingStatus.contains("catalog") ? "网关单价估算" : "客户端估算"
+        return usageCostLabel(estimatedCost, upper: estimatedCostUpper, label: label)
+    }
+}
+
+func usageCount(_ value: Int?) -> String { value.map { $0.formatted() } ?? "—" }
+
+func usageCostLabel(_ cost: Double?, upper: Double?, label: String) -> String {
+    guard let cost else { return "待匹配单价 · 可在网关售价中设置来源" }
+    if let upper, upper > cost + 0.00000001 { return String(format: "%@ $%.4f–$%.4f", label, cost, upper) }
+    if cost > 0 && cost < 0.0001 { return label + " <$0.0001" }
+    return String(format: "%@ $%.4f", label, cost)
 }
 
 private struct AddedProfile: Decodable {
     let id: String
     let name: String
+    let gateway: String
     let model_count: Int
+}
+
+private struct GatewayUpdateResponse: Decodable {
+    let gateway: String
 }
 
 enum SessionMode: String, CaseIterable, Identifiable {
@@ -44,6 +125,14 @@ enum SessionMode: String, CaseIterable, Identifiable {
         case .new: "新会话"
         case .continue: "继续最近会话"
         case .resume: "选择历史会话"
+        }
+    }
+
+    var compactTitle: String {
+        switch self {
+        case .new: "新会话"
+        case .continue: "继续"
+        case .resume: "恢复"
         }
     }
 }
@@ -62,9 +151,33 @@ enum ClientKind: String, CaseIterable, Identifiable {
     }
 }
 
+enum ModelFilter: String, CaseIterable, Identifiable {
+    case all
+    case favorites
+    case codingNames
+    case visionNames
+    case imageNames
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: "全部"
+        case .favorites: "收藏"
+        case .codingNames: "编程名候选"
+        case .visionNames: "视觉名候选"
+        case .imageNames: "图像生成名候选"
+        }
+    }
+}
+
 private struct BackendError: LocalizedError, Sendable {
     let message: String
     var errorDescription: String? { message }
+}
+
+private func shellQuote(_ value: String) -> String {
+    "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
 struct TerminalLaunchSpec: Equatable {
@@ -73,6 +186,47 @@ struct TerminalLaunchSpec: Equatable {
     let arguments: [String]
     let workspace: String
     let environment: [String]
+}
+
+@MainActor
+final class TerminalSession: ObservableObject, Identifiable {
+    let id: UUID
+    let client: ClientKind
+    let profileID: String
+    let profileName: String
+    let model: String
+    let workspace: String
+    let sessionMode: SessionMode
+    let gateway: String
+    let launchSpec: TerminalLaunchSpec
+    let control = EmbeddedTerminalControl()
+    @Published private(set) var isRunning = true
+    @Published private(set) var exitCode: Int32?
+
+    init(client: ClientKind, profile: KeyProfile, model: String, workspace: String,
+         sessionMode: SessionMode, gateway: String, launchSpec: TerminalLaunchSpec) {
+        id = launchSpec.id
+        self.client = client
+        profileID = profile.id
+        profileName = profile.name
+        self.model = model
+        self.workspace = workspace
+        self.sessionMode = sessionMode
+        self.gateway = gateway
+        self.launchSpec = launchSpec
+    }
+
+    var title: String { "\(client.title) · \(model)" }
+    var workspaceName: String { URL(fileURLWithPath: workspace).lastPathComponent }
+
+    func stop() {
+        control.stop()
+    }
+
+    func processDidExit(_ code: Int32?) {
+        exitCode = code
+        isRunning = false
+    }
 }
 
 private struct BackendClient: Sendable {
@@ -154,13 +308,19 @@ final class ManagerModel: ObservableObject {
     @Published var models: [String] = []
     @Published var selectedModel = ""
     @Published var modelSearch = ""
+    @Published var modelFilter: ModelFilter = .all
     @Published var workspace = ""
     @Published var workspaces: [String] = []
     @Published var sessionMode: SessionMode = .new
     @Published var gateway = "http://127.0.0.1:8081"
+    @Published var defaultGateway = "http://127.0.0.1:8081"
     @Published var isLoading = true
     @Published var isLoadingModels = false
     @Published var isModelPickerPresented = false
+    @Published var isGatewaySettingsPresented = false
+    @Published var isTerminalAppearancePresented = false
+    @Published var gatewayDraft = "http://127.0.0.1:8081"
+    @Published var isSavingGateway = false
     @Published var isAddProfilePresented = false
     @Published var isAddingProfile = false
     @Published var isRestoreConfirmationPresented = false
@@ -168,11 +328,34 @@ final class ManagerModel: ObservableObject {
     @Published var addProfileStatus = ""
     @Published var statusMessage = "正在读取本机配置…"
     @Published var isStatusError = false
-    @Published var embeddedLaunchSpec: TerminalLaunchSpec?
-    @Published var agentRunning = false
+    @Published var terminalSessions: [TerminalSession] = []
+    @Published var selectedTerminalID: UUID?
+    @Published var usage = UsageSnapshot.empty
+    @Published var isLoadingUsage = false
+    @Published var usageError = ""
+    @Published var gatewayAccount: GatewayAccount?
+    @Published var gatewayBilling: GatewayBilling?
+    @Published var isLoadingGatewayUsage = false
+    @Published var gatewayUsageError = ""
+    @Published var isBillingSettingsPresented = false
+    @Published var billingConsoleDraft = ""
+    @Published var billingTokenDraft = ""
+    @Published var billingSettingsError = ""
+    @Published var hasBillingToken = false
+    @Published var isSavingBilling = false
+    @Published var modelPricing: ModelPricingSnapshot?
+    @Published var isLoadingPricing = false
+    @Published var pricingError = ""
+    @Published private var favoriteKeys = Set(UserDefaults.standard.stringArray(forKey: "models.favorite") ?? [])
+    let terminalStyle = SharedTerminalStyle()
 
     private var backend: BackendClient?
     private var pendingSessionMode: SessionMode = .new
+    private var gatewayUsageRequest: UUID?
+    private var lastGatewayUsage: Date?
+    private var lastPricingRefresh: Date?
+    private var pricingRequest: UUID?
+    private var billingSettingsProfileID = ""
 
     init() {
         activeClient = ClientKind(rawValue: UserDefaults.standard.string(forKey: "client.kind") ?? "") ?? .claude
@@ -182,9 +365,89 @@ final class ManagerModel: ObservableObject {
         profiles.first { $0.id == selectedProfileID }
     }
 
+    var selectedTerminal: TerminalSession? {
+        terminalSessions.first { $0.id == selectedTerminalID }
+    }
+
+    var agentRunning: Bool { terminalSessions.contains(where: \.isRunning) }
+
+    var runningSessionCount: Int { terminalSessions.filter(\.isRunning).count }
+
     var filteredModels: [String] {
-        guard !modelSearch.isEmpty else { return models }
-        return models.filter { $0.localizedCaseInsensitiveContains(modelSearch) }
+        models.filter { item in
+            let matchesSearch = modelSearch.isEmpty || item.localizedCaseInsensitiveContains(modelSearch)
+            let matchesFilter: Bool
+            switch modelFilter {
+            case .all: matchesFilter = true
+            case .favorites: matchesFilter = isFavorite(item)
+            case .codingNames: matchesFilter = Self.hasNameHint(item, terms: ["code", "coder", "coding", "devstral", "codestral", "kimi", "deepseek", "qwen", "glm", "minimax", "claude", "gpt"])
+            case .visionNames: matchesFilter = Self.hasNameHint(item, terms: ["vision", "-vl", "_vl", "visual", "multimodal"])
+            case .imageNames: matchesFilter = Self.hasNameHint(item, terms: ["image", "dall-e", "dalle", "flux", "imagen", "seedream", "nano-banana", "stable-diffusion"])
+            }
+            return matchesSearch && matchesFilter
+        }
+    }
+
+    private static func hasNameHint(_ model: String, terms: [String]) -> Bool {
+        let identifier = model.lowercased()
+        return terms.contains { identifier.contains($0) }
+    }
+
+    private func favoriteKey(_ model: String) -> String {
+        "\(activeClient.rawValue)|\(selectedProfileID)|\(model)"
+    }
+
+    func isFavorite(_ model: String) -> Bool {
+        favoriteKeys.contains(favoriteKey(model))
+    }
+
+    func toggleFavorite(_ model: String) {
+        var favorites = favoriteKeys
+        let key = favoriteKey(model)
+        if favorites.contains(key) { favorites.remove(key) } else { favorites.insert(key) }
+        favoriteKeys = favorites
+        UserDefaults.standard.set(Array(favorites).sorted(), forKey: "models.favorite")
+    }
+
+    func showGatewaySettings() {
+        gatewayDraft = gateway
+        isGatewaySettingsPresented = true
+    }
+
+    func showTerminalAppearance() {
+        isTerminalAppearancePresented = true
+    }
+
+    func saveGateway() async {
+        guard let backend else { return }
+        isSavingGateway = true
+        defer { isSavingGateway = false }
+        do {
+            let payload = try JSONSerialization.data(withJSONObject: ["url": gatewayDraft])
+            let profileID = selectedProfile?.id
+            let action: [String]
+            if let profileID, profileID != "free" {
+                action = ["set-profile-gateway-stdin", "--profile-id", profileID]
+            } else {
+                action = ["set-gateway-stdin"]
+            }
+            let data = try await backend.run(action, stdin: payload)
+            let saved = try JSONDecoder().decode(GatewayUpdateResponse.self, from: data)
+            let value = saved.gateway
+            gateway = value
+            if profileID == nil || profileID == "free" { defaultGateway = value }
+            if let profileID, let index = profiles.firstIndex(where: { $0.id == profileID }) {
+                profiles[index] = KeyProfile(id: profiles[index].id, name: profiles[index].name, gateway: value)
+            }
+            isGatewaySettingsPresented = false
+            statusMessage = "网关地址已保存；正在刷新当前 Key 的模型列表。"
+            isStatusError = false
+            resetGatewayUsage()
+            if !selectedProfileID.isEmpty { await loadModels(for: selectedProfileID) }
+            await refreshGatewayUsage()
+        } catch {
+            setError(error.localizedDescription)
+        }
     }
 
     func load() async {
@@ -193,6 +456,7 @@ final class ManagerModel: ObservableObject {
             backend = client
             let data = try await client.run(["gui-state"])
             let state = try JSONDecoder().decode(GatewayState.self, from: data)
+            defaultGateway = state.gateway
             gateway = state.gateway
             profiles = state.profiles
             workspaces = state.workspaces
@@ -203,51 +467,212 @@ final class ManagerModel: ObservableObject {
                 selectedProfileID = last.profile_id
                 workspace = last.workspace
                 selectedModel = last.model
-                sessionMode = SessionMode(rawValue: last.session_mode) ?? .new
             } else {
                 selectedProfileID = profiles.first?.id ?? ""
                 workspace = state.workspaces.first ?? NSHomeDirectory()
             }
+            if let profileGateway = selectedProfile?.gateway { gateway = profileGateway }
             isLoading = false
             if !selectedProfileID.isEmpty {
                 await loadModels(for: selectedProfileID)
             } else {
-                statusMessage = "添加一把本机 CCHP 调用 Key 后开始使用。"
+                statusMessage = "添加一把当前网关的调用 Key 后开始使用。"
             }
+            await refreshUsage()
+            await refreshGatewayUsage()
         } catch {
             isLoading = false
             setError(error.localizedDescription)
         }
+    }
+
+    func refreshUsage() async {
+        guard let backend, !isLoadingUsage else { return }
+        isLoadingUsage = true
+        defer { isLoadingUsage = false }
+        do {
+            let data = try await backend.run(["usage"])
+            usage = try JSONDecoder().decode(UsageSnapshot.self, from: data)
+            usageError = ""
+        } catch {
+            usageError = "用量读取失败；保留上次结果"
+        }
+    }
+
+    func refreshPricing(force: Bool = false) async {
+        guard let backend, !selectedProfileID.isEmpty, !isLoadingPricing else { return }
+        if !force, let lastPricingRefresh, Date().timeIntervalSince(lastPricingRefresh) < 300 { return }
+        let profileID = selectedProfileID, requestGateway = gateway, request = UUID()
+        pricingRequest = request
+        isLoadingPricing = true
+        defer { if pricingRequest == request { isLoadingPricing = false } }
+        do {
+            let data = try await backend.run(["profile-pricing", "--profile-id", profileID] + (force ? ["--force"] : []))
+            let snapshot = try JSONDecoder().decode(ModelPricingSnapshot.self, from: data)
+            guard pricingRequest == request, selectedProfileID == profileID, gateway == requestGateway,
+                  snapshot.gateway == requestGateway else { return }
+            modelPricing = snapshot
+            pricingError = ""
+            lastPricingRefresh = Date()
+            await refreshUsage()
+        } catch {
+            guard pricingRequest == request, selectedProfileID == profileID else { return }
+            pricingError = "价格刷新失败，保留缓存；可指定公开价格来源。"
+            lastPricingRefresh = Date()
+        }
+    }
+
+    func savePricingSource(_ url: String) async {
+        guard let backend, !isLoadingPricing else { return }
+        let profileID = selectedProfileID, requestGateway = gateway, request = UUID()
+        pricingRequest = request
+        isLoadingPricing = true
+        defer { if pricingRequest == request { isLoadingPricing = false } }
+        do {
+            let payload = try JSONSerialization.data(withJSONObject: ["url": url])
+            let data = try await backend.run(["save-pricing-source-stdin", "--profile-id", profileID], stdin: payload)
+            guard pricingRequest == request, selectedProfileID == profileID, gateway == requestGateway else { return }
+            modelPricing = try JSONDecoder().decode(ModelPricingSnapshot.self, from: data)
+            pricingError = ""
+            lastPricingRefresh = Date()
+            await refreshUsage()
+        } catch {
+            guard pricingRequest == request, selectedProfileID == profileID else { return }
+            pricingError = "公开地址校验失败，未改变价格来源。"
+        }
+    }
+
+    private func resetGatewayUsage() {
+        pricingRequest = nil
+        modelPricing = nil
+        pricingError = ""
+        isLoadingPricing = false
+        lastPricingRefresh = nil
+        gatewayUsageRequest = nil
+        gatewayAccount = nil
+        gatewayBilling = nil
+        gatewayUsageError = ""
+        isLoadingGatewayUsage = false
+        lastGatewayUsage = nil
+    }
+
+    func refreshGatewayUsage(force: Bool = false) async {
+        guard let backend, let profile = selectedProfile, !isLoadingGatewayUsage else { return }
+        if !force, let lastGatewayUsage, Date().timeIntervalSince(lastGatewayUsage) < 60 { return }
+        let requestID = UUID()
+        let profileID = profile.id
+        let requestGateway = gateway
+        gatewayUsageRequest = requestID
+        isLoadingGatewayUsage = true
+        defer {
+            if gatewayUsageRequest == requestID { isLoadingGatewayUsage = false }
+        }
+        do {
+            async let accountData = backend.run(["profile-account", "--profile-id", profileID])
+            async let billData = backend.run(["profile-billing", "--profile-id", profileID])
+            let (account, bills) = try await (accountData, billData)
+            let decodedAccount = try JSONDecoder().decode(GatewayAccount.self, from: account)
+            let decodedBills = try JSONDecoder().decode(GatewayBilling.self, from: bills)
+            guard gatewayUsageRequest == requestID, selectedProfileID == profileID, gateway == requestGateway,
+                  decodedAccount.gateway == requestGateway, decodedBills.gateway == requestGateway else { return }
+            gatewayAccount = decodedAccount
+            gatewayBilling = decodedBills
+            gatewayUsageError = ""
+            lastGatewayUsage = Date()
+        } catch {
+            guard gatewayUsageRequest == requestID, selectedProfileID == profileID, gateway == requestGateway else { return }
+            gatewayUsageError = "网关查询失败；如有旧结果，请以其查询时间为准。"
+            lastGatewayUsage = Date()
+        }
+    }
+
+    func showBillingSettings() async {
+        guard let backend, let profile = selectedProfile else { return }
+        billingSettingsProfileID = profile.id
+        billingTokenDraft = ""
+        billingSettingsError = ""
+        do {
+            let data = try await backend.run(["billing-settings", "--profile-id", profile.id])
+            guard selectedProfileID == profile.id else { return }
+            let settings = try JSONDecoder().decode(BillingSettings.self, from: data)
+            billingConsoleDraft = settings.console
+            hasBillingToken = settings.configured
+            isBillingSettingsPresented = true
+        } catch { gatewayUsageError = error.localizedDescription }
+    }
+
+    func saveBillingSettings() async {
+        guard let backend, selectedProfileID == billingSettingsProfileID, !isSavingBilling else { return }
+        let profileID = billingSettingsProfileID
+        isSavingBilling = true
+        billingSettingsError = ""
+        defer { isSavingBilling = false }
+        do {
+            let payload = try JSONSerialization.data(withJSONObject: ["console": billingConsoleDraft, "token": billingTokenDraft])
+            let data = try await backend.run(["save-billing-stdin", "--profile-id", profileID], stdin: payload)
+            guard selectedProfileID == profileID else { return }
+            gatewayBilling = try JSONDecoder().decode(GatewayBilling.self, from: data)
+            billingTokenDraft = ""
+            hasBillingToken = true
+            isBillingSettingsPresented = false
+            lastGatewayUsage = nil
+        } catch { billingSettingsError = error.localizedDescription }
+    }
+
+    func disconnectBilling() async {
+        guard let backend, selectedProfileID == billingSettingsProfileID, !isSavingBilling else { return }
+        isSavingBilling = true
+        defer { isSavingBilling = false }
+        do {
+            _ = try await backend.run(["remove-billing", "--profile-id", billingSettingsProfileID])
+            gatewayBilling = nil
+            hasBillingToken = false
+            billingTokenDraft = ""
+            isBillingSettingsPresented = false
+            lastGatewayUsage = nil
+            await refreshGatewayUsage(force: true)
+        } catch { billingSettingsError = error.localizedDescription }
     }
 
     func selectProfile(_ profile: KeyProfile) async {
         guard selectedProfileID != profile.id else { return }
         selectedProfileID = profile.id
+        gateway = profile.gateway ?? defaultGateway
         selectedModel = ""
+        resetGatewayUsage()
+        async let gatewayRefresh: () = refreshGatewayUsage()
         await loadModels(for: profile.id)
+        await gatewayRefresh
     }
 
     func loadModels(for profileID: String) async {
         guard let backend else { return }
+        let requestGateway = gateway
         isLoadingModels = true
+        defer {
+            if selectedProfileID == profileID, gateway == requestGateway { isLoadingModels = false }
+        }
         do {
             let data = try await backend.run(["profile-models", "--profile-id", profileID])
             let response = try JSONDecoder().decode(ModelResponse.self, from: data)
+            guard selectedProfileID == profileID, gateway == requestGateway else { return }
             models = response.models.sorted()
+            if let responseGateway = response.gateway { gateway = responseGateway }
             if !models.contains(selectedModel) {
                 selectedModel = models.first ?? ""
             }
             statusMessage = "\(models.count) 个可用模型"
             isStatusError = false
+            await refreshPricing()
         } catch {
+            guard selectedProfileID == profileID, gateway == requestGateway else { return }
             models = []
             selectedModel = ""
             setError(error.localizedDescription)
         }
-        isLoadingModels = false
     }
 
-    func addProfile(name: String, key: String) async -> Bool {
+    func addProfile(name: String, key: String, gateway profileGateway: String) async -> Bool {
         guard let backend else {
             addProfileError = "本机后端尚未就绪。"
             return false
@@ -256,13 +681,16 @@ final class ManagerModel: ObservableObject {
         addProfileError = ""
         addProfileStatus = "正在仅查询模型白名单…"
         do {
-            let payload = try JSONSerialization.data(withJSONObject: ["name": name, "key": key])
+            let payload = try JSONSerialization.data(withJSONObject: ["name": name, "key": key, "gateway": profileGateway])
             let data = try await backend.run(["add-profile-stdin"], stdin: payload)
             let added = try JSONDecoder().decode(AddedProfile.self, from: data)
             try await refreshProfiles()
             selectedProfileID = added.id
+            gateway = added.gateway
             selectedModel = ""
+            resetGatewayUsage()
             await loadModels(for: added.id)
+            await refreshGatewayUsage()
             addProfileStatus = "已保存；找到 \(added.model_count) 个模型，未发起推理。"
             isAddingProfile = false
             return true
@@ -309,37 +737,42 @@ final class ManagerModel: ObservableObject {
     }
 
     func requestLaunch() {
-        guard !agentRunning else {
-            setError("当前 agent 仍在运行；请先停止它，再启动新会话。")
-            return
-        }
         guard !selectedProfileID.isEmpty, !selectedModel.isEmpty, !workspace.isEmpty else {
             setError("请选择调用 Key、模型和工作目录。")
             return
         }
+        pendingSessionMode = sessionMode
         if sessionMode == .new {
             launchConfirmed()
         } else {
-            pendingSessionMode = sessionMode
             isRestoreConfirmationPresented = true
         }
     }
 
     func launchConfirmed() {
-        guard !agentRunning, let backend, let selectedProfile else { return }
-        let mode = pendingSessionMode == .new ? sessionMode : pendingSessionMode
+        guard let backend, let selectedProfile else { return }
+        let mode = pendingSessionMode
         let action = activeClient == .codex ? "codex-launch" : "launch"
-        embeddedLaunchSpec = TerminalLaunchSpec(
-            executable: backend.pythonPath,
-            arguments: [backend.scriptURL.path, action,
-                        "--profile-id", selectedProfile.id,
-                        "--model", selectedModel,
-                        "--workspace", workspace,
-                        "--session-mode", mode.rawValue],
+        let shellPath = ProcessInfo.processInfo.environment["SHELL"].flatMap {
+            FileManager.default.isExecutableFile(atPath: $0) ? $0 : nil
+        } ?? "/bin/zsh"
+        let backendArguments = [backend.scriptURL.path, action,
+                                "--profile-id", selectedProfile.id,
+                                "--model", selectedModel,
+                                "--workspace", workspace,
+                                "--session-mode", mode.rawValue,
+                                "--gateway-url", gateway]
+        let backendCommand = ([backend.pythonPath] + backendArguments).map(shellQuote).joined(separator: " ")
+        let inheritedPath = ProcessInfo.processInfo.environment["PATH"] ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        let terminalPath = "\(NSHomeDirectory())/.local/bin:\(inheritedPath)"
+        let launch = TerminalLaunchSpec(
+            executable: shellPath,
+            arguments: ["-l", "-i", "-c", "trap ':' INT; \(backendCommand); exec \(shellQuote(shellPath)) -l -i"],
             workspace: workspace,
             environment: [
                 "HOME=\(NSHomeDirectory())",
-                "PATH=\(ProcessInfo.processInfo.environment["PATH"] ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")",
+                "PATH=\(terminalPath)",
+                "SHELL=\(shellPath)",
                 "TERM=xterm-256color",
                 "COLORTERM=truecolor",
                 "LANG=en_US.UTF-8",
@@ -347,18 +780,33 @@ final class ManagerModel: ObservableObject {
                 "no_proxy=127.0.0.1,localhost,::1",
             ]
         )
-        agentRunning = true
-        statusMessage = "\(activeClient.title) 已在内嵌终端启动。"
+        let session = TerminalSession(client: activeClient, profile: selectedProfile,
+                                      model: selectedModel, workspace: workspace,
+                                      sessionMode: mode, gateway: gateway, launchSpec: launch)
+        terminalSessions.append(session)
+        selectedTerminalID = session.id
+        pendingSessionMode = .new
+        statusMessage = "已创建独立的 \(activeClient.title) 终端会话。"
         isStatusError = false
     }
 
-    func processDidExit(_ exitCode: Int32?) {
-        agentRunning = false
+    func processDidExit(sessionID: UUID, exitCode: Int32?) {
+        guard let session = terminalSessions.first(where: { $0.id == sessionID }) else { return }
+        session.processDidExit(exitCode)
+        Task { await refreshUsage() }
         if let exitCode, exitCode != 0 {
-            setError("\(activeClient.title) 已退出，状态码 \(exitCode)。")
+            setError("\(session.client.title) 已退出，状态码 \(exitCode)。")
         } else {
-            statusMessage = "\(activeClient.title) 会话已结束。"
+            statusMessage = "\(session.client.title) 会话已结束。"
             isStatusError = false
+        }
+    }
+
+    func closeSession(_ session: TerminalSession) {
+        if session.isRunning { session.stop() }
+        terminalSessions.removeAll { $0.id == session.id }
+        if selectedTerminalID == session.id {
+            selectedTerminalID = terminalSessions.last?.id
         }
     }
 

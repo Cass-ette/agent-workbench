@@ -6,10 +6,12 @@
 	<string>zh_CN</string>
 	<key>CFBundleExecutable</key>
 	<string>ClaudeCCHPManager</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.cassette.cchpmodelmanager</string>
 	<key>CFBundleName</key>
-	<string>CCHP Model Manager</string>
+	<string>Agent 工作台</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

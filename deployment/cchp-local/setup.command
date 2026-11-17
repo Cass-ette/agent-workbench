@@ -4,6 +4,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+port_is_free() {
+    [[ "$1" =~ '^[0-9]{1,5}$' ]] || return 1
+    (( $1 > 0 && $1 <= 65535 )) || return 1
+    ! lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+pick_port() {
+    local candidate="$1"
+    while (( candidate <= 65535 )) && ! port_is_free "$candidate"; do
+        candidate=$((candidate + 1))
+    done
+    if (( candidate > 65535 )); then
+        print -u2 "找不到可用的本机端口。请关闭占用 8080 附近端口的服务后重试。"
+        return 1
+    fi
+    print "$candidate"
+}
+
 if ! command -v docker >/dev/null 2>&1; then
     print -u2 "未找到 Docker。请先安装并启动 Docker Desktop，再重新运行此脚本。"
     exit 1
@@ -31,19 +49,54 @@ else
     print "发现已有 .env，保留现有安装密钥。"
 fi
 
+control_port="$(grep '^CCHP_CONTROL_PORT=' .env | cut -d= -f2- || true)"
+gateway_port="$(grep '^CCHP_GATEWAY_PORT=' .env | cut -d= -f2- || true)"
+control_port="${control_port:-8080}"
+gateway_port="${gateway_port:-8081}"
+if ! curl --silent --fail "http://127.0.0.1:${control_port}/readyz" >/dev/null \
+    || ! curl --silent --fail "http://127.0.0.1:${gateway_port}/readyz" >/dev/null; then
+    if ! port_is_free "$control_port"; then
+        control_port="$(pick_port 8080)"
+    fi
+    if [[ "$gateway_port" == "$control_port" ]] || ! port_is_free "$gateway_port"; then
+        gateway_port="$(pick_port $((control_port + 1)))"
+    fi
+fi
+
+# Host ports can move when another local service owns 8080/8081. The container
+# ports remain 8080/8081, so CCHP's internal health checks and peer URLs do not change.
+for name in CCHP_CONTROL_PORT CCHP_GATEWAY_PORT CCH_PUBLIC_BASE_URL CCH_GATEWAY_PUBLIC_URL; do
+    if ! grep -q "^${name}=" .env; then
+        print "${name}=" >> .env
+    fi
+done
+/usr/bin/sed -i '' "s|^CCHP_CONTROL_PORT=.*$|CCHP_CONTROL_PORT=${control_port}|" .env
+/usr/bin/sed -i '' "s|^CCHP_GATEWAY_PORT=.*$|CCHP_GATEWAY_PORT=${gateway_port}|" .env
+/usr/bin/sed -i '' "s|^CCH_PUBLIC_BASE_URL=.*$|CCH_PUBLIC_BASE_URL=http://localhost:${control_port}|" .env
+/usr/bin/sed -i '' "s|^CCH_GATEWAY_PUBLIC_URL=.*$|CCH_GATEWAY_PUBLIC_URL=http://localhost:${gateway_port}|" .env
+
+print "本机控制台端口：${control_port}；模型网关端口：${gateway_port}"
+
 print "正在下载 CCHP 容器镜像并启动本机服务……"
 docker compose pull
 docker compose up -d
 
 print "等待 CCHP 就绪……"
 for attempt in {1..60}; do
-    if curl --silent --fail http://127.0.0.1:8080/readyz >/dev/null \
-        && curl --silent --fail http://127.0.0.1:8081/readyz >/dev/null; then
+    if curl --silent --fail "http://127.0.0.1:${control_port}/readyz" >/dev/null \
+        && curl --silent --fail "http://127.0.0.1:${gateway_port}/readyz" >/dev/null; then
+        manager_backend="${SCRIPT_DIR}/../../backend/claude-cchp-test.py"
+        if [[ -r "$manager_backend" ]] && command -v python3 >/dev/null 2>&1; then
+            if ! printf '{"url":"http://127.0.0.1:%s"}\n' "$gateway_port" \
+                | python3 "$manager_backend" set-gateway-stdin >/dev/null; then
+                print -u2 "管理器网关配置未自动更新；可在应用内将默认网关设置为 http://127.0.0.1:${gateway_port}。"
+            fi
+        fi
         print "CCHP 已启动。"
-        print "管理控制台：http://localhost:8080"
-        print "模型网关：http://127.0.0.1:8081/v1"
+        print "管理控制台：http://localhost:${control_port}"
+        print "模型网关：http://127.0.0.1:${gateway_port}/v1"
         print "接下来在控制台添加你自己的上游供应商 Key，并创建下游调用 Key。"
-        open http://localhost:8080
+        open "http://localhost:${control_port}"
         exit 0
     fi
     sleep 2

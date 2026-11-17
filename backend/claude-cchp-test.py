@@ -4,6 +4,7 @@
 import argparse
 import getpass
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import time
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import ProxyHandler, Request, build_opener
 
 
@@ -33,6 +35,49 @@ CLAUDE = USER_ROOT / ".local/bin/claude"
 CODEX = USER_ROOT / ".local/bin/codex"
 GATEWAY = "http://127.0.0.1:8081"
 DEFAULT_MODEL = "kimi-for-coding-highspeed"
+GATEWAY_CONFIG = TEST_ROOT / "gateway.json"
+
+
+def normalize_gateway(value):
+    value = value.strip().rstrip("/")
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError("网关地址必须是完整的 http:// 或 https:// 地址。")
+    if parsed.query or parsed.fragment or "@" in parsed.netloc:
+        raise RuntimeError("网关地址不能包含查询参数、片段或账号密码。")
+    if parsed.path not in {"", "/", "/v1"}:
+        raise RuntimeError("网关地址填写服务根地址即可，例如 https://gateway.example.com。")
+    host = (parsed.hostname or "").lower()
+    loopback = host == "localhost"
+    try:
+        loopback = loopback or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = False
+    if parsed.scheme == "http" and not loopback:
+        raise RuntimeError("远程网关必须使用 HTTPS，避免下游调用 Key 明文传输。")
+    value = value[:-3] if value.endswith("/v1") else value
+    return value
+
+
+def gateway_url():
+    if GATEWAY_CONFIG.is_file():
+        try:
+            data = json.loads(GATEWAY_CONFIG.read_text())
+            if isinstance(data, dict) and isinstance(data.get("url"), str):
+                return normalize_gateway(data["url"])
+        except (OSError, ValueError, RuntimeError):
+            data = {}
+    configured = os.environ.get("CCHP_GATEWAY_URL", "").strip()
+    if configured:
+        return normalize_gateway(configured)
+    return GATEWAY
+
+
+def save_gateway(value):
+    value = normalize_gateway(value)
+    prepare_isolated_config()
+    private_write(GATEWAY_CONFIG, json.dumps({"url": value}, ensure_ascii=False, indent=2) + "\n")
+    return value
 
 
 def private_write(path, content):
@@ -83,17 +128,30 @@ def read_key():
 def load_profiles():
     profiles = []
     if KEY_FILE.is_file():
-        profiles.append({"id": "free", "name": "AutoBits 免费（默认）", "path": KEY_FILE})
+        profiles.append({"id": "free", "name": "AutoBits 免费（默认）", "path": KEY_FILE,
+                         "gateway": gateway_url()})
     if PROFILE_INDEX.is_file():
         data = json.loads(PROFILE_INDEX.read_text())
         if not isinstance(data, dict):
             raise RuntimeError("本机 Key 配置索引损坏，已停止且未修改。")
-        valid_profiles = [(profile_id, label) for profile_id, label in data.items()
-                          if isinstance(profile_id, str) and profile_id.startswith("p-") and isinstance(label, str)]
-        for profile_id, label in sorted(valid_profiles, key=lambda item: item[1]):
+        valid_profiles = []
+        for profile_id, value in data.items():
+            if not isinstance(profile_id, str) or not profile_id.startswith("p-"):
+                continue
+            if isinstance(value, str):
+                label, profile_gateway = value, gateway_url()
+            elif isinstance(value, dict) and isinstance(value.get("name"), str):
+                label = value["name"]
+                profile_gateway = value.get("gateway", gateway_url())
+                if not isinstance(profile_gateway, str):
+                    profile_gateway = gateway_url()
+            else:
+                continue
+            valid_profiles.append((profile_id, label, normalize_gateway(profile_gateway)))
+        for profile_id, label, profile_gateway in sorted(valid_profiles, key=lambda item: item[1]):
             path = KEY_DIR / (profile_id + ".key")
             if path.is_file():
-                profiles.append({"id": profile_id, "name": label, "path": path})
+                profiles.append({"id": profile_id, "name": label, "path": path, "gateway": profile_gateway})
     return profiles
 
 
@@ -109,7 +167,7 @@ def read_profile_key(profile):
     return value
 
 
-def save_profile_key(label, key):
+def save_profile_key(label, key, gateway=None):
     label = label.strip()
     if not label or len(label) > 80:
         raise RuntimeError("名称不能为空，且最多 80 个字符。")
@@ -119,7 +177,8 @@ def save_profile_key(label, key):
     key = key.strip()
     if len(key) < 20 or any(c.isspace() for c in key) or key[:1] in {"'", '"'}:
         raise RuntimeError("格式不正确；请粘贴完整 Key，不带引号、空格或换行。")
-    models = fetch_models(key)
+    gateway = normalize_gateway(gateway) if gateway else gateway_url()
+    models = fetch_models(key, gateway)
     prepare_isolated_config()
     KEY_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(KEY_DIR, 0o700)
@@ -130,10 +189,10 @@ def save_profile_key(label, key):
         if not isinstance(loaded, dict):
             raise RuntimeError("本机 Key 配置索引损坏，已停止且未覆盖。")
         index = loaded
-    index[profile_id] = label
+    index[profile_id] = {"name": label, "gateway": gateway}
     private_write(KEY_DIR / (profile_id + ".key"), key + "\n")
     private_write(PROFILE_INDEX, json.dumps(index, ensure_ascii=False, indent=2) + "\n")
-    return {"id": profile_id, "name": label, "model_count": len(models)}
+    return {"id": profile_id, "name": label, "gateway": gateway, "model_count": len(models)}
 
 
 def add_profile_key():
@@ -150,28 +209,185 @@ def add_profile_from_stdin():
     payload = json.load(sys.stdin)
     if not isinstance(payload, dict) or not isinstance(payload.get("name"), str) or not isinstance(payload.get("key"), str):
         raise RuntimeError("新增 Key 请求格式不正确。")
-    profile = save_profile_key(payload["name"], payload["key"])
-    print(json.dumps({"id": profile["id"], "name": profile["name"], "model_count": profile["model_count"]}, ensure_ascii=False))
+    profile = save_profile_key(payload["name"], payload["key"], payload.get("gateway"))
+    print(json.dumps({"id": profile["id"], "name": profile["name"], "gateway": profile["gateway"],
+                      "model_count": profile["model_count"]}, ensure_ascii=False))
 
 
 def gui_state():
     prepare_isolated_config()
     print(json.dumps({
-        "gateway": GATEWAY,
-        "profiles": [{"id": item["id"], "name": item["name"]} for item in load_profiles()],
+        "gateway": gateway_url(),
+        "profiles": [{"id": item["id"], "name": item["name"], "gateway": item["gateway"]}
+                     for item in load_profiles()],
         "last_launch": load_last_launch(MANAGER_LAST_LAUNCH),
         "workspaces": load_workspaces(),
     }, ensure_ascii=False))
 
 
-def profile_models(profile_id):
+def profile_models(profile_id, gateway_value=None):
     profile = next((item for item in load_profiles() if item["id"] == profile_id), None)
     if profile is None:
         raise RuntimeError("找不到所选调用 Key；请刷新列表。")
-    print(json.dumps({"profile_id": profile_id, "models": fetch_models(read_profile_key(profile))}, ensure_ascii=False))
+    gateway = normalize_gateway(gateway_value) if gateway_value else profile["gateway"]
+    print(json.dumps({"profile_id": profile_id, "gateway": gateway,
+                      "models": fetch_models(read_profile_key(profile), gateway)}, ensure_ascii=False))
 
 
-def launch_profile(profile_id, model, workspace_value, session_mode):
+def usage_snapshot():
+    """Read isolated records; estimate from cached public prices, without network."""
+    # Importing a bundled helper must not add files to the signed application.
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from usage_records import scan_usage
+    from model_pricing import apply_usage_pricing
+    service = pricing_service()
+    snapshot = scan_usage(CONFIG_DIR / "projects", CODEX_HOME_ROOT, include_pricing=True)
+    print(json.dumps(apply_usage_pricing(snapshot, service.resolve), ensure_ascii=False))
+
+
+def pricing_service(online=False, force=False):
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from pricing_service import PricingService
+    return PricingService(load_profiles(), TEST_ROOT / "pricing", read_profile_key, private_write, online, force)
+
+
+def profile_pricing(profile_id, force=False):
+    profile = billing_profile(profile_id)
+    service = pricing_service(online=True, force=force)
+    # Prime routing for all historic profiles, so the selected Key cannot change
+    # how unrelated sessions are priced. Calls only public/account metadata APIs.
+    for identity in service.profiles:
+        service.context(identity)
+    models_path = TEST_ROOT / "pricing" / (profile_id + "-models.json")
+    from model_pricing import read_json
+    cached = read_json(models_path) or {}
+    models = cached.get("models", []) if cached.get("gateway") == profile["gateway"] else []
+    if force or not models or time.time() - cached.get("fetched_at", 0) >= 21600:
+        try:
+            models = fetch_models(read_profile_key(profile), profile["gateway"])
+            private_write(models_path, json.dumps({"gateway": profile["gateway"], "models": models, "fetched_at": int(time.time())}))
+        except (OSError, RuntimeError, ValueError):
+            models = models or list(service.context(profile_id)["catalog"].get("models", {}))
+    print(json.dumps(service.snapshot(profile_id, models), ensure_ascii=False))
+
+
+def save_pricing_source(profile_id):
+    profile = billing_profile(profile_id)
+    payload = json.load(sys.stdin)
+    if not isinstance(payload, dict) or not isinstance(payload.get("url"), str):
+        raise RuntimeError("价格来源格式不正确。")
+    url = payload["url"].strip()
+    if url:
+        from model_pricing import public_get, catalog_models
+        catalog_models(json.loads(public_get(url)))  # public URL only; no credentials
+    private_write(TEST_ROOT / "pricing" / (profile_id + "-source.json"),
+                  json.dumps({"gateway": profile["gateway"], "url": url}))
+    profile_pricing(profile_id, force=True)
+
+
+def billing_module():
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import gateway_billing
+    return gateway_billing
+
+
+def billing_profile(profile_id):
+    profile = next((p for p in load_profiles() if p["id"] == profile_id), None)
+    if profile is None:
+        raise RuntimeError("找不到所选调用配置。")
+    return profile
+
+
+def billing_config(profile):
+    path = TEST_ROOT / "billing" / (profile["id"] + ".json")
+    if not path.exists():
+        return None
+    if path.is_symlink() or path.stat().st_mode & 0o077:
+        raise RuntimeError("账单凭据文件权限不符合要求，请重新连接。")
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise RuntimeError("账单连接配置损坏，请重新连接。")
+    if data.get("gateway") != profile["gateway"]:
+        return None  # Changing the gateway never forwards a saved management token.
+    data["console"] = normalize_gateway(data["console"])
+    return data
+
+
+def profile_account(profile_id):
+    profile = billing_profile(profile_id)
+    data = billing_module().account_snapshot(profile["gateway"], read_profile_key(profile))
+    print(json.dumps({**data, "profile_id": profile_id, "gateway": profile["gateway"]}, ensure_ascii=False))
+
+
+def profile_billing(profile_id):
+    profile = billing_profile(profile_id)
+    config = billing_config(profile)
+    data = billing_module().billing_snapshot(config["console"], config["token"]) if config else {
+        "status": "unconfigured", "message": "逐次账单需要单独连接控制台的只读管理 Token。", "records": []}
+    print(json.dumps({**data, "profile_id": profile_id, "gateway": profile["gateway"]}, ensure_ascii=False))
+
+
+def billing_settings(profile_id):
+    config = billing_config(billing_profile(profile_id))
+    print(json.dumps({"console": config["console"] if config else "", "configured": config is not None}))
+
+
+def save_billing_from_stdin(profile_id):
+    profile = billing_profile(profile_id)
+    payload = json.load(sys.stdin)
+    if not isinstance(payload, dict) or not isinstance(payload.get("console"), str) or not isinstance(payload.get("token"), str):
+        raise RuntimeError("账单连接请求格式不正确。")
+    console = normalize_gateway(payload["console"])
+    token = payload["token"].strip()
+    existing = billing_config(profile)
+    if not token and existing and existing["console"] == console:
+        token = existing["token"]
+    if not token.startswith("cch_auth_live_") or len(token) < 20 or any(c.isspace() for c in token):
+        raise RuntimeError("请填写 CCHP 只读管理 Token（cch_auth_live_ 开头），不是模型调用 Key。")
+    snapshot = billing_module().billing_snapshot(console, token)
+    if snapshot["status"] not in {"ok", "partial"}:
+        raise RuntimeError(snapshot["message"] or "无法读取账单，未保存凭据。")
+    path = TEST_ROOT / "billing" / (profile_id + ".json")
+    if path.exists():
+        private_write(path.with_suffix(".json.bak"), path.read_text())
+    private_write(path, json.dumps({"gateway": profile["gateway"], "console": console, "token": token}) + "\n")
+    print(json.dumps({**snapshot, "profile_id": profile_id, "gateway": profile["gateway"]}, ensure_ascii=False))
+
+
+def remove_billing(profile_id):
+    profile = billing_profile(profile_id)
+    path = TEST_ROOT / "billing" / (profile["id"] + ".json")
+    for candidate in (path, path.with_suffix(".json.bak")):
+        candidate.unlink(missing_ok=True)
+    print(json.dumps({"removed": True}))
+
+
+def set_gateway_from_stdin():
+    payload = json.load(sys.stdin)
+    if not isinstance(payload, dict) or not isinstance(payload.get("url"), str):
+        raise RuntimeError("网关配置请求格式不正确。")
+    print(json.dumps({"gateway": save_gateway(payload["url"])}, ensure_ascii=False))
+
+
+def set_profile_gateway_from_stdin(profile_id):
+    profile = next((item for item in load_profiles() if item["id"] == profile_id), None)
+    if profile is None or profile_id == "free":
+        raise RuntimeError("找不到可编辑的 Key 配置。")
+    payload = json.load(sys.stdin)
+    if not isinstance(payload, dict) or not isinstance(payload.get("url"), str):
+        raise RuntimeError("网关配置请求格式不正确。")
+    gateway = normalize_gateway(payload["url"])
+    models = fetch_models(read_profile_key(profile), gateway)
+    data = json.loads(PROFILE_INDEX.read_text())
+    data[profile_id] = {"name": profile["name"], "gateway": gateway}
+    private_write(PROFILE_INDEX, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({"profile_id": profile_id, "gateway": gateway, "model_count": len(models)}, ensure_ascii=False))
+
+
+def launch_profile(profile_id, model, workspace_value, session_mode, gateway_value=None):
     profile = next((item for item in load_profiles() if item["id"] == profile_id), None)
     if profile is None:
         raise RuntimeError("找不到所选调用 Key；请刷新列表。")
@@ -185,16 +401,20 @@ def launch_profile(profile_id, model, workspace_value, session_mode):
     if session_mode not in {"new", "continue", "resume"}:
         raise RuntimeError("会话方式无效。")
     key = read_profile_key(profile)
-    if model not in fetch_models(key):
+    gateway = normalize_gateway(gateway_value) if gateway_value else profile["gateway"]
+    if model not in fetch_models(key, gateway):
         raise RuntimeError("此 Key 不允许所选模型；没有启动 Claude。")
     remember_workspace(workspace)
     save_last_launch(profile, model, workspace, session_mode, "claude", MANAGER_LAST_LAUNCH)
     return launch(model, selected_key=key, selected_name=profile["name"],
-                  workspace=workspace, session_mode=session_mode)
+                  workspace=workspace, session_mode=session_mode, gateway=gateway)
 
 
-def codex_config(profile_id, model):
-    home = CODEX_HOME_ROOT / profile_id
+def codex_config(profile_id, model, gateway=None, workspace=None):
+    gateway = gateway or gateway_url()
+    scope = json.dumps([profile_id, model, gateway, str(workspace or "")], ensure_ascii=False, separators=(",", ":"))
+    scope_id = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:16]
+    home = CODEX_HOME_ROOT / profile_id / scope_id
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(home, 0o700)
     config = (
@@ -205,7 +425,7 @@ def codex_config(profile_id, model):
         'disable_response_storage = true\n\n'
         '[model_providers.cchp_local]\n'
         'name = "cchp_local"\n'
-        'base_url = "http://127.0.0.1:8081/v1"\n'
+        'base_url = ' + json.dumps((gateway or gateway_url()) + "/v1", ensure_ascii=False) + '\n'
         'wire_api = "responses"\n'
         'env_key = "CCH_API_KEY"\n'
     )
@@ -213,7 +433,18 @@ def codex_config(profile_id, model):
     return home
 
 
-def launch_codex_profile(profile_id, model, workspace_value, session_mode):
+def build_codex_command(model, workspace, session_mode):
+    command = [str(CODEX), "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
+    if session_mode == "continue":
+        return [str(CODEX), "resume", "--last", "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
+    if session_mode == "resume":
+        return [str(CODEX), "resume", "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
+    if session_mode != "new":
+        raise RuntimeError("会话方式无效。")
+    return command
+
+
+def launch_codex_profile(profile_id, model, workspace_value, session_mode, gateway_value=None):
     profile = next((item for item in load_profiles() if item["id"] == profile_id), None)
     if profile is None:
         raise RuntimeError("找不到所选调用 Key；请刷新列表。")
@@ -227,11 +458,12 @@ def launch_codex_profile(profile_id, model, workspace_value, session_mode):
     if session_mode not in {"new", "continue", "resume"}:
         raise RuntimeError("会话方式无效。")
     key = read_profile_key(profile)
-    if model not in fetch_models(key):
+    gateway = normalize_gateway(gateway_value) if gateway_value else profile["gateway"]
+    if model not in fetch_models(key, gateway):
         raise RuntimeError("此 Key 不允许所选模型；没有启动 Codex。")
     if not CODEX.is_file():
         raise RuntimeError("未找到原有 Codex 可执行文件；没有修改原入口。")
-    codex_home = codex_config(profile_id, model)
+    codex_home = codex_config(profile_id, model, gateway, workspace)
     remember_workspace(workspace)
     save_last_launch(profile, model, workspace, session_mode, "codex", MANAGER_LAST_LAUNCH)
     environment = dict(os.environ)
@@ -243,11 +475,7 @@ def launch_codex_profile(profile_id, model, workspace_value, session_mode):
         "NO_PROXY": "127.0.0.1,localhost,::1",
         "no_proxy": "127.0.0.1,localhost,::1",
     })
-    command = [str(CODEX), "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
-    if session_mode == "continue":
-        command = [str(CODEX), "resume", "--last", "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
-    elif session_mode == "resume":
-        command = [str(CODEX), "resume", "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
+    command = build_codex_command(model, workspace, session_mode)
     os.chdir(workspace)
     os.execve(CODEX, command, environment)
 
@@ -413,9 +641,10 @@ def quick_launch():
                   workspace=workspace, session_mode=session_mode)
 
 
-def fetch_models(key):
+def fetch_models(key, gateway=None):
+    gateway = gateway or gateway_url()
     request = Request(
-        GATEWAY + "/v1/models?limit=1000",
+        gateway + "/v1/models?limit=1000",
         headers={
             "x-api-key": key,
             "anthropic-version": "2023-06-01",
@@ -430,7 +659,7 @@ def fetch_models(key):
     except HTTPError as exc:
         raise RuntimeError("本机网关模型列表校验失败：HTTP " + str(exc.code)) from None
     except (URLError, TimeoutError, OSError):
-        raise RuntimeError("无法连接本机 8081 网关，请先确认 CCHP 服务已启动。") from None
+        raise RuntimeError("无法连接网关 " + gateway + "，请先确认网关服务已启动。") from None
     except (ValueError, TypeError):
         raise RuntimeError("模型列表不是预期的 JSON，请检查网关地址。") from None
     rows = payload.get("data", []) if isinstance(payload, dict) else []
@@ -455,12 +684,13 @@ def setup_key():
     private_write(KEY_FILE, key + "\n")
     if KEY_FILE.stat().st_mode & 0o077:
         raise RuntimeError("密钥文件权限校验失败；请删除该文件后重试。")
-    private_write(TEST_ROOT / "model-list-check.json", json.dumps({"checked_at": time.strftime("%Y-%m-%d %H:%M:%S%z"), "gateway": GATEWAY, "model_count": len(models), "models": models, "inference_sent": False}, ensure_ascii=False, indent=2) + "\n")
+    private_write(TEST_ROOT / "model-list-check.json", json.dumps({"checked_at": time.strftime("%Y-%m-%d %H:%M:%S%z"), "gateway": gateway_url(), "model_count": len(models), "models": models, "inference_sent": False}, ensure_ascii=False, indent=2) + "\n")
     print("已保存到本机私有文件（权限 600）。模型列表校验通过，共 " + str(len(models)) + " 个。")
     print("尚未发起推理。可以回聊天告诉我“密钥已填”，或选择菜单中的连通性测试。")
 
 
-def build_launch(key, model, smoke=False, workspace=None, session_mode="new"):
+def build_launch(key, model, smoke=False, workspace=None, session_mode="new", gateway=None):
+    gateway = normalize_gateway(gateway) if gateway else gateway_url()
     environment = dict(os.environ)
     for name in list(environment):
         if name.startswith("ANTHROPIC_") or name in {
@@ -471,7 +701,7 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new"):
             environment.pop(name, None)
     environment.update({
         "CLAUDE_CONFIG_DIR": str(CONFIG_DIR),
-        "ANTHROPIC_BASE_URL": GATEWAY,
+        "ANTHROPIC_BASE_URL": gateway,
         # Installed Claude's --bare mode reads API_KEY, not AUTH_TOKEN/OAuth/keychain.
         "ANTHROPIC_API_KEY": key,
         "ANTHROPIC_MODEL": model,
@@ -504,18 +734,19 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new"):
     return command, environment
 
 
-def launch(model, smoke=False, selected_key=None, selected_name=None, workspace=None, session_mode="new"):
+def launch(model, smoke=False, selected_key=None, selected_name=None, workspace=None, session_mode="new", gateway=None):
     if not CLAUDE.is_file():
         raise RuntimeError("未找到原有 Claude 可执行文件；没有修改原入口。")
     key = selected_key if selected_key is not None else read_key()
-    if model not in fetch_models(key):
+    gateway = normalize_gateway(gateway) if gateway else gateway_url()
+    if model not in fetch_models(key, gateway):
         raise RuntimeError("此调用 Key 不允许模型 " + model + "；已停止，不会回退。")
     prepare_isolated_config()
     cwd = workspace or WORKSPACE
-    command, environment = build_launch(key, model, smoke, cwd, session_mode)
+    command, environment = build_launch(key, model, smoke, cwd, session_mode, gateway)
     if selected_name:
         print("本机调用 Key：" + selected_name, flush=True)
-    print("本机网关：" + GATEWAY + "；模型：" + model, flush=True)
+    print("网关：" + gateway + "；模型：" + model, flush=True)
     print("Claude 工作目录：" + str(cwd), flush=True)
     if smoke:
         print("现在将发起单轮模型请求，禁用工具，不加载原有项目、插件、MCP 或钩子。", flush=True)
@@ -527,7 +758,7 @@ def launch(model, smoke=False, selected_key=None, selected_name=None, workspace=
         stdout = result.stdout.replace(key, "[密钥已隐藏]")
         stderr = result.stderr.replace(key, "[密钥已隐藏]")
         reservation_rejected = "billing/reserve: insufficient balance" in stdout or "billing/reserve: insufficient balance" in stderr
-        private_write(TEST_ROOT / "latest-smoke.json", json.dumps({"model": model, "gateway": GATEWAY, "exit_code": result.returncode, "duration_seconds": round(time.monotonic()-started, 2), "stdout": stdout, "stderr": stderr}, ensure_ascii=False, indent=2) + "\n")
+        private_write(TEST_ROOT / "latest-smoke.json", json.dumps({"model": model, "gateway": gateway_url(), "exit_code": result.returncode, "duration_seconds": round(time.monotonic()-started, 2), "stdout": stdout, "stderr": stderr}, ensure_ascii=False, indent=2) + "\n")
         if stdout.strip(): print(stdout.strip())
         if stderr.strip(): print(stderr.strip(), file=sys.stderr)
         if reservation_rejected:
@@ -550,7 +781,7 @@ def status():
         for row in manifest.get("entrypoints", []):
             source = Path(row["path"])
             checks[str(source)] = source.is_symlink() and os.readlink(source) == row["target"] if row["symlink"] else source.is_file()
-    print(json.dumps({"gateway": GATEWAY, "default_model": DEFAULT_MODEL, "key_saved": KEY_FILE.is_file(),
+    print(json.dumps({"gateway": gateway_url(), "default_model": DEFAULT_MODEL, "key_saved": KEY_FILE.is_file(),
                       "additional_key_profiles": [profile["name"] for profile in load_profiles() if profile["id"] != "free"],
                       "last_launch": load_last_launch(),
                       "isolated_settings_ready": SETTINGS.is_file() and EMPTY_MCP.is_file(),
@@ -601,31 +832,53 @@ def menu():
 def main():
     parser = argparse.ArgumentParser(description="独立 Claude/CCHP 测试，不修改原客户端配置")
     parser.add_argument("action", nargs="?", default="menu", choices=[
-        "menu", "setup", "status", "models", "plan", "chat", "smoke",
-        "gui-state", "profile-models", "add-profile-stdin", "launch", "codex-launch",
+        "menu", "setup", "status", "models", "plan", "chat", "smoke", "usage",
+        "profile-account", "profile-billing", "billing-settings", "save-billing-stdin", "remove-billing",
+        "profile-pricing", "save-pricing-source-stdin",
+        "gui-state", "profile-models", "add-profile-stdin", "set-gateway-stdin",
+        "set-profile-gateway-stdin", "launch", "codex-launch",
     ])
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--profile-id")
     parser.add_argument("--workspace")
     parser.add_argument("--session-mode", choices=["new", "continue", "resume"], default="new")
+    parser.add_argument("--gateway-url")
+    parser.add_argument("--force", action="store_true")
     arguments = parser.parse_args()
     if arguments.action == "menu": return menu()
     if arguments.action == "setup": setup_key(); return 0
     if arguments.action == "status": status(); return 0
+    if arguments.action == "usage": usage_snapshot(); return 0
+    if arguments.action in {"profile-pricing", "save-pricing-source-stdin"}:
+        if not arguments.profile_id: raise RuntimeError("缺少 profile-id。")
+        pricing_service()  # initialise bundled imports without writing bytecode
+        if arguments.action == "profile-pricing": profile_pricing(arguments.profile_id, arguments.force)
+        else: save_pricing_source(arguments.profile_id)
+        return 0
+    billing_actions = {"profile-account": profile_account, "profile-billing": profile_billing,
+                       "billing-settings": billing_settings, "save-billing-stdin": save_billing_from_stdin,
+                       "remove-billing": remove_billing}
+    if arguments.action in billing_actions:
+        if not arguments.profile_id: raise RuntimeError("缺少 profile-id。")
+        billing_actions[arguments.action](arguments.profile_id); return 0
     if arguments.action == "plan": plan(arguments.model); return 0
     if arguments.action == "gui-state": gui_state(); return 0
     if arguments.action == "profile-models":
         if not arguments.profile_id: raise RuntimeError("缺少 profile-id。")
-        profile_models(arguments.profile_id); return 0
+        profile_models(arguments.profile_id, arguments.gateway_url); return 0
     if arguments.action == "add-profile-stdin": add_profile_from_stdin(); return 0
+    if arguments.action == "set-gateway-stdin": set_gateway_from_stdin(); return 0
+    if arguments.action == "set-profile-gateway-stdin":
+        if not arguments.profile_id: raise RuntimeError("缺少 profile-id。")
+        set_profile_gateway_from_stdin(arguments.profile_id); return 0
     if arguments.action == "launch":
         if not arguments.profile_id or not arguments.workspace:
             raise RuntimeError("启动 Claude 时必须指定 profile-id 和工作目录。")
-        return launch_profile(arguments.profile_id, arguments.model, arguments.workspace, arguments.session_mode)
+        return launch_profile(arguments.profile_id, arguments.model, arguments.workspace, arguments.session_mode, arguments.gateway_url)
     if arguments.action == "codex-launch":
         if not arguments.profile_id or not arguments.workspace:
             raise RuntimeError("启动 Codex 时必须指定 profile-id 和工作目录。")
-        return launch_codex_profile(arguments.profile_id, arguments.model, arguments.workspace, arguments.session_mode)
+        return launch_codex_profile(arguments.profile_id, arguments.model, arguments.workspace, arguments.session_mode, arguments.gateway_url)
     if arguments.action == "models": print("\n".join(fetch_models(read_key()))); return 0
     return launch(arguments.model, arguments.action == "smoke")
 

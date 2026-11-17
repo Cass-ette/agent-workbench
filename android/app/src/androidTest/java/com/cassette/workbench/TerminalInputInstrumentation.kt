@@ -125,7 +125,7 @@ class TerminalInputInstrumentation : Instrumentation() {
             runOnMainSync { model!!.close(model!!.sessions.single().id) }
             until("last terminal removed") { model!!.sessions.isEmpty() }
             check(store.sessionRows().length() == 0) { "Closed terminal was persisted" }
-            result.putString("stream", "PASS: background recovery, IME input, Shell scroll without PTY input, full-screen TUI button/touch/grip scrolling, SGR and binary mouse reports, fragmented UTF-8, last-tab close\n")
+            result.putString("stream", "PASS: background recovery, IME input, Shell scroll without PTY input, full-screen TUI button/touch/edge scrolling, SGR and binary mouse reports, fragmented UTF-8, last-tab close\n")
             result.putString("result", "PASS")
             resultCode = Activity.RESULT_OK
         } catch (cause: Throwable) {
@@ -214,9 +214,9 @@ class TerminalInputInstrumentation : Instrumentation() {
         dragInView(view, "40", "50", 80.0, mouse = true)
         check(eval(view, "window.touchScrollCalls") == "0") { "Mouse drag was misclassified as finger scroll" }
         runOnMainSync { model.send(id, "r") }
-        until("reset before grip") { tuiTop(view) == 80 }
-        dragInView(view, "thumb.getBoundingClientRect().left + thumb.offsetWidth/2", "thumb.getBoundingClientRect().top + thumb.offsetHeight/2", 60.0)
-        until("native scrollbar grip scrolls TUI") { tuiTop(view) > 80 }
+        until("reset before right-edge drag") { tuiTop(view) == 80 }
+        dragInView(view, "window.innerWidth - 10", "50", 60.0)
+        until("right edge is available for content scrolling") { tuiTop(view) > 80 }
         runOnMainSync { model.send(id, "br") }
         until("legacy mouse mode ready") { tuiTop(view) == 80 }
         scrollButton(view, true)
@@ -234,7 +234,7 @@ class TerminalInputInstrumentation : Instrumentation() {
     }
     private fun tuiTop(view: WebView): Int = eval(view, "Number(Array.from({length:3},(_,i)=>terminal.buffer.active.getLine(i)?.translateToString(true)||'').join(' ').match(/TUI_TOP=(\\d+)/)?.[1]??-1)").toInt()
     private fun scrollButton(view: WebView, up: Boolean) {
-        eval(view, "document.getElementById('${if (up) "scroll-up" else "scroll-down"}').click();true")
+        eval(view, "window.scrollByButton(${if (up) -1 else 1});true")
     }
     private fun dragInView(view: WebView, xExpression: String, yExpression: String, dy: Double, mouse: Boolean = false) {
         val xy = IntArray(2)

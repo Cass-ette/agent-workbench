@@ -20,7 +20,6 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
     private var downY = 0f
     private var lastY = 0f
     private var touchMoved = false
-    private var touchingScrollbar = false
 
     init {
         isFocusable = true
@@ -45,12 +44,11 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
                 downY = event.y
                 lastY = event.y
                 touchMoved = false
-                touchingScrollbar = event.x >= width - 36 * resources.displayMetrics.density
                 if (terminalReady) evaluateJavascript("window.beginTouchScroll()", null)
             }
             MotionEvent.ACTION_MOVE -> {
                 val delta = event.y - lastY
-                if (!touchingScrollbar && !touchMoved && kotlin.math.abs(event.y - downY) > touchSlop) {
+                if (!touchMoved && kotlin.math.abs(event.y - downY) > touchSlop) {
                     touchMoved = true
                     // Stop WebView/xterm's default touch scroll before taking
                     // over, otherwise it can cancel our reversed finger scroll.
@@ -75,7 +73,7 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
         }
         val handled = super.onTouchEvent(event)
         if (event.actionMasked == MotionEvent.ACTION_UP) {
-            if (!touchingScrollbar) showTerminalKeyboard()
+            showTerminalKeyboard()
             touchMoved = false
         }
         return handled

@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<link rel="stylesheet" href="xterm.css"><style>html,body,#terminal{height:100%;min-height:100%;width:100%;padding:0;margin:0;background:#16181f;overflow:hidden} #terminal{position:relative;min-height:160px}.xterm{height:100%;padding:6px 34px 6px 6px;box-sizing:border-box} #touch-scrollbar{position:absolute;z-index:20;top:6px;right:3px;bottom:6px;width:27px;display:flex;flex-direction:column;align-items:center;gap:4px;touch-action:none;user-select:none} #touch-scrollbar button{width:27px;height:30px;padding:0;border:0;border-radius:7px;background:#303442;color:#d9dbea;font-size:17px;line-height:30px} #touch-scrollbar button:active{background:#535974} #scroll-track{position:relative;flex:1;width:13px;border-radius:7px;background:#242733} #scroll-thumb{position:absolute;left:0;width:13px;min-height:34px;border-radius:7px;background:#777b96;touch-action:none} #scroll-thumb:active{background:#b2b5d4} @media (pointer: fine){#touch-scrollbar{opacity:.72} #touch-scrollbar:hover{opacity:1}}</style>
-</head><body><div id="terminal"><div id="touch-scrollbar" aria-label="终端滚动"><button id="scroll-up" type="button">⌃</button><div id="scroll-track"><div id="scroll-thumb"></div></div><button id="scroll-down" type="button">⌄</button></div></div><script src="xterm.js"></script><script src="addon-fit.js"></script><script>
+<link rel="stylesheet" href="xterm.css"><style>html,body,#terminal{height:100%;min-height:100%;width:100%;padding:0;margin:0;background:#16181f;overflow:hidden} #terminal{position:relative;min-height:160px}.xterm{height:100%;padding:6px;box-sizing:border-box}.xterm .xterm-scrollable-element>.scrollbar{display:none!important}.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>
+</head><body><div id="terminal"></div><script src="xterm.js"></script><script src="addon-fit.js"></script><script>
 const terminal = new Terminal({fontFamily:'monospace',fontSize:13,scrollback:5000,cursorBlink:true,cursorStyle:'bar',cursorWidth:2,cursorInactiveStyle:'block',convertEol:false,theme:{background:'#16181f',foreground:'#e4e6ed',cursor:'#c4b5fd',selectionBackground:'#535974',black:'#20222b',red:'#f38ba8',green:'#a6da95',yellow:'#eed49f',blue:'#8aadf4',magenta:'#c6a0f6',cyan:'#8bd5ca',white:'#cad3f5'}});
 const fit = new FitAddon.FitAddon(); terminal.loadAddon(fit); terminal.open(document.getElementById('terminal'));
 // Wheel reports must reach a full-screen TUI; its conversation history is not
@@ -19,7 +19,6 @@ function sendInput(data, binary = false) {
 }
 terminal.onData(data => sendInput(data));
 terminal.onBinary(data => sendInput(data, true));
-const scrollbar=document.getElementById('touch-scrollbar'), track=document.getElementById('scroll-track'), thumb=document.getElementById('scroll-thumb'); let dragging=false;
 function appOwnsScroll() {
   return ['vt200', 'drag', 'any'].includes(terminal.modes.mouseTrackingMode);
 }
@@ -49,44 +48,7 @@ function scrollLines(lines) {
     // Never turn a Shell scroll into arrow keys (which edit command history).
     terminal.scrollLines(lines);
   }
-  updateScrollBar();
 }
-function updateScrollBar() {
-  const b=terminal.buffer.active, max=b.baseY, rows=terminal.rows, h=track.clientHeight;
-  if (!h) return;
-  const owned=appOwnsScroll();
-  scrollbar.style.opacity=owned || max>0 ? '1' : '.35';
-  // An app-owned viewport has no absolute offset exposed to the terminal.
-  // Its grip is a relative scroll control rather than a false progress meter.
-  const thumbH=owned ? Math.min(h,Math.max(34,h/4)) : max>0 ? Math.min(h,Math.max(34,h*rows/(rows+max))) : h;
-  thumb.style.height=thumbH+'px';
-  thumb.style.top=(owned ? (h-thumbH)/2 : max>0 ? (h-thumbH)*b.viewportY/max : 0)+'px';
-}
-function scrollToPointer(y) {
-  const rect=track.getBoundingClientRect(), max=terminal.buffer.active.baseY;
-  if (max<=0) return;
-  const ratio=Math.max(0,Math.min(1,(y-rect.top-thumb.offsetHeight/2)/(rect.height-thumb.offsetHeight||1)));
-  terminal.scrollToLine(Math.round(ratio*max)); updateScrollBar();
-}
-let lastPointerY=0;
-track.addEventListener('pointerdown',e=>{
-  e.preventDefault(); dragging=true; lastPointerY=e.clientY; track.setPointerCapture(e.pointerId);
-  if (!appOwnsScroll()) scrollToPointer(e.clientY);
-  else if (e.target!==thumb) scrollLines(Math.sign(e.clientY-(thumb.getBoundingClientRect().top+thumb.offsetHeight/2))*Math.max(3,Math.floor(terminal.rows/2)));
-});
-track.addEventListener('pointermove',e=>{
-  if (!dragging) return;
-  e.preventDefault();
-  if (appOwnsScroll()) {
-    const cellHeight=terminal.element.querySelector('.xterm-screen').clientHeight/terminal.rows;
-    const lines=Math.trunc((e.clientY-lastPointerY)/cellHeight);
-    if (lines) {scrollLines(lines);lastPointerY+=lines*cellHeight;}
-  } else scrollToPointer(e.clientY);
-});
-track.addEventListener('pointerup',()=>{dragging=false}); track.addEventListener('pointercancel',()=>{dragging=false});
-document.getElementById('scroll-up').addEventListener('click',()=>window.scrollByButton(-1));
-document.getElementById('scroll-down').addEventListener('click',()=>window.scrollByButton(1));
-terminal.onScroll(updateScrollBar); terminal.onWriteParsed(updateScrollBar);
 function resize(){try{const h=Math.max(window.innerHeight||document.documentElement.clientHeight,1);document.documentElement.style.height=h+'px';document.body.style.height=h+'px';document.getElementById('terminal').style.height=h+'px';fit.fit();Workbench.resize(terminal.cols,terminal.rows)}catch{}}
 window.writeChunk = data => terminal.write(Uint8Array.from(atob(data), c => c.charCodeAt(0)));
 window.changeFont = amount => {terminal.options.fontSize=Math.max(9,Math.min(24,terminal.options.fontSize+amount));resize()};
@@ -111,7 +73,7 @@ window.jumpToBottom = client => {
   // either shortcut to an ordinary Shell or editing a Codex input draft.
   if (client==='claude' && appOwnsScroll()) terminal.input('\x1b[1;5F');
   else if (client==='codex' && codexTranscript) terminal.input('\x1b[F');
-  terminal.scrollToBottom(); updateScrollBar();
+  terminal.scrollToBottom();
 };
 new ResizeObserver(resize).observe(document.body); window.addEventListener('resize',resize); resize(); terminal.focus(); Workbench.ready();
 </script></body></html>

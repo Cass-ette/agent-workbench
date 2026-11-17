@@ -3,6 +3,8 @@ import argparse
 import hmac
 import importlib.util
 import json
+import shutil
+import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -16,6 +18,7 @@ def main():
     options = parser.parse_args()
     root = Path(options.workspace).resolve()
     root.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(Path(__file__).with_name("terminal_scroll_tui.py"), root / "scroll_tui.py")
     source = Path(__file__).resolve().parents[1] / "app/src/main/assets/termux_bridge.py"
     spec = importlib.util.spec_from_file_location("bridge", source)
     bridge = importlib.util.module_from_spec(spec)
@@ -30,7 +33,7 @@ def main():
         }, str(root)
 
     bridge.launch_spec = shell_only
-    counters = {"reads": 0, "health": 0, "creates": 0}
+    counters = {"reads": 0, "health": 0, "creates": 0, "inputs": 0}
     failures = {"reads": 0, "health": 0}
 
     class TestHandler(bridge.Handler):
@@ -52,11 +55,11 @@ def main():
                         data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                         for key in failures:
                             failures[key] = min(max(int(data.get(key, 0)), 0), 20)
-                    return self.reply(200, {**counters, "sessions": {
+                    return self.reply(200, {**counters, "python": sys.executable, "sessions": {
                         key: {"pid": session.pid, "exit_code": session.exit_code}
                         for key, session in self.server.sessions.items()
                     }})
-            key = "health" if path == "/health" else "reads" if self.command == "GET" and path.startswith("/sessions/") else "creates" if path == "/sessions" and self.command == "POST" else None
+            key = "health" if path == "/health" else "reads" if self.command == "GET" and path.startswith("/sessions/") else "creates" if path == "/sessions" and self.command == "POST" else "inputs" if self.command == "POST" and path.endswith("/input") else None
             if key is not None:
                 with self.server.guard:
                     counters[key] += 1

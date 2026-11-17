@@ -10,8 +10,8 @@ android {
         applicationId = "com.cassette.workbench"
         minSdk = 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "0.1.8"
+        versionCode = 11
+        versionName = "0.1.9"
         testInstrumentationRunner = "com.cassette.workbench.TerminalInputInstrumentation"
     }
     buildFeatures { compose = true; buildConfig = true }

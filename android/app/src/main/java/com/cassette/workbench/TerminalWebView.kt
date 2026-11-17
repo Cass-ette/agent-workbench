@@ -19,6 +19,7 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
     private var downY = 0f
     private var lastY = 0f
     private var touchMoved = false
+    private var touchingScrollbar = false
 
     init {
         isFocusable = true
@@ -38,11 +39,12 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
                 downY = event.y
                 lastY = event.y
                 touchMoved = false
+                touchingScrollbar = event.x >= width - 36 * resources.displayMetrics.density
             }
             MotionEvent.ACTION_MOVE -> {
                 val delta = event.y - lastY
                 if (!touchMoved && kotlin.math.abs(event.y - downY) > touchSlop) touchMoved = true
-                if (touchMoved && kotlin.math.abs(delta) > 0.5f) {
+                if (!touchingScrollbar && touchMoved && kotlin.math.abs(delta) > 0.5f) {
                     // xterm owns its viewport inside the WebView, so WebView's native
                     // scrolling cannot move it. Forward a drag as line scrolling.
                     evaluateJavascript("window.scrollByTouch(${delta.toInt()})", null)
@@ -52,7 +54,7 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
         }
         val handled = super.onTouchEvent(event)
         if (event.actionMasked == MotionEvent.ACTION_UP) {
-            if (!touchMoved) showTerminalKeyboard()
+            if (!touchMoved && !touchingScrollbar) showTerminalKeyboard()
             touchMoved = false
         }
         return handled

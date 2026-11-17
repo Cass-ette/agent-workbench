@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -466,6 +467,7 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
             settings.domStorageEnabled = false; settings.textZoom = 100
             addJavascriptInterface(object {
                 @JavascriptInterface fun input(value: String) { model.send(session.id, value) }
+                @JavascriptInterface fun inputBytes(value: String) { model.sendBytes(session.id, Base64.decode(value, Base64.NO_WRAP)) }
                 @JavascriptInterface fun resize(cols: Int, rows: Int) { model.resize(session.id, cols, rows) }
                 @JavascriptInterface fun ready() { handler.post { terminalReady = true; ready = true } }
             }, "Workbench")

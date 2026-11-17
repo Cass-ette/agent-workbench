@@ -119,12 +119,13 @@ class TerminalInputInstrumentation : Instrumentation() {
                 connection.performEditorAction(EditorInfo.IME_ACTION_DONE)
             }
             until("IME backspace removes one character") { hasLine(view, "DELETE_OK") }
+            verifyScrolling(model!!, view, sessionId)
             val screenshot = java.io.File(targetContext.getExternalFilesDir(null), "terminal-input-test.png")
             screenshot.outputStream().use { uiAutomation.takeScreenshot().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
             runOnMainSync { model!!.close(model!!.sessions.single().id) }
             until("last terminal removed") { model!!.sessions.isEmpty() }
             check(store.sessionRows().length() == 0) { "Closed terminal was persisted" }
-            result.putString("stream", "PASS: no background polling, original PID/session restored, background command continued, transient failure auto-recovered without duplicate Shell, IME text/Enter/Chinese/backspace, last-tab close\n")
+            result.putString("stream", "PASS: background recovery, IME input, Shell scroll without PTY input, full-screen TUI button/touch/grip scrolling, SGR and binary mouse reports, fragmented UTF-8, last-tab close\n")
             result.putString("result", "PASS")
             resultCode = Activity.RESULT_OK
         } catch (cause: Throwable) {
@@ -153,6 +154,61 @@ class TerminalInputInstrumentation : Instrumentation() {
             is Set<*> -> @Suppress("UNCHECKED_CAST") editor.putStringSet(key, value as Set<String>)
         } }
         editor.commit()
+    }
+    private fun verifyScrolling(model: WorkbenchModel, view: WebView, id: String) {
+        runOnMainSync { targetContext.getSystemService(android.view.inputmethod.InputMethodManager::class.java).hideSoftInputFromWindow(view.windowToken, 0) }
+        runOnMainSync { model.send(id, "for ((i=0;i<100;i++)); do printf 'SCROLL_%s\\n' \"\$i\"; done\r") }
+        until("Shell scrollback filled") { hasLine(view, "SCROLL_99") && eval(view, "terminal.buffer.active.baseY > terminal.rows") == "true" }
+        val inputs = model.termux.request("/test/state").getInt("inputs")
+        val before = eval(view, "terminal.buffer.active.viewportY").toInt()
+        scrollButton(view, true)
+        until("up button scrolls Shell") { eval(view, "terminal.buffer.active.viewportY").toInt() < before }
+        check(model.termux.request("/test/state").getInt("inputs") == inputs) { "Shell scrolling sent command history keys" }
+        scrollButton(view, false)
+        until("down button scrolls Shell") { eval(view, "terminal.buffer.active.viewportY").toInt() == before }
+        val python = model.termux.request("/test/state").getString("python")
+        val script = "${args.getString("workspace")}/scroll_tui.py"
+        runOnMainSync { model.send(id, "'${python.replace("'", "'\\''")}' '${script.replace("'", "'\\''")}'\r") }
+        until("full-screen TUI ready") { tuiTop(view) == 80 && eval(view, "terminal.buffer.active.type === 'alternate' && terminal.modes.mouseTrackingMode === 'any'") == "true" }
+        scrollButton(view, true)
+        until("up button scrolls TUI history") { tuiTop(view) in 0..79 }
+        val up = tuiTop(view)
+        scrollButton(view, false)
+        until("down button scrolls TUI history") { tuiTop(view) > up }
+        // The absolute xterm offset stays zero; the foreground app actually redraws.
+        check(eval(view, "terminal.buffer.active.baseY === 0 && terminal.buffer.active.viewportY === 0") == "true")
+        runOnMainSync { model.send(id, "r") }
+        until("reset TUI position") { tuiTop(view) == 80 }
+        dragInView(view, "terminal.element.querySelector('.xterm-screen').getBoundingClientRect().left + 40", "terminal.element.querySelector('.xterm-screen').getBoundingClientRect().top + 40", 100.0)
+        until("native content drag scrolls TUI") { tuiTop(view) in 0..79 }
+        runOnMainSync { model.send(id, "r") }
+        until("reset before grip") { tuiTop(view) == 80 }
+        dragInView(view, "thumb.getBoundingClientRect().left + thumb.offsetWidth/2", "thumb.getBoundingClientRect().top + thumb.offsetHeight/2", 60.0)
+        until("native scrollbar grip scrolls TUI") { tuiTop(view) > 80 }
+        runOnMainSync { model.send(id, "br") }
+        until("legacy mouse mode ready") { tuiTop(view) == 80 }
+        scrollButton(view, true)
+        until("binary mouse reports reach TUI") { tuiTop(view) in 0..79 }
+        check(eval(view, "terminal.buffer.active.getLine(0).translateToString(true).includes('UNEXPECTED=0')") == "true") { "Scrolling sent unexpected input" }
+        runOnMainSync { model.send(id, "q") }
+        until("TUI exits back to Shell") { eval(view, "terminal.buffer.active.type === 'normal' && terminal.modes.mouseTrackingMode === 'none'") == "true" }
+        eval(view, "window.writeChunk(btoa('SPLIT_'+String.fromCharCode(0xe7)));window.writeChunk(btoa(String.fromCharCode(0x95,0x8c)+'_END'));true")
+        until("UTF-8 byte split survives output chunks") { eval(view, "Array.from({length:terminal.buffer.active.length},(_,i)=>terminal.buffer.active.getLine(i)?.translateToString(true)||'').some(line=>line.includes('SPLIT_界_END'))") == "true" }
+    }
+    private fun tuiTop(view: WebView): Int = eval(view, "Number((terminal.buffer.active.getLine(0)?.translateToString(true)||'').match(/TUI_TOP=(\\d+)/)?.[1]??-1)").toInt()
+    private fun scrollButton(view: WebView, up: Boolean) {
+        eval(view, "document.getElementById('${if (up) "scroll-up" else "scroll-down"}').click();true")
+    }
+    private fun dragInView(view: WebView, xExpression: String, yExpression: String, dy: Double) {
+        val xy = IntArray(2)
+        runOnMainSync { view.getLocationOnScreen(xy) }
+        val scale = view.width / eval(view, "window.innerWidth").toDouble()
+        val x = (xy[0] + eval(view, xExpression).toDouble()*scale).toFloat()
+        val y = (xy[1] + eval(view, yExpression).toDouble()*scale).toFloat()
+        val now = android.os.SystemClock.uptimeMillis()
+        sendPointerSync(MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x, y, 0))
+        for (step in 1..8) sendPointerSync(MotionEvent.obtain(now, now+step*30L, MotionEvent.ACTION_MOVE, x, y+(dy*scale*step/8).toFloat(), 0))
+        sendPointerSync(MotionEvent.obtain(now, now+270, MotionEvent.ACTION_UP, x, y+(dy*scale).toFloat(), 0))
     }
     private fun findWebView(view: View): WebView? {
         if (view is WebView) return view

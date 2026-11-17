@@ -4,17 +4,100 @@
 </head><body><div id="terminal"><div id="touch-scrollbar" aria-label="终端滚动"><button id="scroll-up" type="button">⌃</button><div id="scroll-track"><div id="scroll-thumb"></div></div><button id="scroll-down" type="button">⌄</button></div></div><script src="xterm.js"></script><script src="addon-fit.js"></script><script>
 const terminal = new Terminal({fontFamily:'monospace',fontSize:13,scrollback:5000,cursorBlink:true,cursorStyle:'bar',cursorWidth:2,cursorInactiveStyle:'block',convertEol:false,theme:{background:'#16181f',foreground:'#e4e6ed',cursor:'#c4b5fd',selectionBackground:'#535974',black:'#20222b',red:'#f38ba8',green:'#a6da95',yellow:'#eed49f',blue:'#8aadf4',magenta:'#c6a0f6',cyan:'#8bd5ca',white:'#cad3f5'}});
 const fit = new FitAddon.FitAddon(); terminal.loadAddon(fit); terminal.open(document.getElementById('terminal'));
-terminal.onData(data => Workbench.input(data));
+// Wheel reports must reach a full-screen TUI; its conversation history is not
+// xterm's scrollback. Keep xterm responsible for the negotiated mouse encoding.
+let wheelInput = null;
+function sendInput(data, binary = false) {
+  if (wheelInput !== null) {
+    const bytes = binary ? Uint8Array.from(data, c => c.charCodeAt(0)) : new TextEncoder().encode(data);
+    wheelInput.push(...bytes);
+  } else if (binary) {
+    Workbench.inputBytes(btoa(data));
+  } else {
+    Workbench.input(data);
+  }
+}
+terminal.onData(data => sendInput(data));
+terminal.onBinary(data => sendInput(data, true));
 const scrollbar=document.getElementById('touch-scrollbar'), track=document.getElementById('scroll-track'), thumb=document.getElementById('scroll-thumb'); let dragging=false;
-function updateScrollBar(){const b=terminal.buffer.active,max=b.baseY, rows=terminal.rows, h=track.clientHeight;if(!h)return; if(max<=0){scrollbar.style.opacity='.35';thumb.style.height=h+'px';thumb.style.top='0px';return} scrollbar.style.opacity='1'; const thumbH=Math.max(34,h*rows/(rows+max)); thumb.style.height=thumbH+'px'; thumb.style.top=((h-thumbH)*(b.viewportY/max))+'px'}
-function scrollToPointer(y){const rect=track.getBoundingClientRect(), h=rect.height, max=terminal.buffer.active.baseY; if(max<=0)return; const thumbH=thumb.offsetHeight; const ratio=Math.max(0,Math.min(1,(y-rect.top-thumbH/2)/(h-thumbH||1))); terminal.scrollToLine(Math.round(ratio*max)); updateScrollBar()}
-track.addEventListener('pointerdown',e=>{e.preventDefault();scrollToPointer(e.clientY);track.setPointerCapture?.(e.pointerId)}); thumb.addEventListener('pointerdown',e=>{e.preventDefault();dragging=true;thumb.setPointerCapture?.(e.pointerId)}); thumb.addEventListener('pointermove',e=>{if(dragging){e.preventDefault();scrollToPointer(e.clientY)}}); thumb.addEventListener('pointerup',()=>{dragging=false}); thumb.addEventListener('pointercancel',()=>{dragging=false});
-document.getElementById('scroll-up').addEventListener('click',()=>terminal.scrollLines(-Math.max(3,Math.floor(terminal.rows/2)))); document.getElementById('scroll-down').addEventListener('click',()=>terminal.scrollLines(Math.max(3,Math.floor(terminal.rows/2)))); terminal.onScroll(updateScrollBar);
+function appOwnsScroll() {
+  return ['vt200', 'drag', 'any'].includes(terminal.modes.mouseTrackingMode);
+}
+function scrollLines(lines) {
+  lines = Math.trunc(lines);
+  if (!lines) return;
+  if (appOwnsScroll()) {
+    const screen = terminal.element.querySelector('.xterm-screen');
+    const rect = screen.getBoundingClientRect();
+    wheelInput = [];
+    try {
+      // One line-mode wheel event per step, batched into one PTY write. Large
+      // deltaY alone still produces only one report in xterm's mouse protocol.
+      for (let i = 0; i < Math.min(Math.abs(lines), terminal.rows * 4); i++) {
+        screen.dispatchEvent(new WheelEvent('wheel', {
+          deltaY: Math.sign(lines), deltaMode: WheelEvent.DOM_DELTA_LINE,
+          clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+          bubbles: true, cancelable: true
+        }));
+      }
+    } finally {
+      const bytes = wheelInput;
+      wheelInput = null;
+      if (bytes.length) Workbench.inputBytes(btoa(String.fromCharCode(...bytes)));
+    }
+  } else {
+    // Never turn a Shell scroll into arrow keys (which edit command history).
+    terminal.scrollLines(lines);
+  }
+  updateScrollBar();
+}
+function updateScrollBar() {
+  const b=terminal.buffer.active, max=b.baseY, rows=terminal.rows, h=track.clientHeight;
+  if (!h) return;
+  const owned=appOwnsScroll();
+  scrollbar.style.opacity=owned || max>0 ? '1' : '.35';
+  // An app-owned viewport has no absolute offset exposed to the terminal.
+  // Its grip is a relative scroll control rather than a false progress meter.
+  const thumbH=owned ? Math.min(h,Math.max(34,h/4)) : max>0 ? Math.min(h,Math.max(34,h*rows/(rows+max))) : h;
+  thumb.style.height=thumbH+'px';
+  thumb.style.top=(owned ? (h-thumbH)/2 : max>0 ? (h-thumbH)*b.viewportY/max : 0)+'px';
+}
+function scrollToPointer(y) {
+  const rect=track.getBoundingClientRect(), max=terminal.buffer.active.baseY;
+  if (max<=0) return;
+  const ratio=Math.max(0,Math.min(1,(y-rect.top-thumb.offsetHeight/2)/(rect.height-thumb.offsetHeight||1)));
+  terminal.scrollToLine(Math.round(ratio*max)); updateScrollBar();
+}
+let lastPointerY=0;
+track.addEventListener('pointerdown',e=>{
+  e.preventDefault(); dragging=true; lastPointerY=e.clientY; track.setPointerCapture(e.pointerId);
+  if (!appOwnsScroll()) scrollToPointer(e.clientY);
+  else if (e.target!==thumb) scrollLines(Math.sign(e.clientY-(thumb.getBoundingClientRect().top+thumb.offsetHeight/2))*Math.max(3,Math.floor(terminal.rows/2)));
+});
+track.addEventListener('pointermove',e=>{
+  if (!dragging) return;
+  e.preventDefault();
+  if (appOwnsScroll()) {
+    const cellHeight=terminal.element.querySelector('.xterm-screen').clientHeight/terminal.rows;
+    const lines=Math.trunc((e.clientY-lastPointerY)/cellHeight);
+    if (lines) {scrollLines(lines);lastPointerY+=lines*cellHeight;}
+  } else scrollToPointer(e.clientY);
+});
+track.addEventListener('pointerup',()=>{dragging=false}); track.addEventListener('pointercancel',()=>{dragging=false});
+document.getElementById('scroll-up').addEventListener('click',()=>window.scrollByButton(-1));
+document.getElementById('scroll-down').addEventListener('click',()=>window.scrollByButton(1));
+terminal.onScroll(updateScrollBar); terminal.onWriteParsed(updateScrollBar);
 function resize(){try{const h=Math.max(window.innerHeight||document.documentElement.clientHeight,1);document.documentElement.style.height=h+'px';document.body.style.height=h+'px';document.getElementById('terminal').style.height=h+'px';fit.fit();Workbench.resize(terminal.cols,terminal.rows)}catch{}}
 window.writeChunk = data => terminal.write(Uint8Array.from(atob(data), c => c.charCodeAt(0)));
 window.changeFont = amount => {terminal.options.fontSize=Math.max(9,Math.min(24,terminal.options.fontSize+amount));resize()};
 window.focusTerminal = () => terminal.focus();
-window.scrollByTouch = pixels => {const lines=Math.max(1,Math.round(Math.abs(pixels)/18));terminal.scrollLines(pixels>0?-lines:lines);updateScrollBar()};
-window.scrollByButton = pages => {const amount=Math.max(3,Math.floor(terminal.rows/2))*pages;terminal.scrollLines(amount);updateScrollBar()};
+let touchRemainder=0;
+window.scrollByTouch = pixels => {
+  const cellHeight=terminal.element.querySelector('.xterm-screen').clientHeight/terminal.rows;
+  touchRemainder-=pixels;
+  const lines=Math.trunc(touchRemainder/cellHeight);
+  if (lines) {touchRemainder-=lines*cellHeight;scrollLines(lines);}
+};
+window.scrollByButton = pages => scrollLines(Math.max(3,Math.floor(terminal.rows/2))*pages);
 new ResizeObserver(resize).observe(document.body); window.addEventListener('resize',resize); resize(); terminal.focus(); Workbench.ready();
 </script></body></html>

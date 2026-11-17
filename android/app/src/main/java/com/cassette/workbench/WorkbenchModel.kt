@@ -321,10 +321,13 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun send(id: String, value: String) {
+        sendBytes(id, value.toByteArray(Charsets.UTF_8))
+    }
+    fun sendBytes(id: String, value: ByteArray) {
         if (value.isEmpty()) return
         inputWorker.execute {
             try {
-                termux.request("/sessions/$id/input", "POST", JSONObject().put("data", Base64.encodeToString(value.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)), bridgePort = sessions.firstOrNull { it.id == id }?.bridgePort ?: termux.currentPort)
+                termux.request("/sessions/$id/input", "POST", JSONObject().put("data", Base64.encodeToString(value, Base64.NO_WRAP)), bridgePort = sessions.firstOrNull { it.id == id }?.bridgePort ?: termux.currentPort)
             } catch (cause: Exception) {
                 main.post {
                     if (sessions.any { it.id == id }) error = "终端输入未送达：${safeError(cause)}"

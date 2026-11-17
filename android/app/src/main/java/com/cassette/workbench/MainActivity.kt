@@ -427,11 +427,14 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
     var closing by remember { mutableStateOf(false) }
     var fontDelta by remember { mutableIntStateOf(0) }
     var keyboardRequest by remember { mutableIntStateOf(0) }
+    var scrollRequest by remember { mutableIntStateOf(0) }
     Column(modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            listOf("Esc" to "\u001b", "Tab" to "\t", "Ctrl+C" to "\u0003", "↑" to "\u001b[A", "↓" to "\u001b[B").forEach { (title, value) ->
+            listOf("Esc" to "\u001b", "Tab" to "\t", "Ctrl+C" to "\u0003").forEach { (title, value) ->
                 TextButton(onClick = { model.send(session.id, value) }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text(title, fontSize = 11.sp) }
             }
+            TextButton(onClick = { scrollRequest-- }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text("↑", fontSize = 11.sp) }
+            TextButton(onClick = { scrollRequest++ }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text("↓", fontSize = 11.sp) }
             TextButton(onClick = { keyboardRequest++ }, contentPadding = PaddingValues(2.dp), modifier = Modifier.widthIn(min = 40.dp)) { Text("键盘", fontSize = 11.sp) }
             Spacer(Modifier.weight(1f))
             TextButton(onClick = { fontDelta++ }, contentPadding = PaddingValues(3.dp), modifier = Modifier.width(30.dp)) { Text("A+") }
@@ -439,7 +442,7 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
             IconButton(onClick = { closing = true }, modifier = Modifier.width(34.dp)) { Icon(Icons.Outlined.Close, "关闭此终端") }
         }
         Box(Modifier.weight(1f).fillMaxWidth().heightIn(min = 220.dp)) {
-            TerminalSurface(model, session, fontDelta, keyboardRequest, Modifier.fillMaxSize())
+            TerminalSurface(model, session, fontDelta, keyboardRequest, scrollRequest, Modifier.fillMaxSize())
         }
         if (session.exitCode != null) Text("终端已退出：${session.exitCode}", style = MaterialTheme.typography.labelSmall)
     }
@@ -447,10 +450,10 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
         confirmButton = { TextButton(onClick = { closing = false; model.close(session.id) }) { Text("结束终端") } }, dismissButton = { TextButton(onClick = { closing = false }) { Text("取消") } })
 }
 
-private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0)
+private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var scrollRequest: Int = 0)
 
 @SuppressLint("SetJavaScriptEnabled")
-@Composable private fun TerminalSurface(model: WorkbenchModel, session: TerminalSession, fontDelta: Int, keyboardRequest: Int, modifier: Modifier) {
+@Composable private fun TerminalSurface(model: WorkbenchModel, session: TerminalSession, fontDelta: Int, keyboardRequest: Int, scrollRequest: Int, modifier: Modifier) {
     val context = LocalContext.current
     var ready by remember { mutableStateOf(false) }
     val cursor = remember { TerminalCursor() }
@@ -502,6 +505,10 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0)
                 if (cursor.fontDelta != fontDelta) {
                     view.evaluateJavascript("window.changeFont(${fontDelta - cursor.fontDelta})", null)
                     cursor.fontDelta = fontDelta
+                }
+                if (cursor.scrollRequest != scrollRequest) {
+                    view.evaluateJavascript("window.scrollByButton(${scrollRequest - cursor.scrollRequest})", null)
+                    cursor.scrollRequest = scrollRequest
                 }
             }
         })

@@ -15,5 +15,6 @@ window.writeChunk = data => terminal.write(Uint8Array.from(atob(data), c => c.ch
 window.changeFont = amount => {terminal.options.fontSize=Math.max(9,Math.min(24,terminal.options.fontSize+amount));resize()};
 window.focusTerminal = () => terminal.focus();
 window.scrollByTouch = pixels => {const lines=Math.max(1,Math.round(Math.abs(pixels)/18));terminal.scrollLines(pixels>0?-lines:lines);updateScrollBar()};
+window.scrollByButton = pages => {const amount=Math.max(3,Math.floor(terminal.rows/2))*pages;terminal.scrollLines(amount);updateScrollBar()};
 new ResizeObserver(resize).observe(document.body); window.addEventListener('resize',resize); resize(); terminal.focus(); Workbench.ready();
 </script></body></html>

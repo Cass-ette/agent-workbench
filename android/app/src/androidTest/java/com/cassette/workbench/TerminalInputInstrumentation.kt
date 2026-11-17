@@ -166,6 +166,15 @@ class TerminalInputInstrumentation : Instrumentation() {
         check(model.termux.request("/test/state").getInt("inputs") == inputs) { "Shell scrolling sent command history keys" }
         scrollButton(view, false)
         until("down button scrolls Shell") { eval(view, "terminal.buffer.active.viewportY").toInt() == before }
+        eval(view, "terminal.scrollToLine(Math.floor(terminal.buffer.active.baseY/2));true")
+        val middle = eval(view, "terminal.buffer.active.viewportY").toInt()
+        dragInView(view, "40", "50", 80.0)
+        until("finger down scrolls Shell toward newer lines") { eval(view, "terminal.buffer.active.viewportY").toInt() > middle }
+        val fingerDown = eval(view, "terminal.buffer.active.viewportY").toInt()
+        dragInView(view, "40", "150", -80.0)
+        until("finger up scrolls Shell toward older lines") { eval(view, "terminal.buffer.active.viewportY").toInt() < fingerDown }
+        check(model.termux.request("/test/state").getInt("inputs") == inputs) { "Finger scrolling sent Shell input" }
+        eval(view, "terminal.scrollToBottom();true")
         val python = model.termux.request("/test/state").getString("python")
         val script = "${args.getString("workspace")}/scroll_tui.py"
         runOnMainSync { model.send(id, "'${python.replace("'", "'\\''")}' '${script.replace("'", "'\\''")}'\r") }
@@ -180,7 +189,21 @@ class TerminalInputInstrumentation : Instrumentation() {
         runOnMainSync { model.send(id, "r") }
         until("reset TUI position") { tuiTop(view) == 80 }
         dragInView(view, "terminal.element.querySelector('.xterm-screen').getBoundingClientRect().left + 40", "terminal.element.querySelector('.xterm-screen').getBoundingClientRect().top + 40", 100.0)
-        until("native content drag scrolls TUI") { tuiTop(view) in 0..79 }
+        until("finger down scrolls TUI toward newer lines") { tuiTop(view) > 80 }
+        runOnMainSync { model.send(id, "r") }
+        until("reset before finger up") { tuiTop(view) == 80 }
+        dragInView(view, "40", "150", -80.0)
+        until("finger up scrolls TUI toward older lines") { tuiTop(view) in 0..79 }
+        runOnMainSync { model.send(id, "r") }
+        until("reset before mouse wheel") { tuiTop(view) == 80 }
+        mouseWheel(view, 1f)
+        until("mouse wheel up retains older-history direction") { tuiTop(view) in 0..79 }
+        val mouseUp = tuiTop(view)
+        mouseWheel(view, -1f)
+        until("mouse wheel down retains newer-history direction") { tuiTop(view) > mouseUp }
+        eval(view, "window.touchScrollCalls=0;const originalTouchScroll=window.scrollByTouch;window.scrollByTouch=p=>{window.touchScrollCalls++;originalTouchScroll(p)};true")
+        dragInView(view, "40", "50", 80.0, mouse = true)
+        check(eval(view, "window.touchScrollCalls") == "0") { "Mouse drag was misclassified as finger scroll" }
         runOnMainSync { model.send(id, "r") }
         until("reset before grip") { tuiTop(view) == 80 }
         dragInView(view, "thumb.getBoundingClientRect().left + thumb.offsetWidth/2", "thumb.getBoundingClientRect().top + thumb.offsetHeight/2", 60.0)
@@ -199,16 +222,31 @@ class TerminalInputInstrumentation : Instrumentation() {
     private fun scrollButton(view: WebView, up: Boolean) {
         eval(view, "document.getElementById('${if (up) "scroll-up" else "scroll-down"}').click();true")
     }
-    private fun dragInView(view: WebView, xExpression: String, yExpression: String, dy: Double) {
+    private fun dragInView(view: WebView, xExpression: String, yExpression: String, dy: Double, mouse: Boolean = false) {
         val xy = IntArray(2)
         runOnMainSync { view.getLocationOnScreen(xy) }
         val scale = view.width / eval(view, "window.innerWidth").toDouble()
         val x = (xy[0] + eval(view, xExpression).toDouble()*scale).toFloat()
         val y = (xy[1] + eval(view, yExpression).toDouble()*scale).toFloat()
         val now = android.os.SystemClock.uptimeMillis()
-        sendPointerSync(MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x, y, 0))
-        for (step in 1..8) sendPointerSync(MotionEvent.obtain(now, now+step*30L, MotionEvent.ACTION_MOVE, x, y+(dy*scale*step/8).toFloat(), 0))
-        sendPointerSync(MotionEvent.obtain(now, now+270, MotionEvent.ACTION_UP, x, y+(dy*scale).toFloat(), 0))
+        fun event(action: Int, whenMs: Long, eventY: Float): MotionEvent {
+            val pointer = MotionEvent.PointerProperties().apply { id=0; toolType=if (mouse) MotionEvent.TOOL_TYPE_MOUSE else MotionEvent.TOOL_TYPE_FINGER }
+            val coords = MotionEvent.PointerCoords().apply { this.x=x; this.y=eventY; pressure=1f; size=1f }
+            return MotionEvent.obtain(now, whenMs, action, 1, arrayOf(pointer), arrayOf(coords), 0,
+                if (mouse && action != MotionEvent.ACTION_UP) MotionEvent.BUTTON_PRIMARY else 0,
+                1f, 1f, 0, 0, if (mouse) android.view.InputDevice.SOURCE_MOUSE else android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
+        }
+        sendPointerSync(event(MotionEvent.ACTION_DOWN, now, y))
+        for (step in 1..8) sendPointerSync(event(MotionEvent.ACTION_MOVE, now+step*30L, y+(dy*scale*step/8).toFloat()))
+        sendPointerSync(event(MotionEvent.ACTION_UP, now+270, y+(dy*scale).toFloat()))
+    }
+    private fun mouseWheel(view: WebView, vertical: Float) {
+        val now=android.os.SystemClock.uptimeMillis()
+        val pointer=MotionEvent.PointerProperties().apply { id=0; toolType=MotionEvent.TOOL_TYPE_MOUSE }
+        val coords=MotionEvent.PointerCoords().apply { x=view.width/2f; y=view.height/2f; setAxisValue(MotionEvent.AXIS_VSCROLL,vertical) }
+        val event=MotionEvent.obtain(now,now,MotionEvent.ACTION_SCROLL,1,arrayOf(pointer),arrayOf(coords),0,0,1f,1f,0,0,android.view.InputDevice.SOURCE_MOUSE,0)
+        runOnMainSync { view.dispatchGenericMotionEvent(event) }
+        event.recycle()
     }
     private fun findWebView(view: View): WebView? {
         if (view is WebView) return view

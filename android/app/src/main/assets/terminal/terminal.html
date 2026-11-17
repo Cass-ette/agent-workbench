@@ -92,9 +92,12 @@ window.writeChunk = data => terminal.write(Uint8Array.from(atob(data), c => c.ch
 window.changeFont = amount => {terminal.options.fontSize=Math.max(9,Math.min(24,terminal.options.fontSize+amount));resize()};
 window.focusTerminal = () => terminal.focus();
 let touchRemainder=0;
+window.beginTouchScroll = () => {touchRemainder=0};
 window.scrollByTouch = pixels => {
   const cellHeight=terminal.element.querySelector('.xterm-screen').clientHeight/terminal.rows;
-  touchRemainder-=pixels;
+  // Finger drags use the requested reversed direction. Physical mouse events
+  // are handled by WebView/xterm and never enter this path.
+  touchRemainder+=pixels;
   const lines=Math.trunc(touchRemainder/cellHeight);
   if (lines) {touchRemainder-=lines*cellHeight;scrollLines(lines);}
 };

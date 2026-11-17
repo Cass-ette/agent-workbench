@@ -2,6 +2,7 @@ package com.cassette.workbench
 
 import android.content.Context
 import android.text.InputType
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ViewConfiguration
@@ -34,27 +35,47 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // A connected mouse must not change finger gestures. Classify the
+        // current event, leaving mouse selection/dragging and wheels to WebView.
+        if (event.isFromSource(InputDevice.SOURCE_MOUSE) || event.getToolType(0) == MotionEvent.TOOL_TYPE_MOUSE) {
+            return super.onTouchEvent(event)
+        }
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downY = event.y
                 lastY = event.y
                 touchMoved = false
                 touchingScrollbar = event.x >= width - 36 * resources.displayMetrics.density
+                if (terminalReady) evaluateJavascript("window.beginTouchScroll()", null)
             }
             MotionEvent.ACTION_MOVE -> {
                 val delta = event.y - lastY
-                if (!touchMoved && kotlin.math.abs(event.y - downY) > touchSlop) touchMoved = true
-                if (!touchingScrollbar && touchMoved && kotlin.math.abs(delta) > 0.5f) {
-                    // xterm owns its viewport inside the WebView, so WebView's native
-                    // scrolling cannot move it. Forward a drag as line scrolling.
-                    evaluateJavascript("window.scrollByTouch(${delta.toInt()})", null)
+                if (!touchingScrollbar && !touchMoved && kotlin.math.abs(event.y - downY) > touchSlop) {
+                    touchMoved = true
+                    // Stop WebView/xterm's default touch scroll before taking
+                    // over, otherwise it can cancel our reversed finger scroll.
+                    val cancel = MotionEvent.obtain(event)
+                    cancel.action = MotionEvent.ACTION_CANCEL
+                    super.onTouchEvent(cancel)
+                    cancel.recycle()
+                }
+                if (touchMoved) {
+                    val cssPixels = delta / resources.displayMetrics.density
+                    evaluateJavascript("window.scrollByTouch($cssPixels)", null)
                     lastY = event.y
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (touchMoved) {
+                    touchMoved = false
+                    return true
                 }
             }
         }
         val handled = super.onTouchEvent(event)
         if (event.actionMasked == MotionEvent.ACTION_UP) {
-            if (!touchMoved && !touchingScrollbar) showTerminalKeyboard()
+            if (!touchingScrollbar) showTerminalKeyboard()
             touchMoved = false
         }
         return handled

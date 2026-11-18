@@ -17,12 +17,16 @@ import androidx.lifecycle.Lifecycle
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-/** Emulator-only test against a loopback PTY fixture; never uses model APIs or real keys. */
+/** Default: emulator PTY fixture. Explicit flags enable device runtime or metadata checks. */
 class TerminalInputInstrumentation : Instrumentation() {
     private lateinit var args: Bundle
     override fun onCreate(arguments: Bundle?) { args = arguments ?: Bundle(); start() }
 
     override fun onStart() {
+        if (args.getString("gateway_smoke") == "true") {
+            DeviceGatewaySmoke(this).run(args)
+            return
+        }
         if (args.getString("device_smoke") == "true") {
             DeviceRuntimeSmoke(this).run()
             return

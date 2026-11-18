@@ -8,6 +8,7 @@ Windows 朋友请从 [Windows 发布页](https://github.com/Cass-ette/claude-cch
 - [Windows 源码、开发与构建说明](windows/README.md)
 - 本项目采用 [MIT 许可证](LICENSE)，第三方组件保留各自许可证。
 - 每个人使用自己的配置和凭据；`127.0.0.1` 指使用者当前的电脑，不会自动连接作者的网关。
+- [三端连接远程网关与迁移排错](docs/remote-gateway.zh-CN.md)：Mac、Windows、Android 均支持直接连接 HTTPS 网关。
 
 ## macOS
 
@@ -44,6 +45,8 @@ Claude requires an Anthropic Messages-compatible gateway. Codex requires an Open
 ## Build
 
 Requirements: macOS 14+, Swift 6.2+, Python 3, and whichever CLI you intend to use (`~/.local/bin/claude` and/or `~/.local/bin/codex`). The build script produces a universal arm64/x86_64 application. The included Docker Compose template is one optional gateway deployment path.
+
+For remote HTTPS metadata queries, the macOS app prefers Homebrew or Miniconda Python over the system Python, whose older LibreSSL may fail TLS negotiation even when a browser connects successfully. Set `CCHP_MANAGER_PYTHON` in the app's launch environment to choose a specific Python executable. This affects only the app's metadata backend, not the configured gateway or the Agent CLI. Windows uses Rustls and Android uses the system HTTPS implementation; neither depends on macOS Python.
 
 Run `./build-app.command`. The app bundle is written to `build/CCHP Model Manager.app`. Run `./package-friend.command` to create a ZIP containing the app and a fresh local CCHP setup template. This ad-hoc signed build is not notarized; broad distribution requires an Apple Developer ID signature and notarization.
 

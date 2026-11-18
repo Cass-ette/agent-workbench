@@ -244,11 +244,17 @@ private struct BackendClient: Sendable {
         } else {
             throw BackendError(message: "找不到本机 Claude 后端脚本。请重新构建应用。")
         }
-        let candidates = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+        let environment = ProcessInfo.processInfo.environment
+        let configuredPython = environment["CCHP_MANAGER_PYTHON"].map { [$0] } ?? []
+        let pathCandidates = (environment["PATH"] ?? "")
             .split(separator: ":")
             .map { String($0) + "/python3" }
-            + ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3",
+        // Finder's PATH often selects the system Python with an older TLS stack first.
+        let candidates = configuredPython
+            + ["/opt/homebrew/bin/python3", "/usr/local/bin/python3",
                NSHomeDirectory() + "/miniconda3/bin/python3"]
+            + pathCandidates
+            + ["/usr/bin/python3"]
         guard let python = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             throw BackendError(message: "找不到 Python 3；无法启动隔离后端。")
         }

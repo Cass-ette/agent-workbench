@@ -57,9 +57,9 @@ let touchRemainder=0;
 window.beginTouchScroll = () => {touchRemainder=0};
 window.scrollByTouch = pixels => {
   const cellHeight=terminal.element.querySelector('.xterm-screen').clientHeight/terminal.rows;
-  // Finger drags use the requested reversed direction. Physical mouse events
-  // are handled by WebView/xterm and never enter this path.
-  touchRemainder+=pixels;
+  // Natural touch scrolling moves content with the finger. Physical mouse
+  // events are handled by WebView/xterm and never enter this path.
+  touchRemainder-=pixels;
   const lines=Math.trunc(touchRemainder/cellHeight);
   if (lines) {touchRemainder-=lines*cellHeight;scrollLines(lines);}
 };

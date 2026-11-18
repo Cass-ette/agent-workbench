@@ -51,7 +51,7 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
                 if (!touchMoved && kotlin.math.abs(event.y - downY) > touchSlop) {
                     touchMoved = true
                     // Stop WebView/xterm's default touch scroll before taking
-                    // over, otherwise it can cancel our reversed finger scroll.
+                    // over, otherwise it can cancel our finger scroll.
                     val cancel = MotionEvent.obtain(event)
                     cancel.action = MotionEvent.ACTION_CANCEL
                     super.onTouchEvent(cancel)

@@ -174,10 +174,10 @@ class TerminalInputInstrumentation : Instrumentation() {
         eval(view, "terminal.scrollToLine(Math.floor(terminal.buffer.active.baseY/2));true")
         val middle = eval(view, "terminal.buffer.active.viewportY").toInt()
         dragInView(view, "40", "50", 80.0)
-        until("finger down scrolls Shell toward newer lines") { eval(view, "terminal.buffer.active.viewportY").toInt() > middle }
+        until("finger down scrolls Shell toward older lines") { eval(view, "terminal.buffer.active.viewportY").toInt() < middle }
         val fingerDown = eval(view, "terminal.buffer.active.viewportY").toInt()
         dragInView(view, "40", "150", -80.0)
-        until("finger up scrolls Shell toward older lines") { eval(view, "terminal.buffer.active.viewportY").toInt() < fingerDown }
+        until("finger up scrolls Shell toward newer lines") { eval(view, "terminal.buffer.active.viewportY").toInt() > fingerDown }
         check(model.termux.request("/test/state").getInt("inputs") == inputs) { "Finger scrolling sent Shell input" }
         eval(view, "terminal.scrollToBottom();true")
         val python = model.termux.request("/test/state").getString("python")
@@ -198,11 +198,11 @@ class TerminalInputInstrumentation : Instrumentation() {
         runOnMainSync { model.send(id, "r") }
         until("reset TUI position") { tuiTop(view) == 80 }
         dragInView(view, "terminal.element.querySelector('.xterm-screen').getBoundingClientRect().left + 40", "terminal.element.querySelector('.xterm-screen').getBoundingClientRect().top + 40", 100.0)
-        until("finger down scrolls TUI toward newer lines") { tuiTop(view) > 80 }
+        until("finger down scrolls TUI toward older lines") { tuiTop(view) in 0..79 }
         runOnMainSync { model.send(id, "r") }
         until("reset before finger up") { tuiTop(view) == 80 }
         dragInView(view, "40", "150", -80.0)
-        until("finger up scrolls TUI toward older lines") { tuiTop(view) in 0..79 }
+        until("finger up scrolls TUI toward newer lines") { tuiTop(view) > 80 }
         runOnMainSync { model.send(id, "r") }
         until("reset before mouse wheel") { tuiTop(view) == 80 }
         mouseWheel(view, 1f)
@@ -216,7 +216,7 @@ class TerminalInputInstrumentation : Instrumentation() {
         runOnMainSync { model.send(id, "r") }
         until("reset before right-edge drag") { tuiTop(view) == 80 }
         dragInView(view, "window.innerWidth - 10", "50", 60.0)
-        until("right edge is available for reverse touch scrolling") { tuiTop(view) > 80 }
+        until("right edge is available for content scrolling") { tuiTop(view) in 0..79 }
         runOnMainSync { model.send(id, "br") }
         until("legacy mouse mode ready") { tuiTop(view) == 80 }
         scrollButton(view, true)

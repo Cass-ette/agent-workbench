@@ -38,6 +38,18 @@ def main():
                     pending = pending[len(shortcut):]
                     draw()
                     continue
+                arrow = next((s for s in (b"\x1b[A", b"\x1b[B") if pending.startswith(s)), None)
+                if arrow:
+                    top = max(0, min(100, top + (-1 if arrow == b"\x1b[A" else 1)))
+                    pending = pending[len(arrow):]
+                    draw()
+                    continue
+                page = next((s for s in (b"\x1b[5~", b"\x1b[6~") if pending.startswith(s)), None)
+                if page:
+                    top = max(0, min(100, top + (-10 if page == b"\x1b[5~" else 10)))
+                    pending = pending[len(page):]
+                    draw()
+                    continue
                 match = re.match(rb"\x1b\[<(\d+);\d+;\d+[Mm]", pending)
                 if match:
                     button = int(match[1])
@@ -56,6 +68,8 @@ def main():
                     elif key == ord("c"):
                         codex_mode = True
                         os.write(1, b"\x1b[?1006l\x1b[?1003l")
+                    elif key == ord("g"):
+                        codex_mode = False
                     elif key == ord("r"):
                         top = 80
                     else:

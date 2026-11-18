@@ -512,7 +512,7 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
                     cursor.fontDelta = fontDelta
                 }
                 if (cursor.scrollRequest != scrollRequest) {
-                    view.evaluateJavascript("window.scrollByButton(${scrollRequest - cursor.scrollRequest})", null)
+                    view.evaluateJavascript("window.scrollByButton(${scrollRequest - cursor.scrollRequest}, ${JSONObject.quote(session.client)})", null)
                     cursor.scrollRequest = scrollRequest
                 }
                 if (cursor.bottomRequest != bottomRequest) {

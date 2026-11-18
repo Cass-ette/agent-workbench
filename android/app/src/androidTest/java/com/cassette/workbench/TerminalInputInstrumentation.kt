@@ -174,10 +174,10 @@ class TerminalInputInstrumentation : Instrumentation() {
         eval(view, "terminal.scrollToLine(Math.floor(terminal.buffer.active.baseY/2));true")
         val middle = eval(view, "terminal.buffer.active.viewportY").toInt()
         dragInView(view, "40", "50", 80.0)
-        until("finger down scrolls Shell toward older lines") { eval(view, "terminal.buffer.active.viewportY").toInt() < middle }
+        until("finger down scrolls Shell toward newer lines") { eval(view, "terminal.buffer.active.viewportY").toInt() > middle }
         val fingerDown = eval(view, "terminal.buffer.active.viewportY").toInt()
         dragInView(view, "40", "150", -80.0)
-        until("finger up scrolls Shell toward newer lines") { eval(view, "terminal.buffer.active.viewportY").toInt() > fingerDown }
+        until("finger up scrolls Shell toward older lines") { eval(view, "terminal.buffer.active.viewportY").toInt() < fingerDown }
         check(model.termux.request("/test/state").getInt("inputs") == inputs) { "Finger scrolling sent Shell input" }
         eval(view, "terminal.scrollToBottom();true")
         val python = model.termux.request("/test/state").getString("python")
@@ -198,11 +198,11 @@ class TerminalInputInstrumentation : Instrumentation() {
         runOnMainSync { model.send(id, "r") }
         until("reset TUI position") { tuiTop(view) == 80 }
         dragInView(view, "terminal.element.querySelector('.xterm-screen').getBoundingClientRect().left + 40", "terminal.element.querySelector('.xterm-screen').getBoundingClientRect().top + 40", 100.0)
-        until("finger down scrolls TUI toward older lines") { tuiTop(view) in 0..79 }
+        until("finger down scrolls TUI toward newer lines") { tuiTop(view) > 80 }
         runOnMainSync { model.send(id, "r") }
         until("reset before finger up") { tuiTop(view) == 80 }
         dragInView(view, "40", "150", -80.0)
-        until("finger up scrolls TUI toward newer lines") { tuiTop(view) > 80 }
+        until("finger up scrolls TUI toward older lines") { tuiTop(view) in 0..79 }
         runOnMainSync { model.send(id, "r") }
         until("reset before mouse wheel") { tuiTop(view) == 80 }
         mouseWheel(view, 1f)
@@ -216,7 +216,7 @@ class TerminalInputInstrumentation : Instrumentation() {
         runOnMainSync { model.send(id, "r") }
         until("reset before right-edge drag") { tuiTop(view) == 80 }
         dragInView(view, "window.innerWidth - 10", "50", 60.0)
-        until("right edge is available for content scrolling") { tuiTop(view) in 0..79 }
+        until("right edge is available for reverse touch scrolling") { tuiTop(view) > 80 }
         runOnMainSync { model.send(id, "br") }
         until("legacy mouse mode ready") { tuiTop(view) == 80 }
         scrollButton(view, true)
@@ -224,6 +224,22 @@ class TerminalInputInstrumentation : Instrumentation() {
         check(eval(view, "terminal.buffer.active.getLine(0).translateToString(true).includes('UNEXPECTED=0')") == "true") { "Scrolling sent unexpected input" }
         runOnMainSync { model.send(id, "cr") }
         until("Codex transcript fixture ready") { tuiTop(view) == 80 && eval(view, "terminal.modes.mouseTrackingMode === 'none' && terminal.buffer.active.getLine(0).translateToString(true).includes('T R A N S C R I P T')") == "true" }
+        scrollButton(view, true, "codex")
+        until("up button scrolls Codex transcript without mouse tracking") { tuiTop(view) < 80 }
+        val codexUp = tuiTop(view)
+        scrollButton(view, false, "codex")
+        until("down button scrolls Codex transcript without mouse tracking") { tuiTop(view) > codexUp }
+        runOnMainSync { model.send(id, "g") }
+        until("generic full-screen TUI ready without mouse tracking") { tuiTop(view) == 80 && eval(view, "terminal.modes.mouseTrackingMode === 'none' && terminal.buffer.active.getLine(0).translateToString(true).includes('TUI_TOP=80')") == "true" }
+        scrollButton(view, true)
+        until("up button uses PageUp for generic full-screen TUI") { tuiTop(view) < 80 }
+        val genericUp = tuiTop(view)
+        scrollButton(view, false)
+        until("down button uses PageDown for generic full-screen TUI") { tuiTop(view) > genericUp }
+        runOnMainSync { model.send(id, "r") }
+        until("generic full-screen TUI reset") { tuiTop(view) == 80 }
+        runOnMainSync { model.send(id, "c") }
+        until("Codex transcript mode restored") { tuiTop(view) == 80 && eval(view, "terminal.modes.mouseTrackingMode === 'none' && terminal.buffer.active.getLine(0).translateToString(true).includes('T R A N S C R I P T')") == "true" }
         eval(view, "window.jumpToBottom('codex');true")
         until("Codex transcript bottom uses End") { tuiTop(view) == 100 }
         check(eval(view, "terminal.buffer.active.getLine(1).translateToString(true).includes('UNEXPECTED=0')") == "true") { "Codex received the wrong bottom shortcut" }
@@ -233,8 +249,8 @@ class TerminalInputInstrumentation : Instrumentation() {
         until("UTF-8 byte split survives output chunks") { eval(view, "Array.from({length:terminal.buffer.active.length},(_,i)=>terminal.buffer.active.getLine(i)?.translateToString(true)||'').some(line=>line.includes('SPLIT_界_END'))") == "true" }
     }
     private fun tuiTop(view: WebView): Int = eval(view, "Number(Array.from({length:3},(_,i)=>terminal.buffer.active.getLine(i)?.translateToString(true)||'').join(' ').match(/TUI_TOP=(\\d+)/)?.[1]??-1)").toInt()
-    private fun scrollButton(view: WebView, up: Boolean) {
-        eval(view, "window.scrollByButton(${if (up) -1 else 1});true")
+    private fun scrollButton(view: WebView, up: Boolean, client: String = "shell") {
+        eval(view, "window.scrollByButton(${if (up) -1 else 1}, ${org.json.JSONObject.quote(client)});true")
     }
     private fun dragInView(view: WebView, xExpression: String, yExpression: String, dy: Double, mouse: Boolean = false) {
         val xy = IntArray(2)

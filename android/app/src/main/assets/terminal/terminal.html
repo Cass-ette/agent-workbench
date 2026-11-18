@@ -57,13 +57,27 @@ let touchRemainder=0;
 window.beginTouchScroll = () => {touchRemainder=0};
 window.scrollByTouch = pixels => {
   const cellHeight=terminal.element.querySelector('.xterm-screen').clientHeight/terminal.rows;
-  // Natural touch scrolling moves content with the finger. Physical mouse
-  // events are handled by WebView/xterm and never enter this path.
-  touchRemainder-=pixels;
+  // Finger scrolling follows the requested reverse direction. Mouse input is
+  // handled by WebView/xterm and never enters this path.
+  touchRemainder+=pixels;
   const lines=Math.trunc(touchRemainder/cellHeight);
   if (lines) {touchRemainder-=lines*cellHeight;scrollLines(lines);}
 };
-window.scrollByButton = pages => scrollLines(Math.max(3,Math.floor(terminal.rows/2))*pages);
+window.scrollByButton = (pages, client='shell') => {
+  const lines=Math.max(3,Math.floor(terminal.rows/2))*pages;
+  if (!lines) return;
+  if (appOwnsScroll()) {scrollLines(lines);return;}
+  if (terminal.buffer.active.type==='alternate') {
+    const active=terminal.buffer.active;
+    const visible=Array.from({length:terminal.rows},(_,i)=>active.getLine(active.baseY+i)?.translateToString(true)||'');
+    const transcript=visible.join(' ');
+    const codexTranscript=client==='codex' && visible.slice(0,3).some(line=>/^\s*\/\s*T\s*R\s*A\s*N\s*S\s*C\s*R\s*I\s*P\s*T\s*\//.test(line)) && /home\/end.*to jump/i.test(transcript);
+    const key=codexTranscript ? (lines<0?'\x1b[A':'\x1b[B') : (lines<0?'\x1b[5~':'\x1b[6~');
+    terminal.input(key.repeat(Math.min(Math.abs(lines),terminal.rows*4)));
+    return;
+  }
+  scrollLines(lines);
+};
 window.jumpToBottom = client => {
   const b=terminal.buffer.active;
   const lines=Array.from({length:terminal.rows},(_,i)=>b.getLine(b.baseY+i)?.translateToString(true)||'');

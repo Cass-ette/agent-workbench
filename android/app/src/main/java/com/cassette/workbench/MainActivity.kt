@@ -124,6 +124,7 @@ fun WorkbenchApp(model: WorkbenchModel, requestTermuxPermission: () -> Unit) {
     var expanded by rememberSaveable { mutableStateOf(true) }
     var selectModel by remember { mutableStateOf(false) }
     var confirmResume by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
     var confirmCompatibility by remember { mutableStateOf(false) }
     LaunchedEffect(model.sessions.size) { if (model.sessions.isNotEmpty()) expanded = false }
     Column(Modifier.fillMaxSize()) {
@@ -133,6 +134,10 @@ fun WorkbenchApp(model: WorkbenchModel, requestTermuxPermission: () -> Unit) {
                     Text(model.executionName, fontWeight = FontWeight.Medium)
                     Text(model.sshTarget?.destination ?: model.options.workspace, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                if (model.localExecution) TextButton(onClick = {
+                    showHistory = true
+                    model.refreshHistory()
+                }) { Text("对话历史") }
                 TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "收起配置" else "配置任务") }
             }
             if (expanded) Column(Modifier.fillMaxWidth().heightIn(max = 370.dp).verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
@@ -167,7 +172,11 @@ fun WorkbenchApp(model: WorkbenchModel, requestTermuxPermission: () -> Unit) {
                 }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    ChoiceField("会话", modeName(model.options.mode), Modifier.weight(1f), listOf("new" to "新会话", "continue" to "继续最近会话", "resume" to "选择历史会话"), { model.updateOptions(model.options.copy(mode = it)) })
+                    ChoiceField("会话", model.selectedHistory?.title ?: modeName(model.options.mode), Modifier.weight(1f),
+                        listOf("new" to "新会话", "continue" to "继续最近会话", "resume" to "选择历史会话"), {
+                            if (it == "resume") { showHistory = true; model.refreshHistory() }
+                            else model.updateOptions(model.options.copy(mode = it))
+                        })
                     Button(onClick = { if (model.options.mode == "new") model.launch() else confirmResume = true }, enabled = model.connected && !model.busy, modifier = Modifier.height(56.dp)) { Text(if (model.busy) "处理中…" else "启动 Agent") }
                 }
                 Text("Agent 在手机 Debian 中执行，模型请求发往所选网关。首次启动可能需要选择主题并确认 API Key。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 9.dp))
@@ -199,15 +208,52 @@ fun WorkbenchApp(model: WorkbenchModel, requestTermuxPermission: () -> Unit) {
         }
     }
     if (selectModel) ModelPicker(model, onDismiss = { selectModel = false })
+    if (showHistory) HistoryPicker(model, onDismiss = { showHistory = false }, onSelect = {
+        model.chooseHistory(it)
+        expanded = true
+        showHistory = false
+    })
     if (confirmCompatibility) AlertDialog(onDismissRequest = { confirmCompatibility = false },
         title = { Text("启用 Codex 命令兼容模式？") },
         text = { Text("部分安卓设备的 Debian/PRoot 无法运行 Codex Linux 沙箱，表现为能聊天但命令执行失败。启用后，Codex 将不使用这层文件与网络沙箱，并保留按需审批：是否请求确认由 Codex 决定，普通命令可以直接执行，并非逐条确认。它仍受 Android 的应用隔离限制，但可访问 Termux 及绑定给 Debian 的文件，范围不限于当前项目。仅用于你信任的任务。已运行终端保持原权限，之后新建 Codex 使用此选择，可随时关闭。") },
         confirmButton = { TextButton(onClick = { model.updateOptions(model.options.copy(codexCompatibility = true)); confirmCompatibility = false }) { Text("启用并记住") } },
         dismissButton = { TextButton(onClick = { confirmCompatibility = false }) { Text("保留沙箱") } })
     if (confirmResume) AlertDialog(onDismissRequest = { confirmResume = false }, title = { Text("恢复历史会话？") },
-        text = { Text("历史上下文会发送给当前调用 Key 和所选模型。会话来自手机本地隔离目录，可能产生费用。") },
+        text = { Text(model.selectedHistory?.let {
+            "${it.title}\n配置：${model.profile?.name.orEmpty()}\n网关：${model.profile?.gateway.orEmpty()}\n模型：${model.options.model}\n\n历史上下文会发送到这个网关，可能产生费用。原会话会保留。"
+        } ?: "历史上下文会发送给当前调用 Key 和所选模型，可能产生费用。") },
         confirmButton = { TextButton(onClick = { confirmResume = false; model.launch() }) { Text("恢复并启动") } },
         dismissButton = { TextButton(onClick = { confirmResume = false }) { Text("取消") } })
+}
+
+@Composable private fun HistoryPicker(model: WorkbenchModel, onDismiss: () -> Unit, onSelect: (LocalConversation) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    val rows = model.history.filter { row ->
+        listOf(row.title, row.workspace, row.model, row.client).any { it.contains(query.trim(), ignoreCase = true) }
+    }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("本地对话历史") }, text = {
+        Column {
+            OutlinedTextField(query, { query = it }, label = { Text("搜索标题、模型或项目") }, singleLine = true)
+            when {
+                model.historyLoading -> LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 10.dp))
+                model.historyError.isNotEmpty() -> Text(model.historyError, Modifier.padding(top = 10.dp))
+                rows.isEmpty() -> Text("暂无匹配的本地对话", Modifier.padding(top = 10.dp))
+                else -> LazyColumn(Modifier.heightIn(max = 300.dp)) {
+                    items(rows, key = { it.reference }) { row ->
+                        val profile = model.profiles.firstOrNull { it.id == row.profileId }?.name ?: "来源配置未知"
+                        Column(Modifier.fillMaxWidth().clickable { onSelect(row) }.padding(vertical = 10.dp)) {
+                            Text(row.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${if (row.client == "codex") "Codex" else "Claude"} · ${row.model.ifBlank { "模型未知" }} · $profile",
+                                style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(row.workspace, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(java.text.DateFormat.getDateTimeInstance().format(java.util.Date(row.updatedAt * 1000)),
+                                style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+            }
+        }
+    }, confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } })
 }
 
 @Composable private fun ChoiceField(label: String, value: String, modifier: Modifier = Modifier, choices: List<Pair<String, String>>, choose: (String) -> Unit, empty: () -> Unit = {}) {

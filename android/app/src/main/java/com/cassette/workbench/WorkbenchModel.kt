@@ -16,6 +16,10 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.ScheduledFuture
 
 data class OutputChunk(val serial: Long, val encoded: String)
+data class LocalConversation(
+    val id: String, val reference: String, val client: String, val title: String,
+    val workspace: String, val model: String, val profileId: String, val updatedAt: Long,
+)
 data class UsageSummary(
     val inputTokens: Long? = null,
     val outputTokens: Long? = null,
@@ -57,6 +61,10 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     var profiles by mutableStateOf(store.profiles()); private set
     var sshTargets by mutableStateOf(store.sshTargets()); private set
     var options by mutableStateOf(store.options()); private set
+    var history by mutableStateOf(emptyList<LocalConversation>()); private set
+    var historyLoading by mutableStateOf(false); private set
+    var historyError by mutableStateOf(""); private set
+    var selectedHistory by mutableStateOf<LocalConversation?>(null); private set
     var sessions by mutableStateOf(emptyList<TerminalSession>()); private set
     var selectedSession by mutableStateOf("")
     var busy by mutableStateOf(false); private set
@@ -133,7 +141,41 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
 
     fun message(value: String) { notice = value; error = "" }
     fun environmentChanged() { environmentRevision++ }
-    fun updateOptions(value: TaskOptions) { options = value; store.saveOptions(value) }
+    fun updateOptions(value: TaskOptions) {
+        val next = if (value.mode == "resume" && (value.executionId != "local" || value.client != selectedHistory?.client))
+            value.copy(mode = "new") else value
+        if (next.mode != "resume") selectedHistory = null
+        options = next
+        store.saveOptions(if (next.mode == "resume") next.copy(mode = "new") else next)
+    }
+
+    fun refreshHistory() {
+        if (historyLoading) return
+        historyLoading = true
+        historyError = ""
+        worker.execute {
+            val result = runCatching {
+                val rows = termux.request("/history", timeout = 15000).getJSONArray("sessions")
+                (0 until rows.length()).map { index ->
+                    val row = rows.getJSONObject(index)
+                    LocalConversation(row.getString("id"), row.getString("history_ref"), row.getString("client"),
+                        row.getString("title"), row.getString("workspace"), row.getString("model"),
+                        row.getString("profile_id"), row.getLong("updated_at"))
+                }
+            }
+            main.post {
+                result.onSuccess { history = it }.onFailure {
+                    historyError = "无法读取本地历史，请在运行环境页重新连接 Termux"
+                }
+                historyLoading = false
+            }
+        }
+    }
+
+    fun chooseHistory(entry: LocalConversation) {
+        selectedHistory = entry
+        updateOptions(options.copy(executionId = "local", client = entry.client, workspace = entry.workspace, mode = "resume"))
+    }
     fun saveSshTarget(name: String, host: String, user: String, port: String, done: () -> Unit) {
         runCatching {
             val target = SshTargetPolicy.validate(name, host, user, port)
@@ -298,24 +340,36 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     fun launch(shell: Boolean = false) {
         if (!connected || busy) { error = "请先在环境页连接 Termux"; return }
         val snapshot = options
+        val source = selectedHistory.takeIf { !shell && snapshot.mode == "resume" && localExecution }
         val selected = profile
         val remote = sshTarget
         if (!localExecution && remote == null) { error = "请先选择 SSH 电脑"; return }
         if (localExecution && !shell && (selected == null || snapshot.model.isBlank())) { error = "请先选择调用配置和模型"; return }
+        if (localExecution && !shell && snapshot.mode == "resume" && source == null) { error = "请先选择要恢复的对话"; return }
         busy = true; error = ""
         worker.execute {
             try {
-                val client = if (remote != null) "ssh" else if (shell) "shell" else snapshot.client
+                val client = if (remote != null) "ssh" else if (shell) "shell" else source?.client ?: snapshot.client
                 val body = JSONObject().put("client", client)
                     .put("mode", if (remote == null) snapshot.mode else "new").put("workspace", snapshot.workspace)
                     .put("codex_compatibility", snapshot.codexCompatibility)
+                if (source != null) body.put("history_ref", source.reference).put("history_id", source.id)
                 if (remote != null) body.put("ssh", JSONObject().put("host", remote.host).put("user", remote.user).put("port", remote.port))
                 else if (!shell && selected != null) body.put("profile_id", selected.id).put("model", snapshot.model)
                     .put("gateway", selected.gateway).put("key", store.secret(selected.id))
-                val result = termux.request("/sessions", "POST", body, 4000)
-                val title = if (remote != null) "SSH · ${remote.name}" else if (shell) "Shell" else "${if (snapshot.client == "codex") "Codex" else "Claude"} · ${snapshot.model}"
+                val result = termux.request("/sessions", "POST", body, if (source != null) 15000 else 4000)
+                val title = if (remote != null) "SSH · ${remote.name}" else if (shell) "Shell" else "${if (client == "codex") "Codex" else "Claude"} · ${snapshot.model}"
                 val terminal = TerminalSession(result.getString("id"), title, remote?.destination ?: snapshot.workspace, client, bridgePort = termux.currentPort)
-                main.post { sessions = sessions + terminal; selectedSession = terminal.id; saveSessions(); busy = false; notice = if (remote != null) "正在打开 SSH；请在终端核对主机指纹并登录" else "已创建独立终端；Ctrl+C 保留当前 Shell" }
+                main.post {
+                    if (source != null && selectedHistory == source) updateOptions(options.copy(mode = "new"))
+                    sessions = sessions + terminal; selectedSession = terminal.id; saveSessions(); busy = false
+                    notice = when {
+                        remote != null -> "正在打开 SSH；请在终端核对主机指纹并登录"
+                        source?.client == "codex" -> "已从「${source.title}」创建 Codex 分支。旧消息不会显示在新终端；原对话保留，输入后沿用其上下文。"
+                        source != null -> "已从「${source.title}」创建 Claude 分支。原对话保留，新终端从该会话继续。"
+                        else -> "已创建独立终端；Ctrl+C 保留当前 Shell"
+                    }
+                }
             } catch (cause: Exception) { main.post { busy = false; error = safeError(cause) } }
         }
     }

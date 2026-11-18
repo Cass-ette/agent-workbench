@@ -8,6 +8,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,7 @@ MANAGER_LAST_LAUNCH = TEST_ROOT / "manager-last-launch.json"
 SETTINGS = CONFIG_DIR / "settings.json"
 EMPTY_MCP = TEST_ROOT / "empty-mcp.json"
 CODEX_HOME_ROOT = TEST_ROOT / "codex"
+CLAUDE_BRANCH_ROOT = TEST_ROOT / "claude-branches"
 CLAUDE = USER_ROOT / ".local/bin/claude"
 CODEX = USER_ROOT / ".local/bin/codex"
 GATEWAY = "http://127.0.0.1:8081"
@@ -242,7 +244,8 @@ def usage_snapshot():
     from usage_records import scan_usage
     from model_pricing import apply_usage_pricing
     service = pricing_service()
-    snapshot = scan_usage(CONFIG_DIR / "projects", CODEX_HOME_ROOT, include_pricing=True)
+    branches = (home for home in CLAUDE_BRANCH_ROOT.glob("branch-*") if not home.is_symlink())
+    snapshot = scan_usage(CONFIG_DIR / "projects", CODEX_HOME_ROOT, include_pricing=True, claude_branches=branches)
     print(json.dumps(apply_usage_pricing(snapshot, service.resolve), ensure_ascii=False))
 
 
@@ -410,11 +413,11 @@ def launch_profile(profile_id, model, workspace_value, session_mode, gateway_val
                   workspace=workspace, session_mode=session_mode, gateway=gateway)
 
 
-def codex_config(profile_id, model, gateway=None, workspace=None):
+def codex_config(profile_id, model, gateway=None, workspace=None, branch_home=None):
     gateway = gateway or gateway_url()
     scope = json.dumps([profile_id, model, gateway, str(workspace or "")], ensure_ascii=False, separators=(",", ":"))
     scope_id = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:16]
-    home = CODEX_HOME_ROOT / profile_id / scope_id
+    home = branch_home or CODEX_HOME_ROOT / profile_id / scope_id
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(home, 0o700)
     config = (
@@ -433,8 +436,10 @@ def codex_config(profile_id, model, gateway=None, workspace=None):
     return home
 
 
-def build_codex_command(model, workspace, session_mode):
+def build_codex_command(model, workspace, session_mode, history_id=None):
     command = [str(CODEX), "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
+    if history_id:
+        return [str(CODEX), "fork", history_id, *command[1:]]
     if session_mode == "continue":
         return [str(CODEX), "resume", "--last", "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
     if session_mode == "resume":
@@ -442,6 +447,103 @@ def build_codex_command(model, workspace, session_mode):
     if session_mode != "new":
         raise RuntimeError("会话方式无效。")
     return command
+
+
+def history_module():
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import session_history
+    return session_history
+
+
+def history_roots():
+    profiles = {item["id"]: item["name"] for item in load_profiles()}
+    codex_roots = []
+    try:
+        parents = [] if CODEX_HOME_ROOT.is_symlink() else list(CODEX_HOME_ROOT.iterdir())
+    except OSError:
+        parents = []
+    for profile_dir in parents:
+        if profile_dir.is_symlink() or not profile_dir.is_dir():
+            continue
+        label = profiles.get(profile_dir.name, "已移除的调用配置")
+        codex_roots.append((profile_dir, profile_dir.name, label))
+        try:
+            homes = [p for p in profile_dir.iterdir()
+                     if p.name.startswith("branch-") or (len(p.name) == 16
+                     and all(c in "0123456789abcdef" for c in p.name))]
+        except OSError:
+            continue
+        for home in homes:
+            if home.is_dir() and not home.is_symlink():
+                codex_roots.append((home, profile_dir.name, label))
+    claude_roots = [(CONFIG_DIR, "", "")]
+    if CLAUDE_BRANCH_ROOT.is_dir() and not CLAUDE_BRANCH_ROOT.is_symlink():
+        claude_roots.extend((p, "", "") for p in CLAUDE_BRANCH_ROOT.iterdir() if p.name.startswith("branch-"))
+    return codex_roots, claude_roots
+
+
+def history_list():
+    session_history = history_module()
+    codex_roots, claude_roots = history_roots()
+    print(json.dumps({"sessions": session_history.public_rows(
+        session_history.scan_history(codex_roots, claude_roots))}, ensure_ascii=False))
+
+
+def launch_history(history_ref, session_id, client, profile_id, model, workspace_value, gateway_value=None):
+    session_history = history_module()
+    profile = next((item for item in load_profiles() if item["id"] == profile_id), None)
+    if profile is None:
+        raise RuntimeError("找不到目标调用配置；请刷新配置列表。")
+    if not isinstance(model, str) or not model.strip() or len(model) > 250 or any(c in model for c in "\0\r\n"):
+        raise RuntimeError("目标模型无效。")
+    codex_roots, claude_roots = history_roots()
+    row = session_history.resolve_history(history_ref, session_id, client, codex_roots, claude_roots)
+    workspace = Path(workspace_value or row["workspace"]).expanduser()
+    try:
+        workspace = workspace.resolve(strict=True)
+    except OSError:
+        raise RuntimeError("原项目目录不存在或无法访问；请在历史记录中重新选择目录。") from None
+    if not workspace.is_dir():
+        raise RuntimeError("工作目录必须是文件夹。")
+    if client == "claude" and (not row["workspace"] or workspace != Path(row["workspace"]).resolve()):
+        raise RuntimeError("Claude 恢复需要原项目目录；请从历史列表重新选择该会话。")
+    gateway = profile["gateway"]
+    if gateway_value and normalize_gateway(gateway_value) != gateway:
+        raise RuntimeError("目标网关已变更；请刷新配置后重新确认。")
+    key = read_profile_key(profile)
+    if model not in fetch_models(key, gateway):
+        raise RuntimeError("目标调用配置不允许此模型；没有启动恢复会话。")
+    executable = CODEX if client == "codex" else CLAUDE
+    if not executable.is_file():
+        raise RuntimeError("未找到对应客户端；没有恢复会话。")
+    parent = CODEX_HOME_ROOT / profile_id if client == "codex" else CLAUDE_BRANCH_ROOT
+    home, seed = session_history.stage_branch(row, parent, profile_id, profile["name"], model, gateway)
+    try:
+        if client == "codex":
+            codex_config(profile_id, model, gateway, workspace, branch_home=home)
+            environment = dict(os.environ)
+            for name in ("OPENAI_API_KEY", "CODEX_SQLITE_HOME", "OPENAI_BASE_URL"):
+                environment.pop(name, None)
+            environment.update(CODEX_HOME=str(home), CCH_API_KEY=key,
+                               NO_PROXY="127.0.0.1,localhost,::1", no_proxy="127.0.0.1,localhost,::1")
+            command = build_codex_command(model, workspace, "resume", session_id)
+        else:
+            private_write(home / "settings.json", "{}\n")
+            command, environment = build_launch(key, model, workspace=workspace, gateway=gateway,
+                                               config_dir=home, isolated_branch=True)
+            command += ["--resume", session_id, "--fork-session"]
+        with subprocess.Popen(command, cwd=workspace, env=environment) as child:
+            # The CLI owns terminal interrupts; keep the wrapper alive to remove its input copy.
+            previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+            try:
+                return child.wait()
+            finally:
+                signal.signal(signal.SIGINT, previous)
+    finally:
+        # Codex paginated history references its input rollouts from the new session.
+        if client == "claude":
+            seed.unlink(missing_ok=True)
 
 
 def launch_codex_profile(profile_id, model, workspace_value, session_mode, gateway_value=None):
@@ -689,7 +791,8 @@ def setup_key():
     print("尚未发起推理。可以回聊天告诉我“密钥已填”，或选择菜单中的连通性测试。")
 
 
-def build_launch(key, model, smoke=False, workspace=None, session_mode="new", gateway=None):
+def build_launch(key, model, smoke=False, workspace=None, session_mode="new", gateway=None, config_dir=None,
+                 isolated_branch=False):
     gateway = normalize_gateway(gateway) if gateway else gateway_url()
     environment = dict(os.environ)
     for name in list(environment):
@@ -700,7 +803,7 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new", ga
         }:
             environment.pop(name, None)
     environment.update({
-        "CLAUDE_CONFIG_DIR": str(CONFIG_DIR),
+        "CLAUDE_CONFIG_DIR": str(config_dir or CONFIG_DIR),
         "ANTHROPIC_BASE_URL": gateway,
         # Installed Claude's --bare mode reads API_KEY, not AUTH_TOKEN/OAuth/keychain.
         "ANTHROPIC_API_KEY": key,
@@ -716,8 +819,10 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new", ga
         "no_proxy": "127.0.0.1,localhost,::1",
         "MAX_THINKING_TOKENS": "0",
     })
-    command = [str(CLAUDE), "--bare", "--setting-sources", "user", "--settings", str(SETTINGS),
-               "--strict-mcp-config", "--mcp-config", str(EMPTY_MCP), "--model", model,
+    settings = config_dir / "settings.json" if isolated_branch else SETTINGS
+    mcp = '{"mcpServers":{}}' if isolated_branch else str(EMPTY_MCP)
+    command = [str(CLAUDE), "--bare", "--setting-sources", "user", "--settings", str(settings),
+               "--strict-mcp-config", "--mcp-config", mcp, "--model", model,
                "--append-system-prompt", "全程使用简体中文。"]
     if smoke:
         environment["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "256"
@@ -835,7 +940,7 @@ def main():
         "menu", "setup", "status", "models", "plan", "chat", "smoke", "usage",
         "profile-account", "profile-billing", "billing-settings", "save-billing-stdin", "remove-billing",
         "profile-pricing", "save-pricing-source-stdin",
-        "gui-state", "profile-models", "add-profile-stdin", "set-gateway-stdin",
+        "gui-state", "history-list", "history-launch", "profile-models", "add-profile-stdin", "set-gateway-stdin",
         "set-profile-gateway-stdin", "launch", "codex-launch",
     ])
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -843,6 +948,9 @@ def main():
     parser.add_argument("--workspace")
     parser.add_argument("--session-mode", choices=["new", "continue", "resume"], default="new")
     parser.add_argument("--gateway-url")
+    parser.add_argument("--history-ref")
+    parser.add_argument("--session-id")
+    parser.add_argument("--client", choices=["codex", "claude"])
     parser.add_argument("--force", action="store_true")
     arguments = parser.parse_args()
     if arguments.action == "menu": return menu()
@@ -863,6 +971,13 @@ def main():
         billing_actions[arguments.action](arguments.profile_id); return 0
     if arguments.action == "plan": plan(arguments.model); return 0
     if arguments.action == "gui-state": gui_state(); return 0
+    if arguments.action == "history-list": history_list(); return 0
+    if arguments.action == "history-launch":
+        if not all((arguments.history_ref, arguments.session_id, arguments.client,
+                    arguments.profile_id, arguments.workspace)):
+            raise RuntimeError("恢复会话缺少历史来源、目标配置或工作目录。")
+        return launch_history(arguments.history_ref, arguments.session_id, arguments.client,
+                              arguments.profile_id, arguments.model, arguments.workspace, arguments.gateway_url)
     if arguments.action == "profile-models":
         if not arguments.profile_id: raise RuntimeError("缺少 profile-id。")
         profile_models(arguments.profile_id, arguments.gateway_url); return 0

@@ -1,3 +1,4 @@
+mod history;
 mod pricing;
 mod usage;
 use keyring::Entry;
@@ -77,6 +78,9 @@ struct StartTerminalRequest {
     model: String,
     workspace: String,
     session_mode: String,
+    history_ref: Option<String>,
+    history_id: Option<String>,
+    confirmed_gateway: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -443,6 +447,14 @@ fn quote_powershell(value: &str) -> String {
 }
 
 #[tauri::command]
+async fn list_history(app: tauri::AppHandle) -> Result<Vec<history::Conversation>, String> {
+    let root = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || history::scan(&root))
+        .await
+        .map_err(|_| "读取本地对话历史失败".into())
+}
+
+#[tauri::command]
 fn start_terminal(
     request: StartTerminalRequest,
     app: tauri::AppHandle,
@@ -467,7 +479,7 @@ fn start_terminal(
             .ok_or("找不到所选 Key 配置")?
     };
     let workspace = PathBuf::from(request.workspace.trim());
-    if !workspace.is_dir() {
+    if !workspace.is_absolute() || !workspace.is_dir() {
         return Err("请选择一个存在的项目目录".into());
     }
     let key = key_entry(&profile.id)?
@@ -478,10 +490,37 @@ fn start_terminal(
         .path()
         .app_config_dir()
         .map_err(|error| error.to_string())?;
+    let source = match (&request.history_ref, &request.history_id) {
+        (None, None) => None,
+        (Some(reference), Some(id)) if request.session_mode == "resume" => {
+            Some(history::scan(&config_root).into_iter().find(|entry| {
+                entry.history_ref == *reference && entry.id == *id && entry.client == request.client
+            }).ok_or("找不到这条本地会话，请刷新对话历史")?)
+        }
+        _ => return Err("历史会话标识无效".into()),
+    };
+    if source.is_some() && request.confirmed_gateway.as_deref() != Some(profile.gateway.as_str()) {
+        return Err("目标网关已变更，请刷新后重新确认".into());
+    }
+    if let Some(entry) = source.as_ref().filter(|entry| entry.client == "claude") {
+        if entry.workspace.is_empty()
+            || workspace.canonicalize().ok() != PathBuf::from(&entry.workspace).canonicalize().ok()
+        {
+            return Err("Claude 恢复需要原项目目录".into());
+        }
+    }
+    let branch = source.as_ref().map(|entry| {
+        history::stage_branch(entry, &config_root, &profile.id, &profile.name, &request.model, &profile.gateway)
+    }).transpose()?;
     let mut shell = portable_pty::CommandBuilder::new("powershell.exe");
-    shell.args(["-NoLogo", "-NoExit", "-Command"]);
+    shell.args(["-NoLogo", "-NoExit"]);
+    if branch.is_some() {
+        shell.arg("-NoProfile");
+    }
+    shell.arg("-Command");
     let command_text = if request.client == "codex" {
-        let codex_home = config_root.join("codex").join(&profile.id);
+        let codex_home = branch.as_ref().map(|(home, _)| home.clone())
+            .unwrap_or_else(|| config_root.join("codex").join(&profile.id));
         fs::create_dir_all(&codex_home)
             .map_err(|error| format!("创建隔离 Codex 配置失败：{error}"))?;
         let config_text = format!(
@@ -512,7 +551,9 @@ fn start_terminal(
                 "--no-daemon".into(),
             ];
         }
-        if request.session_mode == "resume" {
+        if let Some(entry) = &source {
+            args.splice(0..0, ["fork".into(), entry.id.clone()]);
+        } else if request.session_mode == "resume" {
             args = vec![
                 "resume".into(),
                 "--model".into(),
@@ -532,12 +573,12 @@ fn start_terminal(
             .join(" ");
         format!("& 'codex' {command_args}")
     } else if request.client == "claude" {
-        let claude_home = config_root.join("claude").join(&profile.id);
+        let claude_home = branch.as_ref().map(|(home, _)| home.clone())
+            .unwrap_or_else(|| config_root.join("claude").join(&profile.id));
         fs::create_dir_all(&claude_home)
             .map_err(|error| format!("创建隔离 Claude 配置失败：{error}"))?;
         shell.env("CLAUDE_CONFIG_DIR", claude_home);
         shell.env("ANTHROPIC_BASE_URL", &profile.gateway);
-        shell.env("ANTHROPIC_AUTH_TOKEN", &key);
         shell.env("ANTHROPIC_API_KEY", &key);
         let mut args = vec![
             "--model".to_string(),
@@ -545,10 +586,34 @@ fn start_terminal(
             "--add-dir".into(),
             workspace.display().to_string(),
         ];
+        if branch.is_some() {
+            for name in ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"] {
+                shell.env_remove(name);
+            }
+            shell.env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
+            for name in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "ANTHROPIC_SMALL_FAST_MODEL"] {
+                shell.env(name, &request.model);
+            }
+            let empty_mcp = branch.as_ref().unwrap().0.join("empty-mcp.json");
+            fs::write(&empty_mcp, r#"{"mcpServers":{}}"#)
+                .map_err(|error| format!("写入隔离 Claude MCP 设置失败：{error}"))?;
+            args.extend(["--bare".into(), "--strict-mcp-config".into(),
+                "--mcp-config".into(), empty_mcp.to_string_lossy().into_owned()]);
+        } else {
+            shell.env("ANTHROPIC_AUTH_TOKEN", &key);
+        }
         match request.session_mode.as_str() {
             "new" => {}
             "continue" => args.push("--continue".into()),
-            "resume" => args.push("--resume".into()),
+            "resume" => {
+                args.push("--resume".into());
+                if let Some(entry) = &source {
+                    args.extend([entry.id.clone(), "--fork-session".into()]);
+                }
+            }
             _ => return Err("会话模式无效".into()),
         }
         let command_args = args
@@ -560,12 +625,27 @@ fn start_terminal(
     } else {
         return Err("暂不支持所选客户端".into());
     };
+    let command_text = if let Some((_, seed)) = &branch {
+        let cleanup = if request.client == "claude" {
+            format!("Remove-Item -LiteralPath {} -Force -ErrorAction SilentlyContinue; ",
+                quote_powershell(&seed.to_string_lossy()))
+        } else {
+            String::new()
+        };
+        format!(
+            "try {{ {command_text} }} finally {{ {cleanup}Remove-Item Env:CCH_API_KEY,Env:ANTHROPIC_API_KEY,Env:ANTHROPIC_BASE_URL,Env:CODEX_HOME,Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }}",
+        )
+    } else {
+        command_text
+    };
     shell.arg(format!(
         "chcp 65001 > $null; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $env:TERM = 'xterm-256color'; $env:COLORTERM = 'truecolor'; {command_text}"
     ));
     shell.cwd(&workspace);
     if request.client == "codex" {
         shell.env_remove("OPENAI_API_KEY");
+        shell.env_remove("OPENAI_BASE_URL");
+        shell.env_remove("CODEX_SQLITE_HOME");
         shell.env_remove("ANTHROPIC_API_KEY");
     }
     let system = native_pty_system();
@@ -736,6 +816,7 @@ pub fn run() {
             save_preferences,
             remove_profile,
             start_terminal,
+            list_history,
             write_terminal,
             resize_terminal,
             stop_terminal

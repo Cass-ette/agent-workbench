@@ -33,7 +33,7 @@ class TermuxConnection(private val context: Context, private val store: ProfileS
     fun supportsRuntime() = try {
         val health = request("/health")
         health.optString("version") == BuildConfig.VERSION_NAME && health.optInt("build") == BuildConfig.VERSION_CODE &&
-            health.optJSONArray("capabilities").strings().contains("debian-runtime")
+            health.optJSONArray("capabilities").strings().containsAll(listOf("debian-runtime", "history"))
     } catch (_: Exception) { false }
 
     fun startHost(upgrade: Boolean = false) {
@@ -51,7 +51,7 @@ class TermuxConnection(private val context: Context, private val store: ProfileS
             store.saveBridgePort(port)
         }
         val root = "/data/data/com.termux/files/home/.local/share/agent-workbench/runtime"
-        val files = listOf("termux_bridge.py", "debian_runner.py", "runtime_setup.sh", "workbench_runtime.py")
+        val files = listOf("termux_bridge.py", "debian_runner.py", "runtime_setup.sh", "workbench_runtime.py", "session_history.py")
         val script = buildString {
             append("set -eu\numask 077\n")
             append("export PREFIX=/data/data/com.termux/files/usr\nexport HOME=/data/data/com.termux/files/home\n")
@@ -62,7 +62,7 @@ class TermuxConnection(private val context: Context, private val store: ProfileS
                 val data = Base64.encodeToString(context.assets.open(name).use { it.readBytes() }, Base64.NO_WRAP)
                 append("printf '%s' '$data' | base64 -d > '$root/$name.tmp'\nmv '$root/$name.tmp' '$root/$name'\n")
             }
-            append("exec python3 '$root/termux_bridge.py' --port $port --token '$token'\n")
+            append("exec python3 '$root/termux_bridge.py' --port $port --token '$token' --version '${BuildConfig.VERSION_NAME}' --build ${BuildConfig.VERSION_CODE}\n")
         }
         val operation = UUID.randomUUID().toString()
         store.saveBootstrapOperation(operation)

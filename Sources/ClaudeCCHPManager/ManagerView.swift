@@ -56,14 +56,21 @@ struct ManagerView: View {
         .sheet(isPresented: $model.isBillingSettingsPresented) {
             BillingSettingsSheet(model: model)
         }
+        .sheet(isPresented: $model.isHistoryPresented) {
+            HistoryPickerSheet(model: model)
+        }
         .confirmationDialog("恢复此会话？", isPresented: $model.isRestoreConfirmationPresented,
                             titleVisibility: .visible) {
-            Button("确认并发送历史上下文", role: .destructive) {
+            Button(model.selectedHistory == nil ? "继续最近会话" : "创建分支并继续") {
                 model.launchConfirmed()
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("所选会话的历史内容会发送给当前调用 Key 和上游模型；可能产生费用。")
+            if let history = model.selectedHistory {
+                Text("对话：\(history.title)\n配置：\(model.selectedProfile?.name ?? "")\n模型：\(model.selectedModel)\n网关：\(model.gateway)\n\n继续时，历史上下文会发送到这个网关，可能产生费用。原会话会保留。")
+            } else {
+                Text("所选会话的历史内容会发送给当前调用 Key 和上游模型；可能产生费用。")
+            }
         }
     }
 
@@ -86,6 +93,16 @@ struct ManagerView: View {
             .padding(.horizontal, 16)
             .padding(.top, 14)
             .padding(.bottom, 20)
+
+            Button {
+                isTaskSetupVisible = true
+                Task { await model.showHistory() }
+            } label: {
+                Label("对话历史", systemImage: "clock.arrow.circlepath")
+            }
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 14)
 
             HStack {
                 Text("调用配置")
@@ -287,7 +304,7 @@ struct ManagerView: View {
             Menu {
                 ForEach(SessionMode.allCases) { mode in
                     Button {
-                        model.sessionMode = mode
+                        model.selectSessionMode(mode)
                     } label: {
                         if model.sessionMode == mode {
                             Label(mode.title, systemImage: "checkmark")
@@ -297,7 +314,9 @@ struct ManagerView: View {
                     }
                 }
             } label: {
-                Label(model.sessionMode.compactTitle, systemImage: "clock.arrow.circlepath")
+                Label(model.selectedHistory?.title ?? model.sessionMode.compactTitle, systemImage: "clock.arrow.circlepath")
+                    .lineLimit(1)
+                    .frame(maxWidth: 145)
             }
             .menuStyle(.borderlessButton)
             .help(model.sessionMode == .new ? "选择新会话或恢复方式" : "恢复会话会转发历史内容，并可能产生费用")
@@ -360,6 +379,81 @@ struct ManagerView: View {
         .frame(height: 27)
     }
 
+}
+
+private struct HistoryPickerSheet: View {
+    @ObservedObject var model: ManagerModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    private var filtered: [LocalHistoryEntry] {
+        guard !query.isEmpty else { return model.historySessions }
+        return model.historySessions.filter {
+            $0.title.localizedCaseInsensitiveContains(query)
+                || $0.workspace.localizedCaseInsensitiveContains(query)
+                || $0.profile_name.localizedCaseInsensitiveContains(query)
+                || $0.model.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("本地对话历史").font(.headline)
+                    Text("选择后可用当前配置分支继续，原会话保留。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("关闭") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(16)
+            TextField("搜索标题、项目或配置", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
+            if model.isLoadingHistory {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if !model.historyError.isEmpty {
+                ContentUnavailableView("读取历史失败", systemImage: "exclamationmark.circle",
+                                      description: Text(model.historyError))
+            } else if filtered.isEmpty {
+                ContentUnavailableView("没有找到本地历史", systemImage: "clock.arrow.circlepath",
+                                      description: Text("目前没有可供 Claude 或 Codex 恢复的本机会话。"))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(filtered) { entry in
+                    Button {
+                        model.chooseHistory(entry)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 7) {
+                                Image(systemName: entry.client == "codex" ? "terminal.fill" : "bubble.left.and.bubble.right.fill")
+                                    .foregroundStyle(.secondary)
+                                Text(entry.title.isEmpty ? "未命名会话" : entry.title)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .lineLimit(1)
+                                Spacer()
+                                Text(entry.updatedDate, style: .relative)
+                                    .font(.caption2).foregroundStyle(.tertiary)
+                            }
+                            Text("\(entry.client == "codex" ? "Codex" : "Claude") · \(entry.model.isEmpty ? "模型未知" : entry.model) · \(entry.profile_name.isEmpty ? "来源配置未知" : entry.profile_name)")
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            Text(entry.workspace.isEmpty ? "项目目录未知" : entry.workspace)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 4)
+                }
+                .listStyle(.inset)
+            }
+        }
+        .frame(minWidth: 620, minHeight: 440)
+    }
 }
 
 private struct UsageDetailsView: View {

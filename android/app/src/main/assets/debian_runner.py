@@ -25,7 +25,9 @@ def main():
     env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
     os.chdir(data["workspace"])
     command = shlex.join(data["args"])
-    script = command + "; result=$?; printf '\\r\\n[Agent 已退出：%s；保留 Debian 终端]\\r\\n' \"$result\"; unset " + " ".join(SENSITIVE) + "; exec /bin/bash -l"
+    seed = data.get("history_seed")
+    cleanup = "; rm -f -- " + shlex.quote(seed) if seed else ""
+    script = command + "; result=$?" + cleanup + "; printf '\\r\\n[Agent 已退出：%s；保留 Debian 终端]\\r\\n' \"$result\"; unset " + " ".join(SENSITIVE) + "; exec /bin/bash -l"
     os.execvpe("/bin/bash", ["/bin/bash", "--noprofile", "--norc", "-c", script], env)
 
 if __name__ == "__main__":

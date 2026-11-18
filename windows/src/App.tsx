@@ -62,6 +62,18 @@ interface TerminalInfo {
   workspace: string;
 }
 
+interface LocalConversation {
+  id: string;
+  history_ref: string;
+  client: ClientKind;
+  title: string;
+  workspace: string;
+  model: string;
+  profile_id: string;
+  profile_name: string;
+  updated_at: number;
+}
+
 interface Session extends TerminalInfo {
   client: ClientKind;
   model: string;
@@ -98,6 +110,12 @@ function App() {
   const [modelLoadError, setModelLoadError] = useState("");
   const [modelReload, setModelReload] = useState(0);
   const [sessionMode, setSessionMode] = useState<SessionMode>("new");
+  const [history, setHistory] = useState<LocalConversation[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [historyError, setHistoryError] = useState("");
+  const [selectedHistory, setSelectedHistory] = useState<LocalConversation | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [isStarting, setIsStarting] = useState(false);
@@ -279,6 +297,10 @@ function App() {
 
   async function startSession(mode: SessionMode = sessionMode) {
     if (!selectedProfile || !config.model || !config.workspace) return;
+    const source = mode === "resume" ? selectedHistory : null;
+    if (mode === "resume" && !source) return openHistory();
+    if (source && !window.confirm(`分支继续「${source.title}」？\n调用配置：${selectedProfile.name}\n网关：${selectedProfile.gateway}\n模型：${config.model}\n历史上下文会发送给这个网关，可能产生费用。原会话会保留。`)) return;
+    const client = source?.client ?? config.client as ClientKind;
     setError("");
     setNotice("");
     setIsStarting(true);
@@ -286,15 +308,18 @@ function App() {
       const info = await invoke<TerminalInfo>("start_terminal", {
         request: {
           profile_id: selectedProfile.id,
-          client: config.client,
+          client,
           model: config.model,
           workspace: config.workspace,
           session_mode: mode,
+          history_ref: source?.history_ref,
+          history_id: source?.id,
+          confirmed_gateway: source ? selectedProfile.gateway : undefined,
         },
       });
       const session: Session = {
         ...info,
-        client: config.client as ClientKind,
+        client,
         model: config.model,
         profileName: selectedProfile.name,
         mode,
@@ -302,12 +327,48 @@ function App() {
       };
       setSessions((current) => [...current, session]);
       setSelectedSessionId(info.id);
-      setNotice(`${config.client === "codex" ? "Codex" : "Claude Code"} 已在独立终端中启动。`);
+      setNotice(source
+        ? source.client === "codex"
+          ? `已从「${source.title}」创建 Codex 分支。旧消息不会显示在新终端；原对话保留，输入后沿用其上下文。`
+          : `已从「${source.title}」创建 Claude 分支。原对话保留，新终端从该会话继续。`
+        : `${client === "codex" ? "Codex" : "Claude Code"} 已在独立终端中启动。`);
+      if (source) {
+        setSelectedHistory(null);
+        setSessionMode("new");
+      }
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
       setIsStarting(false);
     }
+  }
+
+  async function openHistory() {
+    setHistoryOpen(true);
+    setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      setHistory(await invoke<LocalConversation[]>("list_history"));
+    } catch (cause) {
+      setHistoryError(errorMessage(cause));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  function selectHistory(entry: LocalConversation) {
+    setSelectedHistory(entry);
+    setSessionMode("resume");
+    setConfig((current) => ({ ...current, client: entry.client, workspace: entry.workspace }));
+    setHistoryOpen(false);
+  }
+
+  function selectClient(client: ClientKind) {
+    if (selectedHistory && selectedHistory.client !== client) {
+      setSelectedHistory(null);
+      setSessionMode("new");
+    }
+    setConfig((current) => ({ ...current, client }));
   }
 
   async function closeSession(session: Session) {
@@ -392,6 +453,7 @@ function App() {
           </div>
 
           <div className="sidebar-bottom">
+            <button className="sidebar-link" onClick={openHistory}>对话历史</button>
             <div className="security-note"><span className="security-dot" />密钥保存在 Windows 凭据管理器</div>
             <button className="sidebar-link" onClick={() => setShowProfileDialog(true)}>
               <Settings2 size={15} />管理调用配置
@@ -416,8 +478,8 @@ function App() {
               <div className="field client-field">
                 <label>客户端</label>
                 <div className="segmented-control" role="group" aria-label="选择客户端">
-                  <button className={config.client === "claude" ? "active" : ""} onClick={() => setConfig((current) => ({ ...current, client: "claude" }))}>Claude Code</button>
-                  <button className={config.client === "codex" ? "active" : ""} onClick={() => setConfig((current) => ({ ...current, client: "codex" }))}>Codex</button>
+                  <button className={config.client === "claude" ? "active" : ""} onClick={() => selectClient("claude")}>Claude Code</button>
+                  <button className={config.client === "codex" ? "active" : ""} onClick={() => selectClient("codex")}>Codex</button>
                 </div>
               </div>
 
@@ -463,10 +525,14 @@ function App() {
               <div className="field mode-field">
                 <label htmlFor="session-mode">会话</label>
                 <div className="mode-select-wrap">
-                  <select id="session-mode" value={sessionMode} onChange={(event) => setSessionMode(event.currentTarget.value as SessionMode)}>
+                  <select id="session-mode" value={sessionMode} onChange={(event) => {
+                    const mode = event.currentTarget.value as SessionMode;
+                    if (mode === "resume") void openHistory();
+                    else { setSelectedHistory(null); setSessionMode(mode); }
+                  }}>
                     <option value="new">新会话</option>
                     <option value="continue">继续最近会话</option>
-                    <option value="resume">选择历史会话</option>
+                    <option value="resume">{selectedHistory?.title ?? "选择历史会话"}</option>
                   </select>
                   <ChevronDown size={14} className="select-chevron" />
                 </div>
@@ -549,6 +615,32 @@ function App() {
         </main>
       </div>
 
+      {historyOpen && (
+        <div className="dialog-backdrop" onKeyDown={(event) => { if (event.key === "Escape") setHistoryOpen(false); }}>
+          <section className="profile-dialog history-dialog" role="dialog" aria-label="本地对话历史" aria-modal="true">
+            <h2>本地对话历史</h2>
+            <label className="dialog-field">
+              搜索对话
+              <input autoFocus value={historyQuery} onChange={(event) => setHistoryQuery(event.currentTarget.value)}
+                placeholder="标题、客户端、模型或项目" />
+            </label>
+            <div className="history-list">
+              {historyLoading ? <p>正在读取本地会话…</p> : historyError ? <p role="alert">{historyError}</p>
+                : history.filter((entry) => [entry.title, entry.workspace, entry.client, entry.model].some(
+                  (value) => value.toLocaleLowerCase().includes(historyQuery.trim().toLocaleLowerCase()),
+                )).map((entry) => (
+                  <button key={entry.history_ref} onClick={() => selectHistory(entry)}>
+                    <strong>{entry.title}</strong>
+                    <small>{entry.client === "codex" ? "Codex" : "Claude"} · {entry.model || "模型未知"} · {config.profiles.find((profile) => profile.id === entry.profile_id)?.name ?? (entry.profile_name || "来源配置未知")} · {new Date(entry.updated_at * 1000).toLocaleString()}</small>
+                    <small title={entry.workspace}>{entry.workspace || "项目目录未知"}</small>
+                  </button>
+                ))}
+              {!historyLoading && !historyError && !history.length && <p>暂无可恢复的本地对话。</p>}
+            </div>
+            <div className="dialog-actions"><button className="secondary-button" onClick={() => setHistoryOpen(false)}>关闭</button></div>
+          </section>
+        </div>
+      )}
       {showProfileDialog && (
         <ProfileDialog
           onClose={() => setShowProfileDialog(false)}

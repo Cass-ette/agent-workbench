@@ -28,6 +28,32 @@ private struct ModelResponse: Decodable {
     let gateway: String?
 }
 
+struct LocalHistoryEntry: Decodable, Identifiable, Equatable {
+    let sessionID: String
+    let history_ref: String
+    let client: String
+    let title: String
+    let workspace: String
+    let model: String
+    let profile_id: String
+    let profile_name: String
+    let gateway: String
+    let updated_at: Int
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "id"
+        case history_ref, client, title, workspace, model, profile_id, profile_name, gateway, updated_at
+    }
+
+    var id: String { history_ref }
+    var clientKind: ClientKind { client == "codex" ? .codex : .claude }
+    var updatedDate: Date { Date(timeIntervalSince1970: TimeInterval(updated_at)) }
+}
+
+private struct HistoryListResponse: Decodable {
+    let sessions: [LocalHistoryEntry]
+}
+
 struct UsageSession: Decodable, Identifiable, Equatable {
     let id: String
     let client: String
@@ -302,6 +328,10 @@ private struct BackendClient: Sendable {
 final class ManagerModel: ObservableObject {
     @Published var activeClient: ClientKind = .claude {
         didSet {
+            if let history = selectedHistory, history.clientKind != activeClient {
+                selectedHistory = nil
+                sessionMode = .new
+            }
             UserDefaults.standard.set(activeClient.rawValue, forKey: "client.kind")
             statusMessage = activeClient == .codex
                 ? "Codex 使用独立 CODEX_HOME，不会修改原配置。"
@@ -330,6 +360,11 @@ final class ManagerModel: ObservableObject {
     @Published var isAddProfilePresented = false
     @Published var isAddingProfile = false
     @Published var isRestoreConfirmationPresented = false
+    @Published var isHistoryPresented = false
+    @Published var isLoadingHistory = false
+    @Published var historySessions: [LocalHistoryEntry] = []
+    @Published var selectedHistory: LocalHistoryEntry?
+    @Published var historyError = ""
     @Published var addProfileError = ""
     @Published var addProfileStatus = ""
     @Published var statusMessage = "正在读取本机配置…"
@@ -748,6 +783,14 @@ final class ManagerModel: ObservableObject {
             return
         }
         pendingSessionMode = sessionMode
+        if sessionMode == .resume {
+            guard selectedHistory != nil else {
+                Task { await showHistory() }
+                return
+            }
+            isRestoreConfirmationPresented = true
+            return
+        }
         if sessionMode == .new {
             launchConfirmed()
         } else {
@@ -755,19 +798,60 @@ final class ManagerModel: ObservableObject {
         }
     }
 
+    func selectSessionMode(_ mode: SessionMode) {
+        if mode == .resume {
+            Task { await showHistory() }
+        } else {
+            selectedHistory = nil
+            sessionMode = mode
+        }
+    }
+
+    func showHistory() async {
+        guard let backend else { return }
+        guard !isLoadingHistory else { return }
+        isHistoryPresented = true
+        isLoadingHistory = true
+        historyError = ""
+        do {
+            let data = try await backend.run(["history-list"])
+            historySessions = try JSONDecoder().decode(HistoryListResponse.self, from: data).sessions
+        } catch {
+            historyError = error.localizedDescription
+        }
+        isLoadingHistory = false
+    }
+
+    func chooseHistory(_ entry: LocalHistoryEntry) {
+        activeClient = entry.clientKind
+        selectedHistory = entry
+        sessionMode = .resume
+        workspace = ""
+        if !entry.workspace.isEmpty {
+            setWorkspace(entry.workspace)
+        }
+        isHistoryPresented = false
+    }
+
     func launchConfirmed() {
         guard let backend, let selectedProfile else { return }
         let mode = pendingSessionMode
-        let action = activeClient == .codex ? "codex-launch" : "launch"
+        let history = mode == .resume ? selectedHistory : nil
+        let action = history == nil ? (activeClient == .codex ? "codex-launch" : "launch") : "history-launch"
         let shellPath = ProcessInfo.processInfo.environment["SHELL"].flatMap {
             FileManager.default.isExecutableFile(atPath: $0) ? $0 : nil
         } ?? "/bin/zsh"
-        let backendArguments = [backend.scriptURL.path, action,
+        var backendArguments = [backend.scriptURL.path, action,
                                 "--profile-id", selectedProfile.id,
                                 "--model", selectedModel,
                                 "--workspace", workspace,
                                 "--session-mode", mode.rawValue,
                                 "--gateway-url", gateway]
+        if let history {
+            backendArguments += ["--history-ref", history.history_ref,
+                                 "--session-id", history.sessionID,
+                                 "--client", history.client]
+        }
         let backendCommand = ([backend.pythonPath] + backendArguments).map(shellQuote).joined(separator: " ")
         let inheritedPath = ProcessInfo.processInfo.environment["PATH"] ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         let terminalPath = "\(NSHomeDirectory())/.local/bin:\(inheritedPath)"
@@ -786,13 +870,23 @@ final class ManagerModel: ObservableObject {
                 "no_proxy=127.0.0.1,localhost,::1",
             ]
         )
-        let session = TerminalSession(client: activeClient, profile: selectedProfile,
+        let session = TerminalSession(client: history?.clientKind ?? activeClient, profile: selectedProfile,
                                       model: selectedModel, workspace: workspace,
                                       sessionMode: mode, gateway: gateway, launchSpec: launch)
         terminalSessions.append(session)
         selectedTerminalID = session.id
         pendingSessionMode = .new
-        statusMessage = "已创建独立的 \(activeClient.title) 终端会话。"
+        selectedHistory = nil
+        sessionMode = .new
+        if let history {
+            if history.clientKind == .codex {
+                statusMessage = "已从「\(history.title)」创建 Codex 分支。旧消息不会显示在新终端；原对话保留，输入后沿用其上下文。"
+            } else {
+                statusMessage = "已从「\(history.title)」创建 Claude 分支。原对话保留，新终端从该会话继续。"
+            }
+        } else {
+            statusMessage = "已创建独立的 \(activeClient.title) 终端会话。"
+        }
         isStatusError = false
     }
 

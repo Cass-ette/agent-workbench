@@ -77,14 +77,27 @@ def _context(path, root, client):
     return result
 
 
-def scan_usage(claude_root, codex_root, include_pricing=False):
+def scan_usage(claude_root, codex_root, include_pricing=False, claude_branches=()):
+    from session_history import branch_usage_context
+
     sessions = {}
     unreadable = 0
-    for client, root in (("claude", claude_root), ("codex", codex_root)):
-        for path in _paths(Path(root)):
+    roots = [("claude", claude_root), ("codex", codex_root)]
+    roots.extend(("claude", branch / "projects") for branch in claude_branches)
+    for client, root in roots:
+        root = Path(root)
+        for path in _paths(root):
             if client == "codex" and "sessions" not in path.relative_to(root).parts:
                 continue
+            homes = (parent for parent in path.parents if parent.name.startswith("branch-") and parent.is_relative_to(root.parent))
+            branch = next(homes, None)
+            imported, manifest = branch_usage_context(branch, path) if branch else (False, {})
+            if imported:
+                continue
             context = _context(path, Path(root), client) if include_pricing else {}
+            if include_pricing and manifest:
+                context.update({key: manifest[key] for key in ("profile_id", "gateway") if isinstance(manifest.get(key), str)})
+            inherited_through = str(manifest.get("inherited_through") or "")
             session_id, model, workspace = path.stem, context.get("model", ""), ""
             records, cumulative, reported_cost = {}, None, None
             record_models = {}
@@ -97,6 +110,8 @@ def scan_usage(claude_root, codex_root, include_pricing=False):
                         except (ValueError, TypeError):
                             continue  # Includes an unfinished last line while the CLI is writing.
                         if not isinstance(row, dict):
+                            continue
+                        if inherited_through and str(row.get("timestamp") or "") <= inherited_through:
                             continue
                         kind = row.get("type")
                         payload = row.get("payload")

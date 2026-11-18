@@ -82,6 +82,14 @@ def usage_snapshot(home=None):
         if files >= 200 or path.is_symlink():
             continue
         try:
+            parts = path.relative_to(root).parts
+            inherited_through = ""
+            if len(parts) >= 3 and parts[1].startswith("branch-"):
+                from session_history import branch_usage_context
+                imported, manifest = branch_usage_context(root / parts[0] / parts[1], path)
+                if imported:
+                    continue
+                inherited_through = str(manifest.get("inherited_through") or "")
             if path.stat().st_size > 16 * 1024 * 1024:
                 continue
             files += 1
@@ -94,6 +102,8 @@ def usage_snapshot(home=None):
                     except (ValueError, TypeError):
                         continue
                     if not isinstance(row, dict):
+                        continue
+                    if inherited_through and str(row.get("timestamp") or "") <= inherited_through:
                         continue
                     kind = row.get("type")
                     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
@@ -153,6 +163,20 @@ def private_write(path, text):
         if os.path.exists(temporary): os.unlink(temporary)
 
 
+def history_context(home):
+    import session_history
+    root = home / ".local/share/agent-workbench"
+
+    def homes(client):
+        directory = root / client
+        if not directory.is_dir() or directory.is_symlink():
+            return []
+        return [(path, "", "") for path in directory.iterdir()
+                if path.is_dir() and not path.is_symlink()]
+
+    return session_history, homes("codex"), homes("claude")
+
+
 def launch_spec(payload, home=None):
     home = Path(home or Path.home())
     client = payload.get("client", "shell")
@@ -161,6 +185,16 @@ def launch_spec(payload, home=None):
     mode = payload.get("mode", "new")
     if mode not in ("new", "continue", "resume"):
         raise ValueError("会话方式无效")
+    source = None
+    if "history_ref" in payload or "history_id" in payload:
+        if mode != "resume" or client not in ("codex", "claude"):
+            raise ValueError("历史会话标识无效")
+        history, codex_homes, claude_homes = history_context(home)
+        try:
+            source = history.resolve_history(payload.get("history_ref"), payload.get("history_id"),
+                                             client, codex_homes, claude_homes)
+        except ValueError:
+            raise HistoryUnavailable() from None
     workspace = str(home) if client == "ssh" else str(payload.get("workspace") or "~/projects")
     if "\0" in workspace or "\n" in workspace:
         raise ValueError("项目路径无效")
@@ -169,6 +203,11 @@ def launch_spec(payload, home=None):
     workspace = Path(workspace)
     if not workspace.is_absolute():
         workspace = home / workspace
+    if source and not workspace.is_dir():
+        raise HistoryUnavailable("项目目录不存在，请重新填写")
+    if source and client == "claude" and (not source["workspace"]
+            or workspace.resolve() != Path(source["workspace"]).resolve()):
+        raise HistoryUnavailable("Claude 恢复需要原项目目录")
     workspace.mkdir(parents=True, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k not in SENSITIVE_ENV}
     env["PATH"] = str(home / ".local/bin") + ":" + str(home / "bin") + ":" + env.get("PATH", "")
@@ -220,9 +259,23 @@ def launch_spec(payload, home=None):
     if not executable and not in_debian:
         raise ValueError("未找到 " + client + "；请在 Debian 或 Termux 完成安装")
     scope = hashlib.sha256(json.dumps([payload.get("profile_id"), gateway, str(workspace)], ensure_ascii=False).encode()).hexdigest()[:24]
-    config = home / ".local/share/agent-workbench" / client / scope
+    parent = home / ".local/share/agent-workbench" / client
+    seed = None
+    if source:
+        try:
+            config, seed = history.stage_branch(source, parent, payload.get("profile_id"), "", model, gateway)
+        except ValueError as exc:
+            raise HistoryUnavailable(str(exc)) from None
+        if client == "codex":
+            seed = None  # Codex's native fork keeps references to these private input copies.
+    else:
+        config = parent / scope
     config.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(config, 0o700)
+    if not source:
+        private_write(config / "workbench-profile.json", json.dumps({
+            "profile_id": payload.get("profile_id"), "gateway": gateway,
+        }))
     command = [executable] if executable else [client]
     if client == "codex":
         private_write(config / "config.toml", "model = " + json.dumps(model) + '\nmodel_provider = "workbench_gateway"\nsandbox_mode = "workspace-write"\n\n[model_providers.workbench_gateway]\nname = "Workbench gateway"\nwire_api = "responses"\nenv_key = "WORKBENCH_GATEWAY_KEY"\nbase_url = ' + json.dumps(gateway + "/v1") + "\n")
@@ -233,7 +286,9 @@ def launch_spec(payload, home=None):
             # Explicit user choice in the app. PRoot cannot run Codex's Linux
             # sandbox on tested Android kernels. Keep command approvals active.
             args += ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]
-        if mode != "new":
+        if source:
+            args += ["fork", source["id"]]
+        elif mode != "new":
             args += ["resume"] + (["--last"] if mode == "continue" else [])
         args += ["--model", model, "--cd", str(workspace), "--no-alt-screen"]
     else:
@@ -253,12 +308,16 @@ def launch_spec(payload, home=None):
                           "--settings", str(config / "settings.json"),
                           "--append-system-prompt", "全程使用简体中文。"]
         if mode == "continue": args += ["--continue"]
-        if mode == "resume": args += ["--resume"]
+        if mode == "resume":
+            args += ["--resume"]
+            if source:
+                args += [source["id"], "--fork-session"]
     if in_debian:
         # A unique one-use file survives proot's environment clearing. The guest
         # reads and removes it before launching, so no key enters argv/profile.d.
         launch_file = config / ("launch-" + uuid.uuid4().hex + ".json")
         private_write(launch_file, json.dumps({"args": args, "workspace": str(workspace),
+            "history_seed": str(seed) if seed else None,
             "environment": {k: v for k, v in env.items() if k in SENSITIVE_ENV}}, ensure_ascii=False))
         env = {k: v for k, v in env.items() if k not in SENSITIVE_ENV}
         args = [proot, "login", "debian", "--user", "workbench", "--bind", str(home) + ":" + str(home),
@@ -268,6 +327,8 @@ def launch_spec(payload, home=None):
         cleanup = "; rm -f -- " + shlex.quote(str(launch_file))
     else:
         cleanup = ""
+    if seed:
+        cleanup += "; rm -f -- " + shlex.quote(str(seed))
     # The command line and config files contain no credential. After the agent exits,
     # clear its environment and return to an ordinary shell in the same terminal.
     script = shlex.join(args) + "; result=$?" + cleanup + "; printf '\\r\\n[Agent 已退出：%s；保留终端]\\r\\n' \"$result\"; unset " + " ".join(SENSITIVE_ENV) + "; exec " + shlex.quote(bash) + " -l"
@@ -336,12 +397,18 @@ class Session:
         threading.Thread(target=force, daemon=True).start()
 
 
+class HistoryUnavailable(ValueError):
+    def __init__(self, message="找不到这条本地会话，请刷新对话历史"):
+        super().__init__(message)
+
+
 class BridgeServer(ThreadingHTTPServer):
     daemon_threads = True
-    def __init__(self, address, token):
+    def __init__(self, address, token, version="", build=0):
         if address[0] != "127.0.0.1" or len(token) < 32:
             raise ValueError("桥接只允许本机回环与随机凭据")
         self.token, self.sessions, self.guard = token, {}, threading.Lock()
+        self.version, self.build = version, build
         self.runtime = None
         runtime_dir = Path.home() / ".local/share/agent-workbench/runtime"
         if (runtime_dir / "workbench_runtime.py").is_file():
@@ -372,9 +439,13 @@ class Handler(BaseHTTPRequestHandler):
         uri = urlsplit(self.path)
         try:
             if self.command == "GET" and uri.path == "/health":
-                return self.reply(200, {"service": "agent-workbench-termux", "version": "0.1.8", "build": 10, "capabilities": ["pty", "ssh", "debian-runtime", "usage"]})
+                return self.reply(200, {"service": "agent-workbench-termux", "version": self.server.version,
+                                        "build": self.server.build, "capabilities": ["pty", "ssh", "debian-runtime", "usage", "history"]})
             if self.command == "GET" and uri.path == "/usage":
                 return self.reply(200, usage_snapshot())
+            if self.command == "GET" and uri.path == "/history":
+                history, codex_homes, claude_homes = history_context(Path.home())
+                return self.reply(200, {"sessions": history.public_rows(history.scan_history(codex_homes, claude_homes, limit=500))})
             payload = {}
             if self.command == "POST":
                 length = int(self.headers.get("Content-Length", 0))
@@ -410,6 +481,8 @@ class Handler(BaseHTTPRequestHandler):
                 session.resize(payload.get("cols", 80), payload.get("rows", 24))
                 return self.reply(200, {"ok": True})
             return self.reply(405, {"error": "操作不支持"})
+        except HistoryUnavailable as exc:
+            return self.reply(409, {"error": str(exc)})
         except (ValueError, TypeError, KeyError):
             # Expected validation messages never contain the submitted key or body.
             return self.reply(400, {"error": "参数无效；请检查模型、目录及已安装的客户端"})
@@ -425,6 +498,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--token", required=True)
+    parser.add_argument("--version", default="")
+    parser.add_argument("--build", type=int, default=0)
     options = parser.parse_args()
     os.umask(0o077)
-    BridgeServer(("127.0.0.1", options.port), options.token).serve_forever()
+    BridgeServer(("127.0.0.1", options.port), options.token, options.version, options.build).serve_forever()

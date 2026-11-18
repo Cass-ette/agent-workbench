@@ -141,7 +141,7 @@ fn files(root: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-fn parse_file(path: &Path, client: &str) -> Result<UsageSession, std::io::Error> {
+fn parse_file(path: &Path, client: &str, inherited_through: &str) -> Result<UsageSession, std::io::Error> {
     let file = fs::File::open(path)?;
     let mut item = UsageSession {
         client: client.into(),
@@ -158,6 +158,9 @@ fn parse_file(path: &Path, client: &str) -> Result<UsageSession, std::io::Error>
             continue;
         };
         if !row.is_object() {
+            continue;
+        }
+        if !inherited_through.is_empty() && text(&row, "timestamp").as_str() <= inherited_through {
             continue;
         }
         let kind = text(&row, "type");
@@ -267,7 +270,13 @@ pub fn scan(claude_root: &Path, codex_root: &Path) -> UsageSnapshot {
             {
                 continue;
             }
-            let file = match parse_file(&path, client) {
+            let branch_home = path.ancestors().find(|candidate| candidate.parent() == Some(root));
+            let (imported, manifest) = branch_home.map(|home| crate::history::branch_usage_context(home, &path))
+                .unwrap_or_default();
+            if imported {
+                continue;
+            }
+            let file = match parse_file(&path, client, manifest["inherited_through"].as_str().unwrap_or("")) {
                 Ok(file) => file,
                 Err(_) => {
                     snapshot.unreadable_files += 1;
@@ -289,8 +298,13 @@ pub fn scan(claude_root: &Path, codex_root: &Path) -> UsageSnapshot {
                 .ok()
                 .and_then(|p| p.components().next())
             {
-                let mut route =
-                    serde_json::json!({"profile_id": profile.as_os_str().to_string_lossy()});
+                let mut route = serde_json::json!({
+                    "profile_id": manifest["profile_id"].as_str()
+                        .map(str::to_owned).unwrap_or_else(|| profile.as_os_str().to_string_lossy().into_owned())
+                });
+                if let Some(gateway) = manifest["gateway"].as_str() {
+                    route["gateway"] = Value::String(gateway.into());
+                }
                 for parent in path.ancestors().skip(1).take_while(|p| p.starts_with(root)) {
                     if let Ok(config) = fs::read_to_string(parent.join("config.toml")) {
                         for line in config.lines() {

@@ -203,6 +203,13 @@ button { color: inherit; }
 .dialog-security svg { flex: 0 0 auto; margin-top: 1px; color: #668c75; }
 .dialog-error { padding: 8px 9px; color: #a44942; border: 1px solid #ecd3d0; border-radius: 4px; background: #fff5f4; font-size: 10px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+.history-dialog { width: min(620px, 100%); }
+.history-dialog h2 { margin: 0; font-size: 16px; }
+.history-list { max-height: 46vh; overflow: auto; }
+.history-list button { display: grid; gap: 4px; width: 100%; padding: 8px; text-align: left; background: transparent; border: 0; border-bottom: 1px solid #dfe3e6; cursor: pointer; }
+.history-list button:hover { background: #eaf0f4; }
+.history-list :is(strong, small) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-list small { color: #545e68; }
 .primary-button, .secondary-button { height: 33px; padding: 0 13px; border: 1px solid #d7dce0; border-radius: 4px; background: #fff; font-size: 10px; font-weight: 600; cursor: pointer; }
 .primary-button { color: #fff; border-color: var(--accent); background: var(--accent); }
 .primary-button:hover:not(:disabled) { background: var(--accent-dark); }

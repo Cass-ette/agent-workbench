@@ -3,6 +3,13 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val historyAssetsDirectory = layout.buildDirectory.dir("generated/historyAssets")
+val historyAssets = tasks.register<Sync>("prepareHistoryAssets") {
+    from(rootProject.file("../backend/session_history.py"))
+    into(historyAssetsDirectory)
+}
+tasks.named("preBuild") { dependsOn(historyAssets) }
+
 android {
     namespace = "com.cassette.workbench"
     compileSdk = 34
@@ -23,6 +30,7 @@ android {
     kotlinOptions { jvmTarget = "17" }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     testOptions { unitTests.isReturnDefaultValues = true }
+    sourceSets.getByName("main").assets.srcDir(historyAssetsDirectory)
 }
 
 dependencies {

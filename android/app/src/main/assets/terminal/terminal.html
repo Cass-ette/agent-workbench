@@ -1,13 +1,18 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<link rel="stylesheet" href="xterm.css"><style>html,body,#terminal{height:100%;min-height:100%;width:100%;padding:0;margin:0;background:#16181f;overflow:hidden} #terminal{position:relative;min-height:160px}.xterm{height:100%;padding:6px;box-sizing:border-box}.xterm .xterm-scrollable-element>.scrollbar{display:none!important}.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>
+<link rel="stylesheet" href="xterm.css"><style>html,body,#terminal{height:100%;min-height:100%;width:100%;padding:0;margin:0;background:#16181f;overflow:hidden} #terminal{position:relative}.xterm{height:100%;padding:6px;box-sizing:border-box}.xterm .xterm-scrollable-element>.scrollbar{display:none!important}.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>
 </head><body><div id="terminal"></div><script src="xterm.js"></script><script src="addon-fit.js"></script><script>
 const terminal = new Terminal({fontFamily:'monospace',fontSize:13,scrollback:5000,cursorBlink:true,cursorStyle:'bar',cursorWidth:2,cursorInactiveStyle:'block',convertEol:false,theme:{background:'#16181f',foreground:'#e4e6ed',cursor:'#c4b5fd',selectionBackground:'#535974',black:'#20222b',red:'#f38ba8',green:'#a6da95',yellow:'#eed49f',blue:'#8aadf4',magenta:'#c6a0f6',cyan:'#8bd5ca',white:'#cad3f5'}});
 const fit = new FitAddon.FitAddon(); terminal.loadAddon(fit); terminal.open(document.getElementById('terminal'));
 // Wheel reports must reach a full-screen TUI; its conversation history is not
 // xterm's scrollback. Keep xterm responsible for the negotiated mouse encoding.
 let wheelInput = null;
+let replayingOutput = false;
+let terminalWrites = Promise.resolve();
 function sendInput(data, binary = false) {
+  // Repainting a cached screen must not send old cursor/color query replies
+  // into the live Shell or Agent's input buffer.
+  if (replayingOutput) return;
   if (wheelInput !== null) {
     const bytes = binary ? Uint8Array.from(data, c => c.charCodeAt(0)) : new TextEncoder().encode(data);
     wheelInput.push(...bytes);
@@ -50,7 +55,15 @@ function scrollLines(lines) {
   }
 }
 function resize(){try{const h=Math.max(window.innerHeight||document.documentElement.clientHeight,1);document.documentElement.style.height=h+'px';document.body.style.height=h+'px';document.getElementById('terminal').style.height=h+'px';fit.fit();Workbench.resize(terminal.cols,terminal.rows)}catch{}}
-window.writeChunk = data => terminal.write(Uint8Array.from(atob(data), c => c.charCodeAt(0)));
+window.writeChunk = (data, replay = false) => {
+  terminalWrites = terminalWrites.then(() => new Promise(resolve => {
+    replayingOutput = replay;
+    terminal.write(Uint8Array.from(atob(data), c => c.charCodeAt(0)), () => {
+      replayingOutput = false;
+      resolve();
+    });
+  }));
+};
 window.changeFont = amount => {terminal.options.fontSize=Math.max(9,Math.min(24,terminal.options.fontSize+amount));resize()};
 window.focusTerminal = () => terminal.focus();
 let touchRemainder=0;

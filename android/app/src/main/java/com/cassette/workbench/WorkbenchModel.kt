@@ -15,7 +15,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.ScheduledFuture
 
-data class OutputChunk(val serial: Long, val encoded: String)
+data class OutputChunk(val serial: Long, val encoded: String, val replay: Boolean = false)
 data class LocalConversation(
     val id: String, val reference: String, val client: String, val title: String,
     val workspace: String, val model: String, val profileId: String, val updatedAt: Long,
@@ -40,6 +40,7 @@ data class TerminalSession(
     val output: List<OutputChunk> = emptyList(), val after: Long = 0,
     val exitCode: Int? = null, val error: String = "",
     val bridgePort: Int = 0,
+    val restoredOutputPending: Boolean = false,
 )
 
 class WorkbenchModel(application: Application) : AndroidViewModel(application) {
@@ -91,7 +92,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
 
     init {
         sessions = store.sessionRows().let { rows -> (0 until rows.length()).mapNotNull { index ->
-            runCatching { rows.getJSONObject(index).let { TerminalSession(it.getString("id"), it.getString("title"), it.getString("workspace"), it.getString("client"), bridgePort = it.optInt("bridge_port", termux.currentPort)) } }.getOrNull()
+            runCatching { rows.getJSONObject(index).let { TerminalSession(it.getString("id"), it.getString("title"), it.getString("workspace"), it.getString("client"), bridgePort = it.optInt("bridge_port", termux.currentPort), restoredOutputPending = true) } }.getOrNull()
         } }
         selectedSession = sessions.firstOrNull()?.id.orEmpty()
     }
@@ -292,7 +293,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         runtimeLog = data.optString("log")
     }
 
-    private fun connectInternal(install: Boolean) {
+    private fun connectInternal(install: Boolean, onConnected: (() -> Unit)? = null) {
         if (busy) return
         connectionGeneration++
         busy = true; error = ""; notice = "正在连接 Termux 本地桥接…"
@@ -303,7 +304,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                 try {
                     val data = termux.request("/runtime", if (install) "POST" else "GET",
                         if (install) JSONObject().put("clients", JSONArray(listOf("codex", "claude"))) else null, 5000)
-                    main.post { applyRuntime(data); bridgeRecovered(); busy = false; notice = "本地桥接已连接" }
+                    main.post { applyRuntime(data); bridgeRecovered(); busy = false; notice = "本地桥接已连接"; onConnected?.invoke() }
                 } catch (cause: Exception) { main.post { busy = false; error = safeError(cause) } }
                 return@execute
             }
@@ -330,6 +331,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                             if (ready) bridgeRecovered() else bridgeUnavailable()
                             if (data != null) applyRuntime(data)
                             if (!ready) error = failure.ifBlank { "准备仍未完成；请检查 Termux 网络与外部命令开关，再点重试。已有文件与任务已保留。" }
+                            if (ready) onConnected?.invoke()
                         }
                     }
                 } catch (cause: Exception) { busy = false; error = safeError(cause) }
@@ -337,7 +339,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun launch(shell: Boolean = false) {
+    fun launch(shell: Boolean = false, shellKind: String = "termux") {
         if (!connected || busy) { error = "请先在环境页连接 Termux"; return }
         val snapshot = options
         val source = selectedHistory.takeIf { !shell && snapshot.mode == "resume" && localExecution }
@@ -349,7 +351,15 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         busy = true; error = ""
         worker.execute {
             try {
-                val client = if (remote != null) "ssh" else if (shell) "shell" else source?.client ?: snapshot.client
+                // Upgrade only the endpoint for new tasks. Existing terminals
+                // retain their original bridge port and credential.
+                if (!termux.supportsRuntime()) {
+                    main.post { busy = false; connectInternal(false) { launch(shell, shellKind) } }
+                    return@execute
+                }
+                val client = if (remote != null) "ssh" else if (shell) {
+                    if (shellKind == "debian") "debian-shell" else "shell"
+                } else source?.client ?: snapshot.client
                 val body = JSONObject().put("client", client)
                     .put("mode", if (remote == null) snapshot.mode else "new").put("workspace", snapshot.workspace)
                     .put("codex_compatibility", snapshot.codexCompatibility)
@@ -358,7 +368,11 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                 else if (!shell && selected != null) body.put("profile_id", selected.id).put("model", snapshot.model)
                     .put("gateway", selected.gateway).put("key", store.secret(selected.id))
                 val result = termux.request("/sessions", "POST", body, if (source != null) 15000 else 4000)
-                val title = if (remote != null) "SSH · ${remote.name}" else if (shell) "Shell" else "${if (client == "codex") "Codex" else "Claude"} · ${snapshot.model}"
+                val title = if (remote != null) "SSH · ${remote.name}" else when (client) {
+                    "debian-shell" -> "Debian Shell"
+                    "shell" -> "Termux Shell"
+                    else -> "${if (client == "codex") "Codex" else "Claude"} · ${snapshot.model}"
+                }
                 val terminal = TerminalSession(result.getString("id"), title, remote?.destination ?: snapshot.workspace, client, bridgePort = termux.currentPort)
                 main.post {
                     if (source != null && selectedHistory == source) updateOptions(options.copy(mode = "new"))
@@ -446,8 +460,8 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                                 sessions = sessions.map { current ->
                                     if (current.id != session.id) current else {
                                         val encoded = data.optString("data")
-                                        val next = if (encoded.isBlank()) current.output else (current.output + OutputChunk(data.getLong("after"), encoded)).takeLast(80)
-                                        current.copy(after = data.getLong("after"), output = next, exitCode = if (data.isNull("exit_code")) null else data.getInt("exit_code"))
+                                        val next = if (encoded.isBlank()) current.output else (current.output + OutputChunk(data.getLong("after"), encoded, current.restoredOutputPending)).takeLast(80)
+                                        current.copy(after = data.getLong("after"), output = next, restoredOutputPending = false, exitCode = if (data.isNull("exit_code")) null else data.getInt("exit_code"))
                                     }
                                 }
                                 if (!data.isNull("exit_code")) {

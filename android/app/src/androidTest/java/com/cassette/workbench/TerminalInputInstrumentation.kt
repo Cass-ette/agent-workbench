@@ -23,6 +23,10 @@ class TerminalInputInstrumentation : Instrumentation() {
     override fun onCreate(arguments: Bundle?) { args = arguments ?: Bundle(); start() }
 
     override fun onStart() {
+        if (args.getString("device_shell_smoke") == "true") {
+            DeviceShellSmoke(this).run()
+            return
+        }
         if (args.getString("gateway_smoke") == "true") {
             DeviceGatewaySmoke(this).run(args)
             return

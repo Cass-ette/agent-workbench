@@ -180,7 +180,7 @@ def history_context(home):
 def launch_spec(payload, home=None):
     home = Path(home or Path.home())
     client = payload.get("client", "shell")
-    if client not in ("shell", "claude", "codex", "ssh"):
+    if client not in ("shell", "debian-shell", "claude", "codex", "ssh"):
         raise ValueError("不支持的客户端")
     mode = payload.get("mode", "new")
     if mode not in ("new", "continue", "resume"):
@@ -217,6 +217,15 @@ def launch_spec(payload, home=None):
         raise ValueError("未找到 bash，请先在 Termux 安装 bash")
     if client == "shell":
         return [bash, "-l"], env, str(workspace)
+    if client == "debian-shell":
+        proot = shutil.which("proot-distro", path=env["PATH"])
+        if not proot:
+            raise ValueError("未找到 proot-distro，请先在工作台的运行环境中安装 Debian")
+        command = [proot, "login", "debian", "--user", "workbench",
+                   "--bind", str(home) + ":" + str(home), "--work-dir", str(workspace),
+                   "--", "/bin/bash", "-l"]
+        script = shlex.join(command) + "; result=$?; printf '\\r\\n[Debian Shell 已退出：%s；返回 Termux Shell]\\r\\n' \"$result\"; exec " + shlex.quote(bash) + " -l"
+        return [bash, "--noprofile", "--norc", "-c", script], env, str(workspace)
     if client == "ssh":
         # Credentials, host aliases, ProxyJump and known_hosts stay with OpenSSH.
         # Never send the phone's model API key or an arbitrary remote command.
@@ -440,7 +449,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.command == "GET" and uri.path == "/health":
                 return self.reply(200, {"service": "agent-workbench-termux", "version": self.server.version,
-                                        "build": self.server.build, "capabilities": ["pty", "ssh", "debian-runtime", "usage", "history"]})
+                                        "build": self.server.build, "capabilities": ["pty", "ssh", "debian-runtime", "debian-shell", "usage", "history"]})
             if self.command == "GET" and uri.path == "/usage":
                 return self.reply(200, usage_snapshot())
             if self.command == "GET" and uri.path == "/history":

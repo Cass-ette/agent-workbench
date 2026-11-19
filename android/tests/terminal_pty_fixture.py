@@ -72,7 +72,13 @@ def main():
         do_POST = handle_request
         do_DELETE = handle_request
 
-    server = bridge.BridgeServer(("127.0.0.1", options.port), TOKEN)
+    # Match the installed debug client's protocol revision without introducing
+    # a separate version constant that drifts from the APK.
+    import re
+    gradle = Path(__file__).resolve().parents[1].joinpath("app/build.gradle.kts").read_text()
+    version = re.search(r'versionName\s*=\s*"([^"]+)"', gradle).group(1)
+    build = int(re.search(r'versionCode\s*=\s*(\d+)', gradle).group(1))
+    server = bridge.BridgeServer(("127.0.0.1", options.port), TOKEN, version=version, build=build)
     server.RequestHandlerClass = TestHandler
     print(f"Loopback test PTY ready on {options.port}", flush=True)
     try:

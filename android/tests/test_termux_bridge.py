@@ -119,6 +119,18 @@ class BridgeTests(unittest.TestCase):
             self.assertNotIn("phone-gateway-key", str(env))
             self.assertEqual(workspace, home)
 
+    def test_debian_shell_uses_same_user_and_workspace_mount_as_agent(self):
+        with tempfile.TemporaryDirectory() as home, patch.object(B.shutil, "which", side_effect=lambda name, **kw: "/usr/bin/" + name):
+            args, env, workspace = B.launch_spec({
+                "client": "debian-shell", "workspace": "~/projects/example",
+            }, home)
+            self.assertEqual(args[:3], ["/usr/bin/bash", "--noprofile", "--norc"])
+            self.assertIn("proot-distro login debian --user workbench", args[-1])
+            self.assertIn("--bind " + home + ":" + home, args[-1])
+            self.assertIn("--work-dir " + home + "/projects/example", args[-1])
+            self.assertEqual(workspace, home + "/projects/example")
+            self.assertNotIn("WORKBENCH_GATEWAY_KEY", env)
+
     def test_ssh_rejects_command_injection_hosts_and_users(self):
         with tempfile.TemporaryDirectory() as home, patch.object(B.shutil, "which", return_value="/usr/bin/ssh"):
             for target in (

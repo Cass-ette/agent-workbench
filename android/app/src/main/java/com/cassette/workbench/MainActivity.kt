@@ -47,6 +47,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -56,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.ViewModelProvider
+import androidx.core.view.WindowCompat
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.util.Locale
@@ -70,6 +73,7 @@ class MainActivity : ComponentActivity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         model = ViewModelProvider(this)[WorkbenchModel::class.java]
         setContent { WorkbenchApp(model) { termuxPermission.launch(TERMUX_PERMISSION) } }
     }
@@ -86,13 +90,16 @@ fun WorkbenchApp(model: WorkbenchModel, requestTermuxPermission: () -> Unit) {
     MaterialTheme(colorScheme = colors) {
         var page by rememberSaveable { mutableIntStateOf(0) }
         var fullscreen by rememberSaveable { mutableStateOf(false) }
+        val terminalInput = page == 0 && model.sessions.isNotEmpty() &&
+            WindowInsets.ime.getBottom(LocalDensity.current) > 0
         BackHandler(fullscreen) { fullscreen = false }
         Scaffold(
-            topBar = { if (!fullscreen) TopAppBar(title = { Column {
+            modifier = Modifier.fillMaxSize().imePadding(),
+            topBar = { if (!fullscreen && !terminalInput) TopAppBar(title = { Column {
                 Text("Agent 工作台", fontWeight = FontWeight.SemiBold)
                 Text("ANDROID ${BuildConfig.VERSION_NAME} · 开发预览版", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             } }, actions = { Text(if (model.bridgeReconnecting) "正在重连" else if (model.connected) "本地已连接" else "环境未连接", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(end = 18.dp)) }) },
-            bottomBar = { if (!fullscreen) NavigationBar {
+            bottomBar = { if (!fullscreen && !terminalInput) NavigationBar {
                 listOf("工作区", "调用配置", "运行环境").forEachIndexed { index, label ->
                     NavigationBarItem(selected = page == index, onClick = { page = index }, label = { Text(label) }, icon = {
                         Icon(when (index) { 0 -> Icons.Outlined.Home; 1 -> Icons.Outlined.AccountCircle; else -> Icons.Outlined.Settings }, label)
@@ -102,9 +109,9 @@ fun WorkbenchApp(model: WorkbenchModel, requestTermuxPermission: () -> Unit) {
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
                 if (model.error.isNotBlank()) Notice(model.error, true)
-                else if (model.notice.isNotBlank() && !fullscreen) Notice(model.notice, false)
+                else if (model.notice.isNotBlank() && !fullscreen && !terminalInput) Notice(model.notice, false)
                 when (page) {
-                    0 -> WorkspaceScreen(model, fullscreen, { fullscreen = !fullscreen }, { page = it })
+                    0 -> WorkspaceScreen(model, fullscreen, terminalInput, { fullscreen = !fullscreen }, { page = it })
                     1 -> ProfilesScreen(model)
                     else -> EnvironmentScreen(model, requestTermuxPermission)
                 }
@@ -120,15 +127,24 @@ fun WorkbenchApp(model: WorkbenchModel, requestTermuxPermission: () -> Unit) {
             .padding(horizontal = 18.dp, vertical = 9.dp))
 }
 
-@Composable private fun WorkspaceScreen(model: WorkbenchModel, fullscreen: Boolean, toggleFullscreen: () -> Unit, changePage: (Int) -> Unit) {
+@Composable private fun WorkspaceScreen(model: WorkbenchModel, fullscreen: Boolean, terminalInput: Boolean, toggleFullscreen: () -> Unit, changePage: (Int) -> Unit) {
     var expanded by rememberSaveable { mutableStateOf(true) }
     var selectModel by remember { mutableStateOf(false) }
     var confirmResume by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
     var confirmCompatibility by remember { mutableStateOf(false) }
+    var newTerminalMenu by rememberSaveable { mutableStateOf(false) }
+    var splitEnabled by rememberSaveable { mutableStateOf(false) }
+    var splitOtherSessionId by rememberSaveable { mutableStateOf("") }
+    val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
     LaunchedEffect(model.sessions.size) { if (model.sessions.isNotEmpty()) expanded = false }
+    LaunchedEffect(model.sessions.map { it.id }, model.selectedSession) {
+        val available = model.sessions.map { it.id }.filter { it != model.selectedSession }
+        if (splitOtherSessionId !in available) splitOtherSessionId = available.firstOrNull().orEmpty()
+        if (available.isEmpty()) splitEnabled = false
+    }
     Column(Modifier.fillMaxSize()) {
-        if (!fullscreen) {
+        if (!fullscreen && !terminalInput) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(model.executionName, fontWeight = FontWeight.Medium)
@@ -189,22 +205,94 @@ fun WorkbenchApp(model: WorkbenchModel, requestTermuxPermission: () -> Unit) {
                 Spacer(Modifier.height(12.dp))
                 Text(if (model.localExecution) "先连接 Termux，即可在这里打开手机本地 Shell。配置网关和模型后，再启动 Claude 或 Codex。" else "Termux 提供 SSH 客户端，任务和文件留在你连接的电脑。已有桌面终端标签页暂不支持直接接续。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(22.dp))
-                Button(onClick = { if (model.connected) model.launch(shell = true) else changePage(2) }) { Text(if (!model.connected) "设置运行环境" else if (model.localExecution) "打开本地终端" else "连接 SSH") }
-            }
-        } else {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("终端", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
-                Text(usageCompact(model.usage), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-                TextButton(onClick = { model.launch(shell = true) }, enabled = model.connected && !model.busy) { Text(if (model.localExecution) "＋ Shell" else "＋ SSH") }
-                TextButton(onClick = toggleFullscreen) { Text(if (fullscreen) "退出全屏" else "全屏") }
-            }
-            ScrollableTabRow(selectedTabIndex = model.sessions.indexOfFirst { it.id == model.selectedSession }.coerceAtLeast(0), edgePadding = 4.dp) {
-                model.sessions.forEach { session ->
-                    Tab(selected = model.selectedSession == session.id, onClick = { model.selectedSession = session.id }, text = { Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis) })
+                if (model.localExecution) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Button(onClick = { if (model.connected) model.launch(shell = true, shellKind = "debian") else changePage(2) }) { Text(if (!model.connected) "设置运行环境" else "打开 Debian Shell") }
+                        if (model.connected) TextButton(onClick = { model.launch(shell = true, shellKind = "termux") }) { Text("Termux Shell") }
+                    }
+                } else {
+                    Button(onClick = { if (model.connected) model.launch(shell = true) else changePage(2) }) { Text(if (!model.connected) "设置运行环境" else "连接 SSH") }
                 }
             }
-            val session = model.sessions.firstOrNull { it.id == model.selectedSession } ?: model.sessions.first()
-            key(session.id) { TerminalPanel(model, session, Modifier.weight(1f)) }
+        } else {
+            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                // IME height changes must not tear down the second terminal.
+                val canSplit = tablet && maxWidth >= 760.dp && model.sessions.size >= 2
+                Column(Modifier.fillMaxSize()) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("终端", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+                        Text(usageCompact(model.usage), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        if (model.localExecution) {
+                            Box {
+                                TextButton(onClick = { newTerminalMenu = true }, enabled = model.connected && !model.busy) { Text("＋ 终端") }
+                                DropdownMenu(expanded = newTerminalMenu, onDismissRequest = { newTerminalMenu = false }) {
+                                    DropdownMenuItem(text = { Text("Debian Shell") }, onClick = {
+                                        newTerminalMenu = false
+                                        model.launch(shell = true, shellKind = "debian")
+                                    })
+                                    DropdownMenuItem(text = { Text("Termux Shell") }, onClick = {
+                                        newTerminalMenu = false
+                                        model.launch(shell = true, shellKind = "termux")
+                                    })
+                                }
+                            }
+                        } else {
+                            TextButton(onClick = { model.launch(shell = true) }, enabled = model.connected && !model.busy) { Text("＋ SSH") }
+                        }
+                        if (canSplit) TextButton(onClick = {
+                            if (!splitEnabled && splitOtherSessionId.isBlank()) {
+                                splitOtherSessionId = model.sessions.firstOrNull { it.id != model.selectedSession }?.id.orEmpty()
+                            }
+                            splitEnabled = !splitEnabled
+                        }) { Text(if (splitEnabled) "退出分屏" else "分屏") }
+                        TextButton(onClick = toggleFullscreen) { Text(if (fullscreen) "退出全屏" else "全屏") }
+                    }
+                    if (splitEnabled && canSplit) {
+                        var otherMenu by rememberSaveable { mutableStateOf(false) }
+                        Row(Modifier.fillMaxWidth().padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("左侧", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.weight(1f))
+                            Box {
+                                TextButton(onClick = { otherMenu = true }) {
+                                    Text("右侧：${model.sessions.firstOrNull { it.id == splitOtherSessionId }?.title ?: "选择终端"}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                DropdownMenu(expanded = otherMenu, onDismissRequest = { otherMenu = false }) {
+                                    model.sessions.filter { it.id != model.selectedSession }.forEach { candidate ->
+                                        DropdownMenuItem(text = { Text(candidate.title, maxLines = 1, overflow = TextOverflow.Ellipsis) }, onClick = {
+                                            splitOtherSessionId = candidate.id
+                                            otherMenu = false
+                                        })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ScrollableTabRow(selectedTabIndex = model.sessions.indexOfFirst { it.id == model.selectedSession }.coerceAtLeast(0), edgePadding = 4.dp) {
+                        model.sessions.forEach { session ->
+                            Tab(selected = model.selectedSession == session.id, onClick = {
+                                val previous = model.selectedSession
+                                model.selectedSession = session.id
+                                if (splitEnabled && splitOtherSessionId == session.id) splitOtherSessionId = previous
+                            }, text = { Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis) })
+                        }
+                    }
+                    val primary = model.sessions.firstOrNull { it.id == model.selectedSession } ?: model.sessions.first()
+                    val secondary = model.sessions.firstOrNull { it.id == splitOtherSessionId && it.id != primary.id }
+                    if (splitEnabled && canSplit && secondary != null) {
+                        Row(Modifier.weight(1f).fillMaxWidth()) {
+                            key(primary.id) {
+                                TerminalPanel(model, primary, Modifier.weight(1f), showTitle = true)
+                            }
+                            Box(Modifier.width(1.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
+                            key(secondary.id) {
+                                TerminalPanel(model, secondary, Modifier.weight(1f), showTitle = true)
+                            }
+                        }
+                    } else {
+                        key(primary.id) { TerminalPanel(model, primary, Modifier.weight(1f)) }
+                    }
+                }
+            }
         }
     }
     if (selectModel) ModelPicker(model, onDismiss = { selectModel = false })
@@ -471,13 +559,21 @@ private fun modeName(value: String) = when (value) { "continue" -> "继续最近
 private fun usageNumber(value: Long?): String = value?.toString() ?: "未提供"
 private fun usageCompact(value: UsageSummary): String = if (value.inputTokens == null && value.outputTokens == null) "Token 未提供" else "Token ${usageNumber(value.inputTokens)} / ${usageNumber(value.outputTokens)}"
 
-@Composable private fun TerminalPanel(model: WorkbenchModel, session: TerminalSession, modifier: Modifier = Modifier) {
+@Composable private fun TerminalPanel(model: WorkbenchModel, session: TerminalSession, modifier: Modifier = Modifier, showTitle: Boolean = false) {
     var closing by remember { mutableStateOf(false) }
     var fontDelta by remember { mutableIntStateOf(0) }
     var keyboardRequest by remember { mutableIntStateOf(0) }
     var scrollRequest by remember { mutableIntStateOf(0) }
     var bottomRequest by remember { mutableIntStateOf(0) }
     Column(modifier.fillMaxSize()) {
+        if (showTitle) {
+            TextButton(onClick = { keyboardRequest++ }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
+                Column(Modifier.fillMaxWidth()) {
+                    Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(session.workspace, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             listOf("Esc" to "\u001b", "Tab" to "\t", "Ctrl+C" to "\u0003").forEach { (title, value) ->
                 TextButton(onClick = { model.send(session.id, value) }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text(title, fontSize = 11.sp) }
@@ -491,7 +587,7 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
             TextButton(onClick = { fontDelta-- }, contentPadding = PaddingValues(3.dp), modifier = Modifier.width(30.dp)) { Text("A−") }
             IconButton(onClick = { closing = true }, modifier = Modifier.width(34.dp)) { Icon(Icons.Outlined.Close, "关闭此终端") }
         }
-        Box(Modifier.weight(1f).fillMaxWidth().heightIn(min = 220.dp)) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
             TerminalSurface(model, session, fontDelta, keyboardRequest, scrollRequest, bottomRequest, Modifier.fillMaxSize())
         }
         if (session.exitCode != null) Text("终端已退出：${session.exitCode}", style = MaterialTheme.typography.labelSmall)
@@ -507,6 +603,7 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
     val context = LocalContext.current
     var ready by remember { mutableStateOf(false) }
     val cursor = remember { TerminalCursor() }
+    val replayThrough = remember { session.after }
     val handler = remember { Handler(Looper.getMainLooper()) }
     val browser = remember {
         TerminalWebView(context) { model.send(session.id, it) }.apply {
@@ -550,7 +647,7 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
         AndroidView(factory = { browser }, modifier = Modifier.fillMaxSize(), update = { view ->
             if (ready) {
                 session.output.filter { it.serial > cursor.serial }.forEach { chunk ->
-                    view.evaluateJavascript("window.writeChunk(${JSONObject.quote(chunk.encoded)})", null)
+                    view.evaluateJavascript("window.writeChunk(${JSONObject.quote(chunk.encoded)}, ${chunk.replay || chunk.serial <= replayThrough})", null)
                     cursor.serial = chunk.serial
                 }
                 if (cursor.fontDelta != fontDelta) {

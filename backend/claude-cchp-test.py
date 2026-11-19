@@ -15,7 +15,7 @@ import tempfile
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
 USER_ROOT = Path.home()
@@ -743,23 +743,40 @@ def quick_launch():
                   workspace=workspace, session_mode=session_mode)
 
 
+class NoModelListRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def fetch_models(key, gateway=None):
     gateway = gateway or gateway_url()
+    url = gateway + "/v1/models"
+    headers = {"User-Agent": "claude-cchp-test-metadata/1.0"}
     request = Request(
-        gateway + "/v1/models?limit=1000",
+        url + "?limit=1000",
         headers={
+            **headers,
             "x-api-key": key,
             "anthropic-version": "2023-06-01",
-            "User-Agent": "claude-cchp-test-metadata/1.0",
         },
     )
-    # Do not send loopback requests via inherited external HTTP proxies.
-    opener = build_opener(ProxyHandler({}))
+    # Keep credentials on the configured host and preserve existing x-api-key routes.
+    opener = build_opener(ProxyHandler({}), NoModelListRedirect())
     try:
-        with opener.open(request, timeout=12) as response:
+        try:
+            response = opener.open(request, timeout=12)
+        except HTTPError as exc:
+            if exc.code not in (401, 403):
+                raise
+            exc.close()
+            response = opener.open(Request(url, headers={**headers, "Authorization": "Bearer " + key}), timeout=12)
+        with response:
             payload = json.load(response)
     except HTTPError as exc:
-        raise RuntimeError("本机网关模型列表校验失败：HTTP " + str(exc.code)) from None
+        exc.close()
+        if 300 <= exc.code < 400:
+            raise RuntimeError("模型列表接口要求重定向，请填写服务的最终地址。") from None
+        raise RuntimeError("网关模型列表校验失败：HTTP " + str(exc.code)) from None
     except (URLError, TimeoutError, OSError):
         raise RuntimeError("无法连接网关 " + gateway + "，请先确认网关服务已启动。") from None
     except (ValueError, TypeError):
@@ -767,7 +784,7 @@ def fetch_models(key, gateway=None):
     rows = payload.get("data", []) if isinstance(payload, dict) else []
     models = sorted({row["id"] for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)})
     if not models:
-        raise RuntimeError("此 Key 未返回可用模型；未启动 Claude，也不会回退其他来源。")
+        raise RuntimeError("此 Key 未返回可用模型；未启动客户端，也不会回退其他来源。")
     return models
 
 

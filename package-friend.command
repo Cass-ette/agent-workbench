@@ -3,10 +3,12 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_SOURCE="$PROJECT_DIR/build/CCHP Model Manager.app"
-STAGING_ROOT="$(mktemp -d "$PROJECT_DIR/build/friend-package.XXXXXX")"
-PACKAGE_DIR="$STAGING_ROOT/CCHP Model Manager - Friend Setup"
-ZIP_PATH="$PROJECT_DIR/build/CCHP Model Manager - Friend Setup-$(date +%Y%m%d-%H%M%S).zip"
-trap 'rm -rf "$STAGING_ROOT"' EXIT
+ZIP_PATH="${1:-$PROJECT_DIR/build/Agent-Workbench-macOS-universal-$(date +%Y%m%d-%H%M%S).zip}"
+
+if (( $# > 1 )); then
+    print -u2 '用法：./package-friend.command [输出 ZIP 路径]'
+    exit 1
+fi
 
 if [[ ! -d "$APP_SOURCE" ]]; then
     print -u2 "未找到已构建的管理器应用：$APP_SOURCE"
@@ -14,11 +16,10 @@ if [[ ! -d "$APP_SOURCE" ]]; then
     exit 1
 fi
 
-mkdir -p "$PACKAGE_DIR/CCHP Gateway Setup"
-ditto "$APP_SOURCE" "$PACKAGE_DIR/CCHP Model Manager.app"
-for file in compose.yml .env.example README.md setup.command stop.command; do
-    cp "$PROJECT_DIR/deployment/cchp-local/$file" "$PACKAGE_DIR/CCHP Gateway Setup/$file"
-done
-chmod 755 "$PACKAGE_DIR/CCHP Gateway Setup/setup.command" "$PACKAGE_DIR/CCHP Gateway Setup/stop.command"
-ditto -c -k --norsrc --keepParent "$PACKAGE_DIR" "$ZIP_PATH"
+if [[ -e "$ZIP_PATH" || -L "$ZIP_PATH" ]]; then
+    print -u2 "输出路径已存在：$ZIP_PATH"
+    exit 1
+fi
+
+ditto -c -k --norsrc --keepParent "$APP_SOURCE" "$ZIP_PATH"
 print "打包完成：$ZIP_PATH"

@@ -2,9 +2,13 @@
 
 Agent 工作台把 Claude Code / Codex CLI 放在同一窗口的独立终端标签页中，让每个任务记住模型、网关和项目。这里的模型仍通过 API 调用，工作台本身不提供免费模型额度。
 
+有可用的网关地址和调用 Key，就不需要在 Windows 上安装 Docker、CCHP 或本地模型。安装包约 2.5 MB；WebView2 和所选 CLI 的磁盘占用另计。
+
+工作台主程序约 7 MB。以 Windows x64 的 npm 发行包为例，Claude Code 2.1.328 的平台包解包约 380 MB，Codex 0.170.0 约 519 MB。只装要用的一个即可；这些数值不含 Node.js、下载缓存、临时文件和会话记录，其他安装方式也可能不同。Windows 11 通常已有 WebView2；缺少时需要另留安装空间。
+
 ## 下载安装
 
-1. 打开 [Windows 发布页](https://github.com/Cass-ette/claude-cchp-manager/releases/tag/windows-v0.1.3)，下载 `Agent-Workbench-Windows-x64-0.1.3-setup.exe`，在 Windows 10/11 x64 上运行安装。
+1. 打开 [GitHub Releases](https://github.com/Cass-ette/claude-cchp-manager/releases)，下载 `Agent-Workbench-Windows-x64-*-setup.exe`，在 Windows 10/11 x64 上运行安装。
 2. 安装包需要 Microsoft WebView2；系统缺少它时，安装程序会联网安装。此版本未做商业代码签名，首次运行可能出现发布者确认，请核对下载来源及发布页提供的 SHA-256。
 3. 提前安装准备使用的客户端，安装后重新打开工作台，让它读取更新后的 PATH：
    - [Claude Code 官方安装说明](https://code.claude.com/docs/en/setup)。
@@ -23,7 +27,7 @@ Claude 需要支持 Anthropic Messages 的网关，Codex 需要支持 OpenAI Res
 
 ## 网关是自己的
 
-工作台不依赖作者的电脑或作者的 CCHP。可以使用朋友已有的兼容 HTTPS 网关，也可以自行部署 CCHP，再填自己创建的下游调用 Key。已有网关时不用再部署一套。
+工作台可以直连兼容的模型 API 或 HTTPS 网关，不依赖 CCHP，也不依赖作者的电脑。填写该服务的地址和它签发的调用 Key。使用 CCHP 时才填 CCHP 地址和它签发的下游 Key。仅提供 Chat Completions 的服务不能直接驱动 Claude Code 或 Codex；请确认它支持上述对应协议及模型列表。
 
 `http://127.0.0.1:8081` 只是本机网关地址的示例，不是公共服务。若网关在另一台电脑，请填写可访问的 HTTPS 地址，或先建立 SSH 隧道再填 Windows 本机转发地址。停止隧道后连接也会停止。
 

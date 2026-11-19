@@ -3,7 +3,7 @@ mod pricing;
 mod usage;
 use keyring::Entry;
 use portable_pty::{Child, MasterPty, PtySize, native_pty_system};
-use reqwest::{Client, Url, header};
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -284,25 +284,39 @@ fn normalize_gateway(value: &str) -> Result<String, String> {
 }
 
 async fn fetch_models(gateway: &str, key: &str) -> Result<Vec<String>, String> {
-    let url = format!("{}/v1/models?limit=1000", gateway.trim_end_matches('/'));
-    let response = Client::new()
-        .get(url)
+    let url = format!("{}/v1/models", gateway.trim_end_matches('/'));
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("agent-workbench/0.1")
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| "无法创建网关连接".to_string())?;
+    let mut response = client
+        .get(format!("{url}?limit=1000"))
         .header("x-api-key", key)
         .header("anthropic-version", "2023-06-01")
-        .header(header::USER_AGENT, "agent-workbench/0.1")
-        .timeout(Duration::from_secs(15))
         .send()
         .await
         .map_err(|error| format!("连接网关失败：{error}"))?;
+    if matches!(response.status().as_u16(), 401 | 403) {
+        response = client
+            .get(url)
+            .bearer_auth(key)
+            .send()
+            .await
+            .map_err(|error| format!("连接网关失败：{error}"))?;
+    }
     let status = response.status();
+    if status.is_redirection() {
+        return Err("模型列表接口要求重定向，请填写服务的最终地址。".into());
+    }
+    if !status.is_success() {
+        return Err(format!("网关模型列表校验失败：HTTP {}", status.as_u16()));
+    }
     let body: Value = response
         .json()
         .await
         .map_err(|error| format!("模型列表响应无效：{error}"))?;
-    if !status.is_success() {
-        let message = body["error"]["message"].as_str().unwrap_or("请求未通过");
-        return Err(format!("网关返回 HTTP {}：{}", status.as_u16(), message));
-    }
     let rows = body["data"]
         .as_array()
         .or_else(|| body["models"].as_array())
@@ -873,5 +887,50 @@ mod tests {
         assert!(normalize_gateway("https://user:example@gateway.example.com").is_err());
         assert!(normalize_gateway("https://gateway.example.com/proxy/v1").is_err());
         assert!(normalize_gateway("https://gateway.example.com/v1?key=value").is_err());
+    }
+
+    #[test]
+    fn model_list_works_with_a_bearer_only_api() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = String::new();
+                let mut reader = BufReader::new(&stream);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                    request.push_str(&line.to_ascii_lowercase());
+                }
+                let (status, body) = if attempt == 0 {
+                    assert!(request.starts_with("get /v1/models?limit=1000 "));
+                    assert!(request.contains("\r\nx-api-key: test-key\r\n"));
+                    ("401 Unauthorized", "Bearer required")
+                } else {
+                    assert!(request.starts_with("get /v1/models "));
+                    assert!(request.contains("\r\nauthorization: bearer test-key\r\n"));
+                    ("200 OK", r#"{"data":[{"id":"model-a"}]}"#)
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let models = tauri::async_runtime::block_on(super::fetch_models(&url, "test-key")).unwrap();
+        assert_eq!(models, ["model-a"]);
+        server.join().unwrap();
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "windows"
-version = "0.1.3"
+version = "0.1.4"
 description = "A terminal workbench for isolated Claude Code and Codex sessions"
 authors = ["Cass-ette"]
 license = "MIT"

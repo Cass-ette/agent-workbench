@@ -54,7 +54,7 @@ jobs:
         run: |
           $tag = "windows-v$env:WINDOWS_VERSION"
           $notes = @"
-          Windows x64 安装包。下载安装 ``Agent-Workbench-Windows-x64-$env:WINDOWS_VERSION-setup.exe``，无需 Rust 或 Visual Studio。
+          Windows x64 纯客户端。下载安装 ``Agent-Workbench-Windows-x64-$env:WINDOWS_VERSION-setup.exe``，无需 Docker、CCHP、本地模型、Rust 或 Visual Studio。系统缺少 WebView2 时，安装程序会联网补装。
 
           首次使用请看随附中文说明，或仓库 ``windows/QUICKSTART.zh-CN.md``。Claude Code / Codex CLI 需要单独安装，并填写自己的兼容网关地址与调用 Key；不附带作者的配置或密钥。
 

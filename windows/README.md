@@ -4,15 +4,15 @@ Windows desktop client for running Claude Code or Codex CLI in independent Power
 
 ## Requirements
 
-For normal use, download the Windows x64 installer from the [Windows release](https://github.com/Cass-ette/claude-cchp-manager/releases/tag/windows-v0.1.3) and follow the [Chinese quick start](QUICKSTART.zh-CN.md). Rust, Node.js and Visual Studio below are build requirements, not requirements of the installed desktop app itself. The selected CLI may have its own runtime requirements.
+For normal use, download the Windows x64 installer from [GitHub Releases](https://github.com/Cass-ette/claude-cchp-manager/releases) and follow the [Chinese quick start](QUICKSTART.zh-CN.md). Docker, a local CCHP server, and local models are unnecessary when using an existing compatible gateway. The selected CLI may have its own runtime requirements.
 
 - Windows 10/11 with the WebView2 Evergreen Runtime.
-- Node.js LTS and Rust with the MSVC toolchain.
-- Visual Studio Build Tools with the Desktop development with C++ workload to build installers.
 - The selected agent CLI (`claude` or `codex`) installed and available on `PATH`.
 - A compatible local gateway or HTTPS gateway with a downstream API key.
 
 ## Development
+
+Building requires Node.js LTS, the Rust MSVC toolchain, and Visual Studio Build Tools with the Desktop development with C++ workload.
 
 ```powershell
 npm ci
@@ -38,7 +38,7 @@ Tauri writes the installer under `src-tauri/target/release/bundle/`.
 - Adding a profile only requests `/v1/models`; it does not make an inference call.
 - The status bar scans isolated Claude/Codex logs every 10 seconds. Click the summary for per-session input (including cache), output, cache reads/writes, and reasoning tokens, or refresh manually. Totals include restored history; missing fields appear as `—`. Public CCHP catalog prices × the current Key's disclosed group ratio provide “网关单价估算” without a management token. Official/bundled references and uncertain historic routes are labelled “参考估算”; explicit `total_cost_usd` records remain client estimates, and mixed totals are labelled separately. Unknown prices show “待匹配单价”, never a fabricated zero; actual charges remain with the CCHP bill. The scanner makes no network requests and emits no conversation content or keys.
 
-For a local CCHP gateway, enter its downstream address (for example `http://127.0.0.1:8081`) and the CCHP-issued downstream key. Never enter an upstream provider key in this app.
+You can use a compatible provider API directly, with that provider's base URL and key. If connecting through CCHP, enter its downstream address (for example `http://127.0.0.1:8081`) and its downstream key.
 
 ## 首次使用
 

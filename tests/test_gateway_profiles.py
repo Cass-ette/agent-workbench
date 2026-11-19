@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 
 BACKEND_PATH = Path(__file__).resolve().parents[1] / "backend" / "claude-cchp-test.py"
@@ -71,6 +72,20 @@ class GatewayProfileTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(RuntimeError):
                 BACKEND.normalize_gateway(url)
         self.assertEqual(BACKEND.normalize_gateway("http://127.0.0.1:8123/v1"), "http://127.0.0.1:8123")
+
+    def test_model_list_supports_bearer_only_api(self):
+        def respond(request, **kwargs):
+            if request.get_header("X-api-key") == "test-key":
+                raise HTTPError(request.full_url, 401, "Bearer required", {}, None)
+            self.assertEqual(request.full_url, "https://api.example.test/v1/models")
+            self.assertEqual(request.get_header("Authorization"), "Bearer test-key")
+            return io.BytesIO(b'{"data":[{"id":"model-a"}]}')
+
+        with patch.object(BACKEND, "build_opener") as build:
+            opener = build.return_value
+            opener.open.side_effect = respond
+            self.assertEqual(BACKEND.fetch_models("test-key", "https://api.example.test"), ["model-a"])
+            self.assertEqual(opener.open.call_count, 2)
 
     def test_usage_snapshot_aggregates_client_records_without_duplicate_assistant_rows(self):
         claude_file = BACKEND.CONFIG_DIR / "projects" / "demo" / "session.jsonl"

@@ -1,8 +1,16 @@
 # Claude & Codex Agent 工作台
 
-## Windows 下载与上手
+## 下载与上手
 
-Windows 朋友请从 [Windows 发布页](https://github.com/Cass-ette/claude-cchp-manager/releases/tag/windows-v0.1.3) 下载 `Agent-Workbench-Windows-x64-0.1.3-setup.exe`。普通使用无需安装 Rust、Visual Studio 或克隆源码；仍需安装准备使用的 Claude Code / Codex CLI，并提供自己的兼容网关地址和调用 Key。
+从 [GitHub Releases](https://github.com/Cass-ette/claude-cchp-manager/releases) 下载客户端。Windows、macOS 和 Android 的默认安装包都不带 CCHP 服务端、Docker 或本地模型。
+
+| 平台 | 下载 | 另外需要什么 |
+| --- | --- | --- |
+| Windows 10/11 x64 | `Agent-Workbench-Windows-x64-*-setup.exe` | WebView2（缺少时联网补装）和所用的 Claude Code 或 Codex CLI。 |
+| macOS 14+（Apple Silicon / Intel） | `Agent-Workbench-macOS-universal.zip` | Python 3 和所用的 CLI。 |
+| Android 8+（开发预览） | `Agent-Workbench-Android-*-preview.apk` | Termux；用应用内的安装向导补齐 Debian 与 CLI。 |
+
+**不用 CCHP 也能用。** 可以直连兼容的模型 API 或第三方网关，填写该服务的地址和它签发的调用 Key。工作台通过 `/v1/models` 读取列表；Claude Code 需要 Anthropic Messages（`/v1/messages`），Codex 需要 OpenAI Responses（`/v1/responses`）。只提供 Chat Completions 的接口不能直接驱动这两个客户端。CCHP 专属的余额和账单功能需要网关提供对应接口；不影响普通模型调用。
 
 - [Windows 中文快速上手与排错](windows/QUICKSTART.zh-CN.md)
 - [Windows 源码、开发与构建说明](windows/README.md)
@@ -14,7 +22,7 @@ Windows 朋友请从 [Windows 发布页](https://github.com/Cass-ette/claude-cch
 
 macOS SwiftUI terminal-first Agent workbench for Claude Code and Codex CLI. It keeps real coding sessions in independent embedded PTY tabs, while gateway and model settings stay in reusable task profiles. A private CCHP deployment is optional; each saved key profile can point at its own local or HTTPS gateway.
 
-The repository now includes a no-secret CCHP deployment template under `deployment/cchp-local/`. It creates a separate local CCHP database and runtime key material for each user; it never packages the author's `.env`, Docker volumes, upstream provider keys, or downstream keys.
+The repository includes a separate [optional CCHP deployment template](deployment/cchp-local/README.md). It is not part of any client download.
 
 ## Features
 
@@ -50,11 +58,11 @@ Requirements: macOS 14+, Swift 6.2+, Python 3, and whichever CLI you intend to u
 
 For remote HTTPS metadata queries, the macOS app prefers Homebrew or Miniconda Python over the system Python, whose older LibreSSL may fail TLS negotiation even when a browser connects successfully. Set `CCHP_MANAGER_PYTHON` in the app's launch environment to choose a specific Python executable. This affects only the app's metadata backend, not the configured gateway or the Agent CLI. Windows uses Rustls and Android uses the system HTTPS implementation; neither depends on macOS Python.
 
-Run `./build-app.command`. The app bundle is written to `build/CCHP Model Manager.app`. Run `./package-friend.command` to create a ZIP containing the app and a fresh local CCHP setup template. This ad-hoc signed build is not notarized; broad distribution requires an Apple Developer ID signature and notarization.
+Run `./build-app.command`. The app bundle is written to `build/CCHP Model Manager.app`. Run `./package-friend.command` to create a client-only ZIP. This ad-hoc signed build is not notarized; broad distribution requires an Apple Developer ID signature and notarization.
 
 The app includes the macOS SwiftTerm source at commit `282c3c3a932b55c129628876b70f37d993af1615` (tag `1.99.3`) under its MIT license. The local target omits SwiftTerm's unrelated cross-platform package dependencies, which otherwise make SwiftPM fetch their complete Git histories on macOS. License and provenance are in `Vendor/SwiftTerm/UPSTREAM.md`.
 
-## Friend deployment
+## Optional self-hosted gateway
 
 Run `deployment/cchp-local/setup.command` on the friend's Mac after installing and starting Docker Desktop to deploy their own CCHP instance. The script generates a new `.env`, avoids occupied host ports, starts the official CCHP containers, and opens the local control panel. The friend then adds their own upstream provider keys in CCHP and creates a downstream LLM key for this manager. The manager must receive a gateway-issued downstream key, never an upstream provider key. Existing compatible gateways can be configured directly without deploying CCHP.
 

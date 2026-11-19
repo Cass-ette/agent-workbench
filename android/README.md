@@ -2,6 +2,8 @@
 
 安卓原生工作台开发预览版：在手机或平板本地运行 Agent，Termux 承载后台进程，默认使用 Debian Linux 用户空间。模型来自用户选择的 API 网关。
 
+APK 不带 Termux、Debian、CLI、Docker、CCHP 或本地模型。运行环境由下方向导单独安装；首次下载及解包占用另计。可直接填写兼容模型 API 或网关的地址和调用 Key，无须 CCHP。更新时需使用与已装版本相同的 APK 签名；遇到签名冲突时先保留已装版本，卸载会清除工作台数据。
+
 ## 首次使用
 
 1. 安装并打开官方 GitHub [Termux v0.118.3 ARM64 APK](https://github.com/termux/termux-app/releases/download/v0.118.3/termux-app_v0.118.3%2Bgithub-debug_arm64-v8a.apk)。大多数近期手机、平板使用 ARM64；[其他架构与版本说明](https://github.com/termux/termux-app/releases/tag/v0.118.3)。已有 Termux 先保留，主程序与插件保持同源，不自动卸载环境。

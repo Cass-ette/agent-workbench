@@ -16,11 +16,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build universal macOS app
         run: ./build-app.command
+      - name: Package macOS client
+        run: ./package-friend.command "$RUNNER_TEMP/Agent-Workbench-macOS-universal.zip"
       - name: Upload macOS app
         uses: actions/upload-artifact@v4
         with:
           name: macos-agent-workbench
-          path: build/CCHP Model Manager.app
+          path: ${{ runner.temp }}/Agent-Workbench-macOS-universal.zip
           if-no-files-found: error
 
   windows:

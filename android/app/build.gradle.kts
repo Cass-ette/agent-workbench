@@ -21,6 +21,15 @@ android {
         versionName = "0.1.19"
         testInstrumentationRunner = "com.cassette.workbench.TerminalInputInstrumentation"
     }
+    // CI must explicitly use the restored key instead of the runner's default debug key.
+    System.getenv("WORKBENCH_ANDROID_PREVIEW_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }?.let { path ->
+        signingConfigs.getByName("debug") {
+            storeFile = file(path)
+            storePassword = "android"
+            keyAlias = "AndroidDebugKey"
+            keyPassword = "android"
+        }
+    }
     buildFeatures { compose = true; buildConfig = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
     compileOptions {

@@ -99,12 +99,18 @@ jobs:
         run: |
           : "${PREVIEW_KEYSTORE:?Missing persistent Android preview signing key}"
           umask 077
-          mkdir -p "$HOME/.android"
-          printf '%s' "$PREVIEW_KEYSTORE" | base64 --decode > "$HOME/.android/debug.keystore"
+          path="$RUNNER_TEMP/workbench-preview.keystore"
+          printf '%s' "$PREVIEW_KEYSTORE" | base64 --decode > "$path"
+          printf 'WORKBENCH_ANDROID_PREVIEW_KEYSTORE_PATH=%s\n' "$path" >> "$GITHUB_ENV"
       - name: Test and build Android preview
         run: |
           python -m unittest discover -s tests
           ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+      - name: Verify APK uses the restored preview certificate
+        run: |
+          expected=$(keytool -exportcert -keystore "$WORKBENCH_ANDROID_PREVIEW_KEYSTORE_PATH" -storepass android -alias AndroidDebugKey | sha256sum | cut -d ' ' -f1)
+          actual=$("$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs app/build/outputs/apk/debug/app-debug.apk | sed -n 's/Signer #1 certificate SHA-256 digest: //p')
+          test -n "$expected" && test "$actual" = "$expected"
       - uses: actions/upload-artifact@v4
         with:
           name: android-agent-workbench-preview-apk

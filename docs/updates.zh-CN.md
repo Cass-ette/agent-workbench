@@ -20,7 +20,7 @@
 
 更新说明默认取 `docs/preview-notes.zh-CN.md`，可手动输入本批说明。版本从真实产物读取，清单由 `scripts/build-update-manifest.py` 生成，包含渠道、架构、版本、地址、大小、哈希；Android 额外记录版本代码和签名类型。
 
-Android 测试包的签名必须固定。Actions secret `WORKBENCH_ANDROID_PREVIEW_KEYSTORE_BASE64` 存放既有开发签名密钥，CI 恢复后构建 debug APK，避免每次生成不同密钥导致不能覆盖。密钥不可进入仓库、日志或发布附件。已有其他签名的安装只能使用同签名来源的包。
+Android 测试包的签名必须固定。Actions secret `WORKBENCH_ANDROID_PREVIEW_KEYSTORE_BASE64` 存放既有开发签名密钥，CI 恢复后通过显式签名路径构建 debug APK，再比较 APK 证书与恢复的密钥证书，避免 runner 默认调试签名导致不能覆盖。密钥不可进入仓库、日志或发布附件。已有其他签名的安装只能使用同签名来源的包。
 
 Windows 单独工作流也只发布可手动下载的测试版；三端应用内更新继续使用完整发布清单。
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { WorkbenchUpdate } from "../src/WorkbenchUpdate";
 import { version } from "../package.json";
 
@@ -19,6 +19,26 @@ beforeEach(() => {
   invoke.mockReset();
 });
 afterEach(cleanup);
+
+it("没有新版或检查失败时仍保留常驻检查更新入口", async () => {
+  invoke.mockResolvedValueOnce(null).mockRejectedValueOnce("无法读取更新（HTTP 403）。");
+  render(<WorkbenchUpdate running={0} />);
+  await waitFor(() => expect(localStorage.getItem(cache + ".next")).not.toBeNull());
+  fireEvent.click(screen.getByRole("button", { name: "检查更新" }));
+  await screen.findByText("无法读取更新（HTTP 403）。");
+  fireEvent.click(screen.getByRole("button", { name: "稍后" }));
+  expect(screen.getByRole("button", { name: "检查更新" })).toBeTruthy();
+});
+
+it("检查失败时保留已发现版本的更新入口", async () => {
+  localStorage.setItem(cache + ".available", JSON.stringify(update));
+  invoke.mockRejectedValueOnce("更新连接失败");
+  render(<WorkbenchUpdate running={0} />);
+  await waitFor(() => expect(localStorage.getItem(cache + ".next")).not.toBeNull());
+  expect(screen.getByRole("button", { name: "新版 9.0.1" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "新版 9.0.1" }));
+  expect(screen.getByText("新版说明")).toBeTruthy();
+});
 
 it("缓存到期后刷新已经显示的版本提示", async () => {
   localStorage.setItem(cache + ".available", JSON.stringify(update));

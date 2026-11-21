@@ -10,7 +10,7 @@
 | macOS 14+（Apple Silicon / Intel） | macOS 通用 ZIP | Python 3 和所用的 CLI。 |
 | Android 8+ | Android APK | Termux。用应用内的安装向导补齐 Debian 与 CLI。 |
 
-支持应用内更新的版本可以在 macOS 的「Agent 工作台」菜单、Windows 窗口右上角或 Android 顶栏打开「检查更新」。查看更新说明后可以下载，等任务完成再安装。原地升级保留工作台配置、Key 和对话历史。也可以从发布页手动下载。发布流程见[三端更新与发布](docs/updates.zh-CN.md)。
+支持应用内更新的版本可以在 macOS 左侧栏、Windows 窗口右上角或 Android 顶栏打开常驻的「检查更新」入口，发现新版时显示版本号。macOS 应用菜单也保留同一入口。查看更新说明后可以下载，等任务完成再安装。原地升级保留工作台配置、Key 和对话历史。也可以从发布页手动下载。发布流程见[三端更新与发布](docs/updates.zh-CN.md)。
 
 **不用 CCHP 也能用。** 可以直连兼容的模型 API 或第三方网关，填写该服务的地址和它签发的调用 Key。工作台通过 `/v1/models` 读取列表；Claude Code 需要 Anthropic Messages（`/v1/messages`），Codex 需要 OpenAI Responses（`/v1/responses`）。只提供 Chat Completions 的接口不能直接驱动这两个客户端。CCHP 专属的余额和账单功能需要网关提供对应接口；不影响普通模型调用。
 

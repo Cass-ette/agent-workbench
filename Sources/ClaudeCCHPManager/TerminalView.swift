@@ -6,23 +6,37 @@ import SwiftUI
 /// The trailing space lets the user keep composing the command without running it.
 @MainActor
 final class FileDropTerminalView: LocalProcessTerminalView {
-    override init(frame: CGRect, font: NSFont? = nil, options: TerminalOptions) {
-        super.init(frame: frame, font: font, options: options)
-        registerForDraggedTypes([.fileURL])
-    }
+    private(set) var isSelectedForInput = false
 
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        registerForDraggedTypes([.fileURL])
+    func setSelected(_ selected: Bool) {
+        // SwiftUI's opacity/hit testing does not remove an NSView from AppKit's
+        // drag destinations. Keep the PTY mounted, but hide its native view.
+        isHidden = !selected
+        guard isSelectedForInput != selected else { return }
+        isSelectedForInput = selected
+        if selected {
+            registerForDraggedTypes([.fileURL])
+        } else {
+            unregisterDraggedTypes()
+        }
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        fileURLs(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+        guard isSelectedForInput, !isHiddenOrHasHiddenAncestor,
+              sender.draggingSourceOperationMask.contains(.copy),
+              !fileURLs(from: sender.draggingPasteboard).isEmpty else { return [] }
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        draggingEntered(sender)
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard isSelectedForInput, !isHiddenOrHasHiddenAncestor else { return false }
         let urls = fileURLs(from: sender.draggingPasteboard)
         guard !urls.isEmpty else { return false }
+        window?.makeFirstResponder(self)
         pasteText(urls.map { Self.shellQuote($0.path) }.joined(separator: " ") + " ")
         return true
     }
@@ -57,7 +71,8 @@ final class EmbeddedTerminalControl: ObservableObject {
     }
 
     func focus() {
-        if let terminalView { terminalView.window?.makeFirstResponder(terminalView) }
+        guard let terminalView, terminalView.isSelectedForInput else { return }
+        terminalView.window?.makeFirstResponder(terminalView)
     }
 }
 
@@ -65,6 +80,7 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
     @ObservedObject var control: EmbeddedTerminalControl
     @ObservedObject var style: SharedTerminalStyle
     let launch: TerminalLaunchSpec?
+    let isSelected: Bool
     let onExit: (Int32?) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -74,6 +90,7 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
     func makeNSView(context: Context) -> FileDropTerminalView {
         let view = FileDropTerminalView(frame: .zero, font: style.font,
                                         options: TerminalOptions(scrollback: style.settings.scrollback))
+        view.setSelected(isSelected)
         view.processDelegate = context.coordinator
         control.attach(view)
         control.apply(style, to: view)
@@ -90,6 +107,7 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
     }
 
     func updateNSView(_ view: FileDropTerminalView, context: Context) {
+        view.setSelected(isSelected)
         control.attach(view)
         control.apply(style, to: view)
     }
@@ -278,7 +296,8 @@ private struct TerminalSessionPane: View {
     let onExit: (Int32?) -> Void
 
     var body: some View {
-        EmbeddedAgentTerminal(control: session.control, style: style, launch: session.launchSpec, onExit: onExit)
+        EmbeddedAgentTerminal(control: session.control, style: style, launch: session.launchSpec,
+                              isSelected: isSelected, onExit: onExit)
             .id(session.id)
             .opacity(isSelected ? 1 : 0)
             .allowsHitTesting(isSelected)

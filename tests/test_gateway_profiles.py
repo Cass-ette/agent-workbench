@@ -68,6 +68,60 @@ class GatewayProfileTests(unittest.TestCase):
         profiles = BACKEND.load_profiles()
         self.assertEqual(profiles[0]["gateway"], "https://default.example.test")
 
+    def test_remove_profile_deletes_key_and_billing_secrets_but_preserves_history(self):
+        with patch.object(BACKEND, "fetch_models", return_value=["model-a"]):
+            removed = BACKEND.save_profile_key("Remove me", "test-key-remove-000000000000000001")
+            kept = BACKEND.save_profile_key("Keep me", "test-key-keep-0000000000000000001")
+
+        billing_dir = BACKEND.TEST_ROOT / "billing"
+        billing_dir.mkdir()
+        billing = billing_dir / (removed["id"] + ".json")
+        backup = billing_dir / (removed["id"] + ".json.bak")
+        billing.write_text('{"token":"billing-secret"}')
+        backup.write_text('{"token":"old-billing-secret"}')
+        history = BACKEND.CONFIG_DIR / "projects/demo/session.jsonl"
+        history.parent.mkdir(parents=True)
+        history.write_text('{"title":"kept history"}\n')
+
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            BACKEND.remove_profile_key(removed["id"])
+
+        result = json.loads(output.getvalue())
+        profiles = {item["id"]: item for item in BACKEND.load_profiles()}
+        self.assertTrue(result["removed"])
+        self.assertEqual(result["name"], "Remove me")
+        self.assertNotIn(removed["id"], profiles)
+        self.assertIn(kept["id"], profiles)
+        self.assertFalse((BACKEND.KEY_DIR / (removed["id"] + ".key")).exists())
+        self.assertFalse(billing.exists())
+        self.assertFalse(backup.exists())
+        self.assertTrue(history.is_file())
+
+    def test_default_key_cannot_be_removed(self):
+        BACKEND.KEY_FILE.parent.mkdir(parents=True)
+        BACKEND.KEY_FILE.write_text("default-test-key-000000000000000001\n")
+
+        with self.assertRaisesRegex(RuntimeError, "默认免费配置"):
+            BACKEND.remove_profile_key("free")
+
+        self.assertTrue(BACKEND.KEY_FILE.is_file())
+
+    def test_refuses_to_follow_a_profile_key_symlink(self):
+        with patch.object(BACKEND, "fetch_models", return_value=["model-a"]):
+            profile = BACKEND.save_profile_key("Linked", "test-key-linked-000000000000000001")
+        key_path = BACKEND.KEY_DIR / (profile["id"] + ".key")
+        key_path.unlink()
+        target = BACKEND.TEST_ROOT / "outside.key"
+        target.write_text("must stay")
+        key_path.symlink_to(target)
+
+        with self.assertRaisesRegex(RuntimeError, "符号链接"):
+            BACKEND.remove_profile_key(profile["id"])
+
+        self.assertEqual(target.read_text(), "must stay")
+        self.assertIn(profile["id"], {item["id"] for item in BACKEND.load_profiles()})
+
     def test_gateway_url_rejects_credentials_and_remote_http(self):
         for url in ("http://example.test", "https://user:secret@example.test"):
             with self.subTest(url=url), self.assertRaises(RuntimeError):

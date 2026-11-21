@@ -5,6 +5,8 @@ struct ManagerView: View {
     @ObservedObject var model: ManagerModel
     @ObservedObject var updates: WorkbenchUpdates
     @State private var isAddProfilePresented = false
+    @State private var profilePendingDeletion: KeyProfile?
+    @State private var isProfileDeleteConfirmationPresented = false
     @State private var isTerminalFullScreen = false
     @State private var isTaskSetupVisible = true
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -72,6 +74,21 @@ struct ManagerView: View {
         } message: {
             if let history = model.selectedHistory {
                 Text("对话：\(history.title)\n调用配置：\(model.selectedProfile?.name ?? "")\n模型：\(model.selectedModel)\n网关：\(model.gateway)\n\n新分支使用这套配置，保留原对话。历史上下文会发送到该网关，可能产生费用。")
+            }
+        }
+        .confirmationDialog("删除本机调用配置？", isPresented: $isProfileDeleteConfirmationPresented,
+                            titleVisibility: .visible) {
+            if let profile = profilePendingDeletion {
+                Button("删除「\(profile.name)」", role: .destructive) {
+                    Task { await model.deleteProfile(profile) }
+                    profilePendingDeletion = nil
+                }
+            }
+            Button("取消", role: .cancel) { profilePendingDeletion = nil }
+        } message: {
+            if let profile = profilePendingDeletion {
+                let active = model.terminalSessions.filter { $0.isRunning && $0.profileID == profile.id }.count
+                Text("将删除这把 Key 和该配置的只读账单 Token，不会删除历史对话。\(active > 0 ? "已有 \(active) 个运行中的终端仍可能持有 Key。" : "")")
             }
         }
     }
@@ -181,12 +198,29 @@ struct ManagerView: View {
                     }
                 )) {
                     ForEach(model.profiles) { profile in
-                        Label {
-                            Text(profile.name)
-                                .lineLimit(1)
-                        } icon: {
-                            Image(systemName: "key.horizontal.fill")
-                                .foregroundStyle(profile.id == model.selectedProfileID ? Color.accentColor : Color.secondary)
+                        HStack(spacing: 4) {
+                            Label {
+                                Text(profile.name)
+                                    .lineLimit(1)
+                            } icon: {
+                                Image(systemName: "key.horizontal.fill")
+                                    .foregroundStyle(profile.id == model.selectedProfileID ? Color.accentColor : Color.secondary)
+                            }
+                            Spacer(minLength: 2)
+                            if profile.id != "free" {
+                                Button(role: .destructive) {
+                                    profilePendingDeletion = profile
+                                    isProfileDeleteConfirmationPresented = true
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 10))
+                                        .frame(width: 22, height: 22)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(model.isDeletingProfile)
+                                .help("删除本机 Key 配置")
+                            }
                         }
                         .tag(profile.id)
                         .help(profile.name)

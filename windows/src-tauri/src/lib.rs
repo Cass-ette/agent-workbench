@@ -1062,7 +1062,7 @@ mod tests {
         let lock = dir.join("session.lock");
         let ready = dir.join("ready");
         fs::write(&lock, b"test").unwrap();
-        let job = TerminalJob::new().unwrap();
+        let mut job = TerminalJob::new().unwrap();
         let script = job.startup_script() + r#"
             Start-Process -FilePath powershell.exe -NoNewWindow -ArgumentList '-NoProfile -Command "$f = [IO.File]::Open($env:WORKBENCH_TEST_LOCK, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); [IO.File]::WriteAllText($env:WORKBENCH_TEST_READY, [string]$PID); Start-Sleep -Seconds 90"'
             Start-Sleep -Seconds 90
@@ -1095,7 +1095,7 @@ mod tests {
         use super::{terminal_job::TerminalJob, terminal_script};
         use std::{process::Command, thread, time::{Duration, Instant}};
 
-        let job = TerminalJob::new().unwrap();
+        let mut job = TerminalJob::new().unwrap();
         let script = terminal_script(job.startup_script(), "cmd.exe /d /c exit 37", false, false);
         let mut child = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])

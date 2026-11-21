@@ -244,7 +244,8 @@ def usage_snapshot():
     from usage_records import scan_usage
     from model_pricing import apply_usage_pricing
     service = pricing_service()
-    branches = (home for home in CLAUDE_BRANCH_ROOT.glob("branch-*") if not home.is_symlink())
+    branches = (home for home in CLAUDE_BRANCH_ROOT.glob("*")
+                if home.name.startswith(("branch-", "scope-")) and not home.is_symlink())
     snapshot = scan_usage(CONFIG_DIR / "projects", CODEX_HOME_ROOT, include_pricing=True, claude_branches=branches)
     print(json.dumps(apply_usage_pricing(snapshot, service.resolve), ensure_ascii=False))
 
@@ -409,13 +410,27 @@ def launch_profile(profile_id, model, workspace_value, session_mode, gateway_val
         raise RuntimeError("此 Key 不允许所选模型；没有启动 Claude。")
     remember_workspace(workspace)
     save_last_launch(profile, model, workspace, session_mode, "claude", MANAGER_LAST_LAUNCH)
+    prepare_isolated_config()
+    fingerprint = history_module().key_fingerprint(key)
+    scope = json.dumps([profile_id, model, gateway, str(workspace), fingerprint], ensure_ascii=False)
+    home = CLAUDE_BRANCH_ROOT / ("scope-" + hashlib.sha256(scope.encode()).hexdigest()[:24])
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not (home / "settings.json").exists():
+        private_write(home / "settings.json", SETTINGS.read_text())
+    private_write(home / "workbench-profile.json", json.dumps({
+        "profile_id": profile_id, "profile_name": profile["name"], "model": model,
+        "gateway": gateway, "key_fingerprint": fingerprint,
+    }, ensure_ascii=False))
     return launch(model, selected_key=key, selected_name=profile["name"],
-                  workspace=workspace, session_mode=session_mode, gateway=gateway)
+                  workspace=workspace, session_mode=session_mode, gateway=gateway, config_dir=home)
 
 
-def codex_config(profile_id, model, gateway=None, workspace=None, branch_home=None):
+def codex_config(profile_id, model, gateway=None, workspace=None, branch_home=None, fingerprint=""):
     gateway = gateway or gateway_url()
-    scope = json.dumps([profile_id, model, gateway, str(workspace or "")], ensure_ascii=False, separators=(",", ":"))
+    identity = [profile_id, model, gateway, str(workspace or "")]
+    if fingerprint:
+        identity.append(fingerprint)
+    scope = json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
     scope_id = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:16]
     home = branch_home or CODEX_HOME_ROOT / profile_id / scope_id
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -433,13 +448,18 @@ def codex_config(profile_id, model, gateway=None, workspace=None, branch_home=No
         'env_key = "CCH_API_KEY"\n'
     )
     private_write(home / "config.toml", config)
+    if branch_home is None:
+        private_write(home / "workbench-profile.json", json.dumps({
+            "profile_id": profile_id, "model": model, "gateway": gateway, "key_fingerprint": fingerprint,
+        }, ensure_ascii=False))
     return home
 
 
-def build_codex_command(model, workspace, session_mode, history_id=None):
+def build_codex_command(model, workspace, session_mode, history_id=None, fork_history=True):
     command = [str(CODEX), "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
     if history_id:
-        return [str(CODEX), "fork", history_id, *command[1:]]
+        action = "fork" if fork_history else "resume"
+        return [str(CODEX), action, history_id, *command[1:]]
     if session_mode == "continue":
         return [str(CODEX), "resume", "--last", "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
     if session_mode == "resume":
@@ -479,18 +499,37 @@ def history_roots():
                 codex_roots.append((home, profile_dir.name, label))
     claude_roots = [(CONFIG_DIR, "", "")]
     if CLAUDE_BRANCH_ROOT.is_dir() and not CLAUDE_BRANCH_ROOT.is_symlink():
-        claude_roots.extend((p, "", "") for p in CLAUDE_BRANCH_ROOT.iterdir() if p.name.startswith("branch-"))
+        claude_roots.extend((p, "", "") for p in CLAUDE_BRANCH_ROOT.iterdir()
+                            if p.name.startswith(("branch-", "scope-")))
     return codex_roots, claude_roots
 
 
-def history_list():
+def global_history_roots():
+    """Return user-level client homes only when the user explicitly imports them."""
+    codex = [(USER_ROOT / ".codex", "global", "系统全局")]
+    claude = [(USER_ROOT / ".claude", "global", "系统全局")]
+    return codex, claude
+
+
+def history_list(workspace=None):
     session_history = history_module()
     codex_roots, claude_roots = history_roots()
-    print(json.dumps({"sessions": session_history.public_rows(
-        session_history.scan_history(codex_roots, claude_roots))}, ensure_ascii=False))
+    rows = session_history.mark_scope(
+        session_history.scan_history(codex_roots, claude_roots, workspace=workspace), "workbench")
+    print(json.dumps({"sessions": session_history.public_rows(rows)}, ensure_ascii=False))
 
 
-def launch_history(history_ref, session_id, client, profile_id, model, workspace_value, gateway_value=None):
+def global_history_list():
+    session_history = history_module()
+    codex_roots, claude_roots = global_history_roots()
+    workbench_codex, workbench_claude = history_roots()
+    rows = session_history.scan_all_history(
+        workbench_codex, workbench_claude, codex_roots, claude_roots)
+    print(json.dumps({"sessions": session_history.public_rows(rows)}, ensure_ascii=False))
+
+
+def launch_history(history_ref, session_id, client, profile_id, model, workspace_value,
+                   gateway_value=None, include_global=False):
     session_history = history_module()
     profile = next((item for item in load_profiles() if item["id"] == profile_id), None)
     if profile is None:
@@ -498,7 +537,12 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
     if not isinstance(model, str) or not model.strip() or len(model) > 250 or any(c in model for c in "\0\r\n"):
         raise RuntimeError("目标模型无效。")
     codex_roots, claude_roots = history_roots()
-    row = session_history.resolve_history(history_ref, session_id, client, codex_roots, claude_roots)
+    if include_global:
+        global_codex, global_claude = global_history_roots()
+        codex_roots += global_codex
+        claude_roots += global_claude
+    row = session_history.resolve_history(
+        history_ref, session_id, client, codex_roots, claude_roots, workspace=workspace_value)
     workspace = Path(workspace_value or row["workspace"]).expanduser()
     try:
         workspace = workspace.resolve(strict=True)
@@ -506,8 +550,8 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
         raise RuntimeError("原项目目录不存在或无法访问；请在历史记录中重新选择目录。") from None
     if not workspace.is_dir():
         raise RuntimeError("工作目录必须是文件夹。")
-    if client == "claude" and (not row["workspace"] or workspace != Path(row["workspace"]).resolve()):
-        raise RuntimeError("Claude 恢复需要原项目目录；请从历史列表重新选择该会话。")
+    if not row["workspace"] or workspace != Path(row["workspace"]).resolve():
+        raise RuntimeError("恢复必须使用这条会话所属的项目目录；请从该目录的历史列表重新选择。")
     gateway = profile["gateway"]
     if gateway_value and normalize_gateway(gateway_value) != gateway:
         raise RuntimeError("目标网关已变更；请刷新配置后重新确认。")
@@ -517,22 +561,32 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
     executable = CODEX if client == "codex" else CLAUDE
     if not executable.is_file():
         raise RuntimeError("未找到对应客户端；没有恢复会话。")
-    parent = CODEX_HOME_ROOT / profile_id if client == "codex" else CLAUDE_BRANCH_ROOT
-    home, seed = session_history.stage_branch(row, parent, profile_id, profile["name"], model, gateway)
+    fingerprint = session_history.key_fingerprint(key)
+    same_config = session_history.can_resume_in_place(row, profile_id, model, gateway, fingerprint)
+    if same_config:
+        home, seed = Path(row["_home"]), Path(row["_path"])
+    else:
+        parent = CODEX_HOME_ROOT / profile_id if client == "codex" else CLAUDE_BRANCH_ROOT
+        home, seed = session_history.stage_branch(row, parent, profile_id, profile["name"], model, gateway, fingerprint)
+    print("恢复方式：" + ("原地续接（保留原会话 ID）" if same_config else "独立分支（保留来源会话）"), flush=True)
     try:
         if client == "codex":
-            codex_config(profile_id, model, gateway, workspace, branch_home=home)
+            if not same_config:
+                codex_config(profile_id, model, gateway, workspace, branch_home=home)
             environment = dict(os.environ)
             for name in ("OPENAI_API_KEY", "CODEX_SQLITE_HOME", "OPENAI_BASE_URL"):
                 environment.pop(name, None)
             environment.update(CODEX_HOME=str(home), CCH_API_KEY=key,
                                NO_PROXY="127.0.0.1,localhost,::1", no_proxy="127.0.0.1,localhost,::1")
-            command = build_codex_command(model, workspace, "resume", session_id)
+            command = build_codex_command(model, workspace, "resume", session_id, fork_history=not same_config)
         else:
-            private_write(home / "settings.json", "{}\n")
+            if not (home / "settings.json").exists():
+                private_write(home / "settings.json", "{}\n")
             command, environment = build_launch(key, model, workspace=workspace, gateway=gateway,
                                                config_dir=home, isolated_branch=True)
-            command += ["--resume", session_id, "--fork-session"]
+            command += ["--resume", session_id]
+            if not same_config:
+                command += ["--fork-session"]
         with subprocess.Popen(command, cwd=workspace, env=environment) as child:
             # The CLI owns terminal interrupts; keep the wrapper alive to remove its input copy.
             previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -542,7 +596,7 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
                 signal.signal(signal.SIGINT, previous)
     finally:
         # Codex paginated history references its input rollouts from the new session.
-        if client == "claude":
+        if client == "claude" and not same_config:
             seed.unlink(missing_ok=True)
 
 
@@ -565,7 +619,8 @@ def launch_codex_profile(profile_id, model, workspace_value, session_mode, gatew
         raise RuntimeError("此 Key 不允许所选模型；没有启动 Codex。")
     if not CODEX.is_file():
         raise RuntimeError("未找到原有 Codex 可执行文件；没有修改原入口。")
-    codex_home = codex_config(profile_id, model, gateway, workspace)
+    codex_home = codex_config(profile_id, model, gateway, workspace,
+                              fingerprint=history_module().key_fingerprint(key))
     remember_workspace(workspace)
     save_last_launch(profile, model, workspace, session_mode, "codex", MANAGER_LAST_LAUNCH)
     environment = dict(os.environ)
@@ -748,6 +803,12 @@ class NoModelListRedirect(HTTPRedirectHandler):
         return None
 
 
+def close_http_error(exc):
+    # Test doubles and some urllib handlers do not provide a closable response body.
+    if getattr(exc, "fp", None) is not None:
+        exc.close()
+
+
 def fetch_models(key, gateway=None):
     gateway = gateway or gateway_url()
     url = gateway + "/v1/models"
@@ -768,12 +829,12 @@ def fetch_models(key, gateway=None):
         except HTTPError as exc:
             if exc.code not in (401, 403):
                 raise
-            exc.close()
+            close_http_error(exc)
             response = opener.open(Request(url, headers={**headers, "Authorization": "Bearer " + key}), timeout=12)
         with response:
             payload = json.load(response)
     except HTTPError as exc:
-        exc.close()
+        close_http_error(exc)
         if 300 <= exc.code < 400:
             raise RuntimeError("模型列表接口要求重定向，请填写服务的最终地址。") from None
         raise RuntimeError("网关模型列表校验失败：HTTP " + str(exc.code)) from None
@@ -856,7 +917,8 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new", ga
     return command, environment
 
 
-def launch(model, smoke=False, selected_key=None, selected_name=None, workspace=None, session_mode="new", gateway=None):
+def launch(model, smoke=False, selected_key=None, selected_name=None, workspace=None, session_mode="new", gateway=None,
+           config_dir=None):
     if not CLAUDE.is_file():
         raise RuntimeError("未找到原有 Claude 可执行文件；没有修改原入口。")
     key = selected_key if selected_key is not None else read_key()
@@ -865,7 +927,8 @@ def launch(model, smoke=False, selected_key=None, selected_name=None, workspace=
         raise RuntimeError("此调用 Key 不允许模型 " + model + "；已停止，不会回退。")
     prepare_isolated_config()
     cwd = workspace or WORKSPACE
-    command, environment = build_launch(key, model, smoke, cwd, session_mode, gateway)
+    command, environment = build_launch(key, model, smoke, cwd, session_mode, gateway,
+                                        config_dir=config_dir, isolated_branch=config_dir is not None)
     if selected_name:
         print("本机调用 Key：" + selected_name, flush=True)
     print("网关：" + gateway + "；模型：" + model, flush=True)
@@ -957,7 +1020,8 @@ def main():
         "menu", "setup", "status", "models", "plan", "chat", "smoke", "usage",
         "profile-account", "profile-billing", "billing-settings", "save-billing-stdin", "remove-billing",
         "profile-pricing", "save-pricing-source-stdin",
-        "gui-state", "history-list", "history-launch", "profile-models", "add-profile-stdin", "set-gateway-stdin",
+        "gui-state", "history-list", "history-list-global", "history-launch", "history-import-launch",
+        "profile-models", "add-profile-stdin", "set-gateway-stdin",
         "set-profile-gateway-stdin", "launch", "codex-launch",
     ])
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -988,13 +1052,16 @@ def main():
         billing_actions[arguments.action](arguments.profile_id); return 0
     if arguments.action == "plan": plan(arguments.model); return 0
     if arguments.action == "gui-state": gui_state(); return 0
-    if arguments.action == "history-list": history_list(); return 0
-    if arguments.action == "history-launch":
+    if arguments.action == "history-list": history_list(arguments.workspace); return 0
+    if arguments.action == "history-list-global": global_history_list(); return 0
+    if arguments.action in {"history-launch", "history-import-launch"}:
         if not all((arguments.history_ref, arguments.session_id, arguments.client,
                     arguments.profile_id, arguments.workspace)):
             raise RuntimeError("恢复会话缺少历史来源、目标配置或工作目录。")
         return launch_history(arguments.history_ref, arguments.session_id, arguments.client,
-                              arguments.profile_id, arguments.model, arguments.workspace, arguments.gateway_url)
+                              arguments.profile_id, arguments.model, arguments.workspace,
+                              arguments.gateway_url,
+                              include_global=arguments.action == "history-import-launch")
     if arguments.action == "profile-models":
         if not arguments.profile_id: raise RuntimeError("缺少 profile-id。")
         profile_models(arguments.profile_id, arguments.gateway_url); return 0

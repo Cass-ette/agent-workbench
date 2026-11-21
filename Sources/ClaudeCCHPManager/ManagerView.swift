@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ManagerView: View {
     @ObservedObject var model: ManagerModel
+    @ObservedObject var updates: WorkbenchUpdates
     @State private var isAddProfilePresented = false
     @State private var isTerminalFullScreen = false
     @State private var isTaskSetupVisible = true
@@ -44,6 +45,9 @@ struct ManagerView: View {
         .sheet(isPresented: $isAddProfilePresented) {
             AddProfileSheet(model: model)
         }
+        .sheet(isPresented: $updates.show) {
+            WorkbenchUpdateSheet(updates: updates, manager: model)
+        }
         .sheet(isPresented: $model.isModelPickerPresented) {
             ModelPickerSheet(model: model)
         }
@@ -61,13 +65,13 @@ struct ManagerView: View {
         }
         .confirmationDialog("恢复此会话？", isPresented: $model.isRestoreConfirmationPresented,
                             titleVisibility: .visible) {
-            Button(model.selectedHistory == nil ? "继续最近会话" : "创建分支并继续") {
+            Button(model.selectedHistory == nil ? "继续最近会话" : "恢复所选对话") {
                 model.launchConfirmed()
             }
             Button("取消", role: .cancel) {}
         } message: {
             if let history = model.selectedHistory {
-                Text("对话：\(history.title)\n配置：\(model.selectedProfile?.name ?? "")\n模型：\(model.selectedModel)\n网关：\(model.gateway)\n\n继续时，历史上下文会发送到这个网关，可能产生费用。原会话会保留。")
+                Text("对话：\(history.title)\n配置：\(model.selectedProfile?.name ?? "")\n模型：\(model.selectedModel)\n网关：\(model.gateway)\n\n相同配置续接原会话；更换配置、导入系统历史或来源不明时创建独立分支。历史上下文会发送到这个网关，可能产生费用。")
             } else {
                 Text("所选会话的历史内容会发送给当前调用 Key 和上游模型；可能产生费用。")
             }
@@ -82,21 +86,34 @@ struct ManagerView: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 26, height: 26)
                 VStack(alignment: .leading, spacing: 2) {
+                    #if WORKBENCH_LOCAL_UPDATE_TEST
+                    Text("工作台更新测试")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("独立配置 · \(updates.current)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    #else
                     Text("Agent 工作台")
                         .font(.system(size: 13, weight: .semibold))
                     Text("终端工作区")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
+                    #endif
                 }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 16)
             .padding(.top, 14)
             .padding(.bottom, 20)
+            if let version = updates.nextVersion {
+                Button("新版 \(version)") { updates.open() }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+            }
 
             Button {
                 isTaskSetupVisible = true
-                Task { await model.showHistory() }
+                Task { await model.showGlobalHistory() }
             } label: {
                 Label("对话历史", systemImage: "clock.arrow.circlepath")
             }
@@ -109,13 +126,16 @@ struct ManagerView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
+                #if !WORKBENCH_LOCAL_UPDATE_TEST
                 Button {
                     isAddProfilePresented = true
                 } label: {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.borderless)
+                .disabled(model.launchScope == .system)
                 .help("添加当前网关签发的调用 Key")
+                #endif
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
@@ -125,6 +145,14 @@ struct ManagerView: View {
                     .controlSize(.small)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if model.profiles.isEmpty {
+                #if WORKBENCH_LOCAL_UPDATE_TEST
+                ContentUnavailableView {
+                    Label("测试配置", systemImage: "key")
+                } description: {
+                    Text("已保存的 Key 请在桌面上的正式工作台查看。")
+                }
+                .padding(12)
+                #else
                 ContentUnavailableView {
                     Label("还没有 Key", systemImage: "key")
                 } description: {
@@ -134,6 +162,7 @@ struct ManagerView: View {
                         .buttonStyle(.borderedProminent)
                 }
                 .padding(12)
+                #endif
                 Spacer()
             } else {
                 List(selection: Binding(
@@ -157,6 +186,7 @@ struct ManagerView: View {
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
+                .disabled(model.launchScope == .system)
             }
 
             Spacer(minLength: 12)
@@ -250,8 +280,8 @@ struct ManagerView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            .disabled(model.selectedProfile == nil || model.selectedModel.isEmpty || model.workspace.isEmpty || model.isLoadingModels)
-            .help("使用当前任务配置新增一个独立终端")
+            .disabled(!model.canLaunch)
+            .help(model.launchScope == .system ? "使用所选客户端的系统配置新增终端" : "使用当前工作台配置新增一个独立终端")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 9)
@@ -269,22 +299,38 @@ struct ManagerView: View {
             .frame(width: 130)
             .help("选择要启动的 Agent")
 
-            Button {
-                model.modelSearch = ""
-                model.isModelPickerPresented = true
-            } label: {
-                Label {
-                    Text(model.selectedModel.isEmpty ? (model.isLoadingModels ? "正在读取模型" : "选择模型") : model.selectedModel)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                } icon: {
-                    Image(systemName: "cpu")
+            Picker("运行范围", selection: $model.launchScope) {
+                ForEach(LaunchScope.allCases) { scope in
+                    Text(scope.title).tag(scope)
                 }
             }
-            .buttonStyle(.bordered)
-            .disabled(model.models.isEmpty)
-            .frame(minWidth: 150, idealWidth: 205, maxWidth: 235)
-            .help("\(model.models.count) 个可用模型")
+            .pickerStyle(.segmented)
+            .frame(width: 132)
+            .help("选择使用工作台 Key，或沿用所选客户端的系统配置")
+
+            if model.launchScope == .workbench {
+                Button {
+                    model.modelSearch = ""
+                    model.isModelPickerPresented = true
+                } label: {
+                    Label {
+                        Text(model.selectedModel.isEmpty ? (model.isLoadingModels ? "正在读取模型" : "选择模型") : model.selectedModel)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    } icon: {
+                        Image(systemName: "cpu")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.models.isEmpty)
+                .frame(minWidth: 150, idealWidth: 205, maxWidth: 235)
+                .help("\(model.models.count) 个可用模型")
+            } else {
+                Label("系统配置", systemImage: "globe")
+                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 150, idealWidth: 205, maxWidth: 235, alignment: .leading)
+            }
 
             Button {
                 model.chooseWorkspace()
@@ -301,25 +347,27 @@ struct ManagerView: View {
             .frame(minWidth: 130, maxWidth: .infinity)
             .help(model.workspace.isEmpty ? "选择 Agent 工作目录" : model.workspace)
 
-            Menu {
-                ForEach(SessionMode.allCases) { mode in
-                    Button {
-                        model.selectSessionMode(mode)
-                    } label: {
-                        if model.sessionMode == mode {
-                            Label(mode.title, systemImage: "checkmark")
-                        } else {
-                            Text(mode.title)
+            if model.launchScope == .workbench {
+                Menu {
+                    ForEach(SessionMode.allCases) { mode in
+                        Button {
+                            model.selectSessionMode(mode)
+                        } label: {
+                            if model.sessionMode == mode {
+                                Label(mode.title, systemImage: "checkmark")
+                            } else {
+                                Text(mode.title)
+                            }
                         }
                     }
+                } label: {
+                    Label(model.selectedHistory?.title ?? model.sessionMode.compactTitle, systemImage: "clock.arrow.circlepath")
+                        .lineLimit(1)
+                        .frame(maxWidth: 145)
                 }
-            } label: {
-                Label(model.selectedHistory?.title ?? model.sessionMode.compactTitle, systemImage: "clock.arrow.circlepath")
-                    .lineLimit(1)
-                    .frame(maxWidth: 145)
+                .menuStyle(.borderlessButton)
+                .help(model.sessionMode == .new ? "选择新会话或恢复方式" : "恢复会话会转发历史内容，并可能产生费用")
             }
-            .menuStyle(.borderlessButton)
-            .help(model.sessionMode == .new ? "选择新会话或恢复方式" : "恢复会话会转发历史内容，并可能产生费用")
 
             Button {
                 model.requestLaunch()
@@ -327,7 +375,7 @@ struct ManagerView: View {
                 Label("启动", systemImage: "play.fill")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(model.selectedProfile == nil || model.selectedModel.isEmpty || model.workspace.isEmpty || model.isLoadingModels)
+            .disabled(!model.canLaunch)
             .keyboardShortcut(.return, modifiers: [.command])
         }
         .padding(.horizontal, 14)
@@ -390,6 +438,7 @@ private struct HistoryPickerSheet: View {
         guard !query.isEmpty else { return model.historySessions }
         return model.historySessions.filter {
             $0.title.localizedCaseInsensitiveContains(query)
+                || ($0.preview?.localizedCaseInsensitiveContains(query) ?? false)
                 || $0.workspace.localizedCaseInsensitiveContains(query)
                 || $0.profile_name.localizedCaseInsensitiveContains(query)
                 || $0.model.localizedCaseInsensitiveContains(query)
@@ -400,11 +449,18 @@ private struct HistoryPickerSheet: View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("本地对话历史").font(.headline)
-                    Text("选择后可用当前配置分支继续，原会话保留。")
+                    Text(model.historyScope == "global" ? "全部目录的对话历史" : "当前项目的对话历史").font(.headline)
+                    Text(model.historyScope == "global"
+                         ? "跨项目查找工作台与系统会话；系统会话会复制到工作台后继续。"
+                         : "只显示「\(URL(fileURLWithPath: model.workspace).lastPathComponent)」目录中的会话。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
+                if model.historyScope == "global" {
+                    Button("当前项目历史") {
+                        Task { await model.showHistory() }
+                    }
+                }
                 Button("关闭") { dismiss() }
                     .keyboardShortcut(.cancelAction)
             }
@@ -438,8 +494,14 @@ private struct HistoryPickerSheet: View {
                                 Text(entry.updatedDate, style: .relative)
                                     .font(.caption2).foregroundStyle(.tertiary)
                             }
-                            Text("\(entry.client == "codex" ? "Codex" : "Claude") · \(entry.model.isEmpty ? "模型未知" : entry.model) · \(entry.profile_name.isEmpty ? "来源配置未知" : entry.profile_name)")
+                            Text("\(entry.client == "codex" ? "Codex" : "Claude") · \(entry.model.isEmpty ? "模型未知" : entry.model) · \(entry.isGlobal ? "系统全局 · 点击后导入" : (entry.profile_name.isEmpty ? "来源配置未知" : entry.profile_name))")
                                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            if let preview = entry.preview, !preview.isEmpty {
+                                Text(preview)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
                             Text(entry.workspace.isEmpty ? "项目目录未知" : entry.workspace)
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)

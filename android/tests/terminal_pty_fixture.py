@@ -24,7 +24,7 @@ def main():
     bridge = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bridge)
 
-    def shell_only(payload, home=None):
+    def shell_only(payload, home=None, bundle=None):
         if payload.get("client") != "shell":
             raise ValueError("Only Shell is allowed in this test")
         return ["/bin/bash", "--noprofile", "--norc", "-i"], {

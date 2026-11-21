@@ -31,6 +31,21 @@ class CodexConfigTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             BACKEND.build_codex_command("model-a", workspace, "unknown")
 
+    def test_history_launch_uses_native_fork(self):
+        BACKEND.CODEX = Path("/fake/codex")
+        command = BACKEND.build_codex_command(
+            "model-a", Path("/tmp/project"), "resume", "01a1ec86-bf14-70f2-8144-874b179beb72")
+        self.assertEqual(command[:3], ["/fake/codex", "fork", "01a1ec86-bf14-70f2-8144-874b179beb72"])
+        self.assertNotIn("resume", command)
+
+    def test_matching_history_resumes_in_place(self):
+        BACKEND.CODEX = Path("/fake/codex")
+        session_id = "01a1ec86-bf14-70f2-8144-874b179beb72"
+        command = BACKEND.build_codex_command(
+            "model-a", Path("/tmp/project"), "resume", session_id, fork_history=False)
+        self.assertEqual(command[:3], ["/fake/codex", "resume", session_id])
+        self.assertNotIn("fork", command)
+
     def test_creates_private_responses_provider_per_key(self):
         with tempfile.TemporaryDirectory() as temporary:
             BACKEND.CODEX_HOME_ROOT = Path(temporary)

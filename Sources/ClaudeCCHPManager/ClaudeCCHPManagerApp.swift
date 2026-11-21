@@ -21,16 +21,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ClaudeCCHPManagerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = ManagerModel()
+    @StateObject private var updates = WorkbenchUpdates()
 
     var body: some Scene {
         WindowGroup {
-            ManagerView(model: model)
+            ManagerView(model: model, updates: updates)
                 .frame(minWidth: 960, minHeight: 680)
                 .tint(.accentColor)
                 .task { await model.load() }
+                .task {
+                    while !Task.isCancelled {
+                        await updates.check()
+                        do { try await Task.sleep(for: .seconds(900)) } catch { break }
+                    }
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unifiedCompact)
         .defaultSize(width: 1180, height: 780)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("检查更新…") { updates.open() }
+            }
+        }
     }
 }

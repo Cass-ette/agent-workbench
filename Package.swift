@@ -20,6 +20,7 @@ let package = Package(
             name: "ClaudeCCHPManager",
             dependencies: ["SwiftTerm"],
             path: "Sources/ClaudeCCHPManager"
-        )
+        ),
+        .testTarget(name: "ReleaseFeedTests", dependencies: ["ClaudeCCHPManager"], path: "swift-tests")
     ]
 )

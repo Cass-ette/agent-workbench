@@ -15,6 +15,9 @@ class SessionHistoryTests(unittest.TestCase):
             codex_home = root / "codex" / "p-codex" / "scope"
             codex_file = codex_home / "sessions/2026/11/19/rollout-test-01a1ec86-bf14-70f2-8144-874b179beb72.jsonl"
             codex_file.parent.mkdir(parents=True)
+            (codex_home / "workbench-profile.json").write_text(json.dumps({
+                "profile_id": "p-codex", "model": "model-a", "gateway": "https://gateway.test",
+            }), encoding="utf-8")
             codex_file.write_text("\n".join([
                 json.dumps({"type": "session_meta", "timestamp": "2026-11-19T10:00:00Z",
                             "payload": {"session_id": "01a1ec86-bf14-70f2-8144-874b179beb72", "cwd": "/work/project"}}),
@@ -22,6 +25,8 @@ class SessionHistoryTests(unittest.TestCase):
                             "payload": {"model": "model-a"}}),
                 json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user",
                             "content": [{"type": "input_text", "text": "Fix the startup regression"}]}}),
+                json.dumps({"type": "response_item", "payload": {"message": {"role": "user",
+                            "content": [{"type": "input_text", "text": "The latest Codex message"}]}}}),
             ]) + "\n", encoding="utf-8")
 
             claude_home = root / "claude" / "p-claude"
@@ -33,6 +38,9 @@ class SessionHistoryTests(unittest.TestCase):
                             "message": {"content": [{"type": "text", "text": "Review this project"}]}}),
                 json.dumps({"type": "assistant", "sessionId": "8123cb5e-1984-435a-9803-976796d3075c", "cwd": "/work/other",
                             "message": {"model": "model-b"}}),
+                json.dumps({"type": "user", "sessionId": "8123cb5e-1984-435a-9803-976796d3075c", "cwd": "/work/other",
+                            "timestamp": "2026-11-19T11:01:00.000Z",
+                            "message": {"content": [{"type": "text", "text": "The latest Claude message"}]}}),
             ]) + "\n", encoding="utf-8")
 
             rows = session_history.scan_history(
@@ -42,9 +50,12 @@ class SessionHistoryTests(unittest.TestCase):
             by_id = {row["id"]: row for row in rows}
             self.assertEqual(set(by_id), {"01a1ec86-bf14-70f2-8144-874b179beb72", "8123cb5e-1984-435a-9803-976796d3075c"})
             self.assertEqual(by_id["01a1ec86-bf14-70f2-8144-874b179beb72"]["model"], "model-a")
+            self.assertEqual(by_id["01a1ec86-bf14-70f2-8144-874b179beb72"]["gateway"], "https://gateway.test")
             self.assertEqual(by_id["01a1ec86-bf14-70f2-8144-874b179beb72"]["title"], "Fix the startup regression")
+            self.assertEqual(by_id["01a1ec86-bf14-70f2-8144-874b179beb72"]["preview"], "The latest Codex message")
             self.assertEqual(by_id["8123cb5e-1984-435a-9803-976796d3075c"]["model"], "model-b")
             self.assertEqual(by_id["8123cb5e-1984-435a-9803-976796d3075c"]["profile_name"], "Claude profile")
+            self.assertEqual(by_id["8123cb5e-1984-435a-9803-976796d3075c"]["preview"], "The latest Claude message")
             self.assertNotIn("_home", session_history.public_rows(rows)[0])
 
             resolved = session_history.resolve_history(
@@ -54,10 +65,63 @@ class SessionHistoryTests(unittest.TestCase):
             )
             self.assertEqual(Path(resolved["_home"]), codex_home)
 
+            scoped = session_history.scan_history(
+                [(codex_home, "p-codex", "Codex profile")],
+                [(claude_home, "p-claude", "Claude profile")],
+                workspace="/work/other",
+            )
+            self.assertEqual({row["client"] for row in scoped}, {"claude"})
+            with self.assertRaisesRegex(ValueError, "找不到"):
+                session_history.resolve_history(
+                    by_id["01a1ec86-bf14-70f2-8144-874b179beb72"]["history_ref"],
+                    "01a1ec86-bf14-70f2-8144-874b179beb72", "codex",
+                    [(codex_home, "p-codex", "Codex profile")], [], workspace="/work/other")
+
+    def test_all_history_marks_workbench_and_system_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def codex_home(name, session_id, workspace):
+                home = root / name
+                path = home / "sessions/2026/11/19" / f"rollout-test-{session_id}.jsonl"
+                path.parent.mkdir(parents=True)
+                path.write_text("\n".join(map(json.dumps, [
+                    {"type": "session_meta", "payload": {"id": session_id, "cwd": workspace}},
+                    {"type": "response_item", "payload": {"role": "user", "content": "A real request"}},
+                ])) + "\n")
+                return home
+
+            workbench = codex_home("workbench", "01a1ec86-bf14-70f2-8144-874b179beb72", "/work/a")
+            system = codex_home("system", "8123cb5e-1984-435a-9803-976796d3075c", "/work/b")
+            rows = session_history.scan_all_history(
+                [(workbench, "p-one", "One")], [], [(system, "global", "System")], [])
+            self.assertEqual({row["scope"] for row in rows}, {"workbench", "global"})
+
     def test_rejects_mismatched_or_unknown_history_reference(self):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaises(ValueError):
                 session_history.resolve_history("x" * 32, "wrong-id", "codex", [], [])
+
+    def test_in_place_resume_requires_matching_workbench_profile_and_model(self):
+        row = {"scope": "workbench", "profile_id": "p-one", "model": "model-a",
+               "gateway": "https://gateway.test"}
+        self.assertTrue(session_history.can_resume_in_place(row, "p-one", "model-a", "https://gateway.test"))
+        self.assertFalse(session_history.can_resume_in_place(row, "p-two", "model-a", "https://gateway.test"))
+        self.assertFalse(session_history.can_resume_in_place(row, "p-one", "model-b", "https://gateway.test"))
+        self.assertFalse(session_history.can_resume_in_place({**row, "scope": "global"}, "p-one", "model-a"))
+        self.assertFalse(session_history.can_resume_in_place({**row, "profile_id": ""}, "p-one", "model-a"))
+        self.assertFalse(session_history.can_resume_in_place({**row, "gateway": ""}, "p-one", "model-a"))
+        self.assertFalse(session_history.can_resume_in_place(
+            row, "p-one", "model-a", "https://other-gateway.test"))
+        fingerprint = session_history.key_fingerprint("key-one")
+        self.assertFalse(session_history.can_resume_in_place(
+            {**row, "_key_fingerprint": fingerprint}, "p-one", "model-a", "https://gateway.test",
+            session_history.key_fingerprint("key-two")))
+        self.assertTrue(session_history.can_resume_in_place(
+            {**row, "_key_fingerprint": fingerprint}, "p-one", "model-a", "https://gateway.test", fingerprint))
+        self.assertTrue(session_history.can_resume_in_place(
+            {**row, "model": "upstream-snapshot", "_configured_model": "model-a"},
+            "p-one", "model-a", "https://gateway.test"))
 
     def test_branch_keeps_source_and_excludes_external_history_and_import_copy(self):
         with tempfile.TemporaryDirectory() as temporary:

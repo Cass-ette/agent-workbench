@@ -1,6 +1,13 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Fixed, idempotent recipe. No model requests and no API credentials.
 set -euo pipefail
+if [[ "${1:-}" == --vm ]]; then
+  shift
+  if (( $# )); then
+    exec python3 "$(dirname "$0")/linux_vm.py" install --clients "$@"
+  fi
+  exec python3 "$(dirname "$0")/linux_vm.py" install
+fi
 stage() { printf '\nWB_STAGE:%s\n' "$1"; }
 stage '检查 Termux 依赖'
 missing=()

@@ -11,6 +11,11 @@ import shutil
 from typing import Iterable
 from uuid import UUID, uuid4
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
+
 MAX_SESSION_FILE_BYTES = 64 * 1024 * 1024
 MAX_SESSION_ROWS = 2000
 MAX_TITLE_CHARS = 180
@@ -30,9 +35,11 @@ def _text(value: object) -> str:
 
 
 def _title(value: str) -> str:
-    value = value.split("</environment_context>", 1)[-1]
-    value = re.sub(r"<environment_context>.*?</environment_context>", " ", value, flags=re.DOTALL)
+    for tag in ("environment_context", "system-reminder", "local-command-caveat"):
+        value = re.sub(rf"<{tag}>.*?</{tag}>", " ", value, flags=re.DOTALL)
     cleaned = " ".join(value.replace("\x00", " ").split())
+    if cleaned.casefold().strip(" .:;()[]") in {"none", "null", "undefined", "n/a", "untitled"}:
+        return ""
     return cleaned[:MAX_TITLE_CHARS]
 
 
@@ -78,7 +85,7 @@ def _safe_file(path: Path) -> bool:
 
 
 def _read_codex(path: Path, home: Path, profile_id: str, profile_name: str) -> dict | None:
-    session_id = workspace = title = model = ""
+    session_id = workspace = title = preview = model = ""
     manifest = _profile_manifest(home)
     try:
         with path.open(encoding="utf-8", errors="replace") as stream:
@@ -100,28 +107,46 @@ def _read_codex(path: Path, home: Path, profile_id: str, profile_name: str) -> d
                     if candidate and not title:
                         title = candidate
                 elif kind == "response_item":
-                    message = payload if payload.get("type") == "message" else payload.get("message")
-                    if isinstance(message, dict) and message.get("role") == "user":
-                        candidate = _title(_text(message.get("content")))
-                        if candidate and not title:
-                            title = candidate
-    except OSError:
+                    messages = (payload.get("message"), payload)
+                    for message in messages:
+                        if isinstance(message, dict) and message.get("role") == "user":
+                            candidate = _title(_text(message.get("content")))
+                            if candidate:
+                                preview = candidate
+                                title = title or candidate
+    except (OSError, RecursionError):
         return None
-    title = title or str(manifest.get("branch_title") or "")
+    title = title or _title(str(manifest.get("branch_title") or ""))
+    gateway = str(manifest.get("gateway") or "")
+    if not gateway and tomllib is not None:
+        try:
+            config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
+            provider = config.get("model_provider")
+            providers = config.get("model_providers")
+            provider_config = providers.get(provider, {}) if isinstance(providers, dict) else {}
+            base_url = provider_config.get("base_url", "") if isinstance(provider_config, dict) else ""
+            if isinstance(base_url, str):
+                gateway = base_url.removesuffix("/v1").rstrip("/")
+        except (OSError, ValueError, TypeError):
+            pass
     if (not _valid_id(session_id) or _is_imported(manifest, session_id)
-            or not title or not path.stem.endswith("-" + session_id)):
+            or not path.stem.endswith("-" + session_id)):
         return None
+    title = title or preview or "未命名 Codex 会话"
     stat = path.stat()
     return {
         "id": session_id,
         "history_ref": _session_ref("codex", path),
         "client": "codex",
-        "title": title or "Codex 会话",
+        "title": title,
+        "preview": preview,
         "workspace": workspace,
         "model": model or str(manifest.get("model") or ""),
         "profile_id": profile_id or str(manifest.get("profile_id") or ""),
         "profile_name": profile_name or str(manifest.get("profile_name") or ""),
-        "gateway": str(manifest.get("gateway") or ""),
+        "gateway": gateway,
+        "_key_fingerprint": str(manifest.get("key_fingerprint") or ""),
+        "_configured_model": str(manifest.get("model") or model),
         "updated_at": int(stat.st_mtime),
         "_home": str(home),
         "_path": str(path),
@@ -129,7 +154,7 @@ def _read_codex(path: Path, home: Path, profile_id: str, profile_name: str) -> d
 
 
 def _read_claude(path: Path, home: Path, profile_id: str, profile_name: str) -> dict | None:
-    session_id = workspace = title = model = ""
+    session_id = workspace = title = preview = model = ""
     manifest = _profile_manifest(home)
     if _is_imported(manifest, path.stem):
         return None
@@ -150,8 +175,9 @@ def _read_claude(path: Path, home: Path, profile_id: str, profile_name: str) -> 
                 message = row.get("message") if isinstance(row.get("message"), dict) else {}
                 if kind == "user" and not row.get("isMeta"):
                     candidate = _title(_text(message.get("content")))
-                    if candidate and not title:
-                        title = candidate
+                    if candidate:
+                        preview = candidate
+                        title = title or candidate
                 if kind == "last-prompt":
                     candidate = _title(_text(row.get("lastPrompt")))
                     if candidate and not title:
@@ -160,19 +186,23 @@ def _read_claude(path: Path, home: Path, profile_id: str, profile_name: str) -> 
                     model = str(message.get("model") or model)
     except OSError:
         return None
-    if not _valid_id(session_id) or not title:
+    if not _valid_id(session_id):
         return None
+    title = title or preview or "未命名 Claude 会话"
     stat = path.stat()
     return {
         "id": session_id,
         "history_ref": _session_ref("claude", path),
         "client": "claude",
-        "title": title or "Claude 会话",
+        "title": title,
+        "preview": preview,
         "workspace": workspace,
         "model": model or str(manifest.get("model") or ""),
         "profile_id": profile_id or str(manifest.get("profile_id") or ""),
         "profile_name": profile_name or str(manifest.get("profile_name") or ""),
         "gateway": str(manifest.get("gateway") or ""),
+        "_key_fingerprint": str(manifest.get("key_fingerprint") or ""),
+        "_configured_model": str(manifest.get("model") or model),
         "updated_at": int(stat.st_mtime),
         "_home": str(home),
         "_path": str(path),
@@ -183,6 +213,7 @@ def scan_history(
     codex_roots: Iterable[tuple[Path, str, str]],
     claude_roots: Iterable[tuple[Path, str, str]],
     limit: int = MAX_SESSION_ROWS,
+    workspace: str | Path | None = None,
 ) -> list[dict]:
     """Return newest local conversations across the supplied isolated client homes.
 
@@ -192,11 +223,40 @@ def scan_history(
     rows = []
     for _, client, path, home, profile_id, profile_name in _candidates(codex_roots, claude_roots):
         row = _read(client, path, home, profile_id, profile_name)
-        if row:
+        if row and (workspace is None or _same_workspace(row["workspace"], workspace)):
             rows.append(row)
         if len(rows) >= min(limit, MAX_SESSION_ROWS):
             break
     return rows
+
+
+def _same_workspace(first: str, second: str | Path) -> bool:
+    if not first or not str(second):
+        return False
+    try:
+        first_path = Path(first).expanduser()
+        second_path = Path(second).expanduser()
+        return os.path.normcase(os.path.realpath(first_path)) == os.path.normcase(os.path.realpath(second_path))
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def mark_scope(rows: Iterable[dict], scope: str) -> list[dict]:
+    """Annotate rows with the source scope used by the explicit import UI."""
+    return [{**row, "scope": scope} for row in rows]
+
+
+def scan_all_history(
+    codex_roots: Iterable[tuple[Path, str, str]],
+    claude_roots: Iterable[tuple[Path, str, str]],
+    global_codex_roots: Iterable[tuple[Path, str, str]],
+    global_claude_roots: Iterable[tuple[Path, str, str]],
+    limit: int = MAX_SESSION_ROWS,
+) -> list[dict]:
+    local = mark_scope(scan_history(codex_roots, claude_roots, limit), "workbench")
+    global_rows = mark_scope(scan_history(global_codex_roots, global_claude_roots, limit), "global")
+    rows = sorted(local + global_rows, key=lambda row: row["updated_at"], reverse=True)
+    return rows[:min(limit, MAX_SESSION_ROWS)]
 
 
 def _candidates(codex_roots, claude_roots):
@@ -235,13 +295,15 @@ def resolve_history(
     client: str,
     codex_roots: Iterable[tuple[Path, str, str]],
     claude_roots: Iterable[tuple[Path, str, str]],
+    workspace: str | Path | None = None,
 ) -> dict:
     if not isinstance(history_ref, str) or len(history_ref) != 32 or not _valid_id(session_id) or client not in {"codex", "claude"}:
         raise ValueError("历史会话标识无效。")
     for _, kind, path, home, profile_id, profile_name in _candidates(codex_roots, claude_roots):
         if kind == client and _session_ref(kind, path) == history_ref:
             row = _read(kind, path, home, profile_id, profile_name)
-            if row and row["id"] == session_id:
+            if (row and row["id"] == session_id
+                    and (workspace is None or _same_workspace(row["workspace"], workspace))):
                 return row
     raise ValueError("找不到这条本地会话；请刷新历史列表。")
 
@@ -250,7 +312,31 @@ def public_rows(rows: Iterable[dict]) -> list[dict]:
     return [{key: value for key, value in row.items() if not key.startswith("_")} for row in rows]
 
 
-def stage_branch(row: dict, parent: Path, profile_id: str, profile_name: str, model: str, gateway: str):
+def key_fingerprint(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def can_resume_in_place(row: dict, profile_id: str, model: str, gateway: str = "",
+                        fingerprint: str = "") -> bool:
+    """Only continue a workbench session when its key profile and model are known to match."""
+    source_profile = row.get("profile_id")
+    source_model = row.get("_configured_model") or row.get("model")
+    if (row.get("scope") == "global" or not source_profile or source_profile == "global"
+            or source_profile != profile_id or not source_model or source_model != model):
+        return False
+    source_gateway = row.get("gateway")
+    if not source_gateway or source_gateway != gateway:
+        return False
+    # Old snapshots predate fingerprints. A recorded fingerprint must match;
+    # the replaceable default Key needs one even for older histories.
+    source_fingerprint = row.get("_key_fingerprint")
+    if source_fingerprint or profile_id == "free":
+        return bool(fingerprint and source_fingerprint == fingerprint)
+    return True
+
+
+def stage_branch(row: dict, parent: Path, profile_id: str, profile_name: str, model: str, gateway: str,
+                 fingerprint: str = ""):
     """Give the native fork a private input copy and an empty, target-specific home."""
     source = Path(row["_path"])
     source_home = Path(row["_home"])
@@ -269,6 +355,7 @@ def stage_branch(row: dict, parent: Path, profile_id: str, profile_name: str, mo
         (home / "workbench-profile.json").write_text(json.dumps({
             "profile_id": profile_id, "profile_name": profile_name,
             "model": model, "gateway": gateway, "branch_title": row["title"],
+            "key_fingerprint": fingerprint,
             "imported_sessions": [session_id for session_id, _ in inputs],
             "inherited_through": _latest_claude_timestamp(seed) if row["client"] == "claude" else "",
         }, ensure_ascii=False), encoding="utf-8")

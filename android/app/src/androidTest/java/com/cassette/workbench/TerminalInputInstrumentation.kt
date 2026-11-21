@@ -23,8 +23,15 @@ class TerminalInputInstrumentation : Instrumentation() {
     override fun onCreate(arguments: Bundle?) { args = arguments ?: Bundle(); start() }
 
     override fun onStart() {
+        if (args.getString("device_vm_setup") == "true") {
+            DeviceRuntimeSmoke(this).run("vm")
+            return
+        }
         if (args.getString("device_shell_smoke") == "true") {
-            DeviceShellSmoke(this).run()
+            DeviceShellSmoke(this).run(
+                args.getString("device_vm_smoke") == "true",
+                args.getString("device_vm_attach_smoke") == "true",
+            )
             return
         }
         if (args.getString("gateway_smoke") == "true") {
@@ -148,7 +155,7 @@ class TerminalInputInstrumentation : Instrumentation() {
             restore(prefs, originalPrefs)
             restore(credentials, originalCredentials)
         }
-        finish(resultCode, result)
+        finishAfterAutomationConnect(resultCode, result)
     }
 
     private fun restore(prefs: android.content.SharedPreferences, values: Map<String, *>) {

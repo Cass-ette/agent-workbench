@@ -14,6 +14,7 @@ vi.mock("@xterm/addon-fit", () => ({ FitAddon: class {} }));
 const models = Array.from({ length: 430 }, (_, index) => `test-model-${String(index + 1).padStart(3, "0")}`);
 
 beforeEach(() => {
+  window.localStorage.clear();
   invoke.mockReset();
   invoke.mockImplementation(async (command: string) => {
     if (command === "load_app_state") {
@@ -29,6 +30,7 @@ beforeEach(() => {
       };
     }
     if (command === "models_for_profile") return models;
+    if (command === "list_history" || command === "list_all_history") return [];
     return undefined;
   });
 });
@@ -42,6 +44,77 @@ async function openApp() {
 }
 
 describe("工作会话配置", () => {
+  it("侧栏历史跨目录打开全部会话", async () => {
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "list_all_history") return [];
+      return normalInvoke(command, args);
+    });
+    await openApp();
+
+    fireEvent.click(screen.getByRole("button", { name: "对话历史" }));
+    await screen.findByRole("heading", { name: "全部目录的对话历史" });
+    expect(invoke).toHaveBeenCalledWith("list_all_history");
+  });
+
+  it("恢复选择器只请求当前项目并展示最近消息预览", async () => {
+    const row = {
+      id: "8123cb5e-1984-435a-9803-976796d3075c",
+      history_ref: "source-ref",
+      client: "claude",
+      title: "会话标题",
+      preview: "最后一条用户消息",
+      workspace: "C:\\test-project",
+      model: "test-model",
+      profile_id: "fixture-profile",
+      profile_name: "测试配置",
+      updated_at: 1,
+      scope: "workbench",
+    };
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "list_history") return [row];
+      return normalInvoke(command, args);
+    });
+    await openApp();
+
+    fireEvent.change(screen.getByLabelText("会话"), { target: { value: "resume" } });
+    await screen.findByText("最后一条用户消息");
+    expect(invoke).toHaveBeenCalledWith("list_history", { workspace: "C:\\test-project" });
+  });
+
+  it("未添加工作台 Key 时，仍可用同一个启动按钮运行所选的系统客户端", async () => {
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "load_app_state") {
+        const state = await normalInvoke(command, args);
+        return {
+          ...state,
+          config: { ...state.config, profiles: [], selected_profile_id: "", model: "" },
+        };
+      }
+      if (command === "start_global_terminal") throw "测试：系统客户端不可用";
+      return normalInvoke(command, args);
+    });
+    render(<StrictMode><App /></StrictMode>);
+
+    await screen.findByText("尚未配置");
+    const launch = screen.getByRole<HTMLButtonElement>("button", { name: "启动" });
+    expect(launch.disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+    expect(screen.queryByRole("combobox", { name: "选择模型" })).toBeNull();
+
+    await waitFor(() => expect(launch.disabled).toBe(false));
+    fireEvent.click(launch);
+    await screen.findByText("测试：系统客户端不可用");
+    expect(invoke).toHaveBeenCalledWith("start_global_terminal", {
+      client: "codex",
+      workspace: "C:\\test-project",
+    });
+    expect(invoke.mock.calls.some(([command]) => command === "start_terminal")).toBe(false);
+  });
+
   it("已有配置但模型列表读取失败时保留原模型，并可刷新重试", async () => {
     const normalInvoke = invoke.getMockImplementation()!;
     let reachable = false;

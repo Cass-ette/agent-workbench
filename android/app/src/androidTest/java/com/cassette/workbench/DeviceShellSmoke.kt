@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.util.Base64
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
@@ -17,12 +18,13 @@ import java.util.concurrent.TimeUnit
 
 /** Opt-in: only create disposable Shells; never send input to existing Agents. */
 class DeviceShellSmoke(private val runner: Instrumentation) {
-    fun run() {
+    fun run(checkVm: Boolean, attachRunningVm: Boolean = false) {
         val result = Bundle()
         var model: WorkbenchModel? = null
         val created = mutableListOf<String>()
         var success = false
         try {
+            check(!checkVm || !attachRunningVm) { "Choose either stopped-VM or running-VM verification" }
             val activity = runner.startActivitySync(Intent(runner.targetContext, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity
             runner.runOnMainSync { model = ViewModelProvider(activity)[WorkbenchModel::class.java] }
@@ -35,16 +37,65 @@ class DeviceShellSmoke(private val runner: Instrumentation) {
             }
             val original = active.sessions.map { it.id to it.bridgePort }
             fun launch(kind: String): String {
-                val previous = active.sessions.map { it.id }.toSet()
-                runner.runOnMainSync { active.launch(shell = true, shellKind = kind) }
-                until { active.sessions.any { it.id !in previous } || (!active.busy && active.error.isNotBlank()) }
-                check(active.error.isBlank()) { active.error }
-                return active.sessions.single { it.id !in previous }.id.also { created += it }
+                var previous: Set<String>? = null
+                until("bridge ready for $kind Shell") {
+                    runner.runOnMainSync {
+                        if (active.connected && !active.busy) {
+                            previous = active.sessions.map { it.id }.toSet()
+                            active.launch(shell = true, shellKind = kind)
+                        }
+                    }
+                    previous != null
+                }
+                var opened: String? = null
+                var launchError = ""
+                until("$kind Shell opened") {
+                    runner.runOnMainSync {
+                        if (!active.busy) {
+                            launchError = active.error
+                            opened = active.sessions.singleOrNull { it.id !in previous.orEmpty() }?.id
+                        }
+                    }
+                    check(launchError.isBlank()) { launchError }
+                    opened != null
+                }
+                return checkNotNull(opened).also { created += it }
             }
             fun output(id: String): String = active.sessions.first { it.id == id }.output
                 .joinToString("") { Base64.decode(it.encoded, Base64.NO_WRAP).toString(Charsets.UTF_8) }
             val debian = launch("debian")
             check(active.termux.supportsRuntime()) { "New task did not upgrade the bridge" }
+            // Regression: remove a selected last tab while TabRow is subcomposing,
+            // then restore fullscreen. Never close an original terminal.
+            repeat(3) {
+                val disposable = launch("termux")
+                runner.waitForIdleSync()
+                runner.runOnMainSync { active.close(disposable) }
+                until("selected last tab removed") { active.sessions.none { it.id == disposable } }
+                created.remove(disposable)
+                runner.waitForIdleSync()
+                runner.runOnMainSync { active.selectedSession = debian }
+            }
+            val runtime = active.termux.request("/runtime")
+            val originalVm = runtime.getJSONObject("vm")
+            runner.sendStatus(0, Bundle().apply {
+                putString("stream", "Runtime: ABI=${runtime.optString("architecture")}; VM=${originalVm.optString("state")}; acceleration=${originalVm.optString("acceleration")}\n")
+            })
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                fun barsVisible(visible: Boolean): Boolean {
+                    var matches = false
+                    runner.runOnMainSync {
+                        val insets = activity.window.decorView.rootWindowInsets
+                        matches = insets != null && insets.isVisible(WindowInsets.Type.statusBars()) == visible &&
+                            insets.isVisible(WindowInsets.Type.navigationBars()) == visible
+                    }
+                    return matches
+                }
+                click("全屏")
+                until("status and navigation bars are hidden") { barsVisible(false) }
+                click("退出全屏")
+                until("status and navigation bars are restored") { barsVisible(true) }
+            }
             runner.runOnMainSync {
                 active.send(debian, "printf '\\nWB_DEBIAN '; id -un; printf 'WB_PROJECT '; pwd; test -z \"\${WORKBENCH_GATEWAY_KEY-}\${ANTHROPIC_API_KEY-}\" && printf 'WB_NO_KEY\\n'\r")
             }
@@ -53,6 +104,34 @@ class DeviceShellSmoke(private val runner: Instrumentation) {
             runner.runOnMainSync { active.send(termux, "printf '\\nWB_TERMUX %s\\n' \"\$PREFIX\"\r") }
             until { output(termux).contains("WB_TERMUX /data/data/com.termux/files/usr") }
             check(!output(termux).contains("WB_DEBIAN workbench")) { "Shell output crossed sessions" }
+            if (checkVm || attachRunningVm) {
+                until("installed VM metadata") { active.vmInstalled }
+                check(originalVm.optString("state") == if (attachRunningVm) "running" else "stopped") {
+                    "VM state does not match the explicitly selected verification mode"
+                }
+                val vm = launch("vm")
+                until("VM login prompt", 240000) { output(vm).contains("workbench-linux:/projects") }
+                runner.runOnMainSync {
+                    active.send(vm, "printf '\\nWB_VM_ROOT '; id -u; test \"\$PWD\" = /projects && mountpoint -q /projects && printf 'WB_VM_PROJECT\\n'\r")
+                }
+                until("guest root and project mount") { output(vm).contains("WB_VM_ROOT 0") && output(vm).contains("WB_VM_PROJECT\r\n") }
+                if (attachRunningVm) {
+                    runner.runOnMainSync {
+                        active.send(vm, "codex --version && claude --version && docker info --format '{{.ServerVersion}}'; printf 'WB_VM_CLIENTS_RESULT:%s\\n' \"\$?\"\r")
+                    }
+                    until("installed VM clients and Docker", 120000) { Regex("WB_VM_CLIENTS_RESULT:[0-9]+\\r\\n").containsMatchIn(output(vm)) }
+                    val vmOutput = output(vm)
+                    check(vmOutput.contains("WB_VM_CLIENTS_RESULT:0\r\n")) { "VM clients or Docker daemon are unavailable" }
+                    check(vmOutput.contains("codex-cli 0.169.0") && vmOutput.contains("2.1.326")) { "VM client versions do not match the bundled installer" }
+                    runner.sendStatus(0, Bundle().apply { putString("stream", "PASS: running VM root, project mount, Codex 0.169.0, Claude 2.1.326 and Docker daemon; VM kept running\n") })
+                    val currentVm = active.termux.request("/runtime").getJSONObject("vm")
+                    check(currentVm.optString("state") == "running" && currentVm.optLong("pid") == originalVm.optLong("pid")) { "Running VM process changed" }
+                } else {
+                    runner.runOnMainSync { active.controlVirtualMachine("stop") }
+                    until("App stops VM", 120000) { !active.vmBusy && active.vmState == "stopped" && active.error.isBlank() }
+                    runner.sendStatus(0, Bundle().apply { putString("stream", "PASS: Android system bars and local VM Shell, root, project mount and shutdown\n") })
+                }
+            }
             if (activity.resources.configuration.smallestScreenWidthDp >= 600) {
                 runner.runOnMainSync { active.selectedSession = debian }
                 until("split control") { node("分屏") != null || node("退出分屏") != null }
@@ -103,7 +182,7 @@ class DeviceShellSmoke(private val runner: Instrumentation) {
                 runCatching { until { active.sessions.none { it.id in created } } }
             }
         }
-        runner.finish(if (success) Activity.RESULT_OK else Activity.RESULT_CANCELED, result)
+        runner.finishAfterAutomationConnect(if (success) Activity.RESULT_OK else Activity.RESULT_CANCELED, result)
     }
 
     private fun terminals(view: View): List<TerminalWebView> = when (view) {
@@ -153,9 +232,9 @@ class DeviceShellSmoke(private val runner: Instrumentation) {
         return value
     }
 
-    private fun until(description: String = "Shell verification", condition: () -> Boolean) {
+    private fun until(description: String = "Shell verification", timeout: Long = 45000, condition: () -> Boolean) {
         if (description != "Shell verification") runner.sendStatus(0, Bundle().apply { putString("stream", "Checking $description\n") })
-        val deadline = System.currentTimeMillis() + 45000
+        val deadline = System.currentTimeMillis() + timeout
         while (System.currentTimeMillis() < deadline) {
             if (condition()) return
             Thread.sleep(150)

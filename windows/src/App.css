@@ -28,6 +28,11 @@ button { color: inherit; }
 .brand-name { font-size: 13px; font-weight: 700; line-height: 16px; }
 .brand-caption, .eyebrow { color: var(--muted); font-family: var(--mono); font-size: 9px; font-weight: 500; letter-spacing: 0; }
 .topbar-status { display: flex; align-items: center; gap: 8px; color: #5f6770; font-size: 11px; }
+.update-entry { margin-left: 8px; }
+.update-dialog h2, .update-dialog p { margin: 0; }
+.update-dialog p { font-size: 12px; }
+.update-dialog progress { width: 100%; }
+.update-notes { max-height: 36vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
 .status-dot, .security-dot, .tab-state { width: 7px; height: 7px; border-radius: 50%; background: #7ba88b; }
 
 .app-body { min-height: 0; flex: 1; display: flex; }
@@ -65,18 +70,26 @@ button { color: inherit; }
 .profile-current { display: flex; align-items: center; gap: 7px; color: #66707a; font-size: 10px; }
 .profile-current strong { max-width: 190px; overflow: hidden; color: #303942; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .profile-current svg { color: #89929a; }
-.setup-grid { display: grid; grid-template-columns: minmax(170px, .85fr) minmax(235px, 1.25fr) minmax(170px, .8fr) auto; gap: 12px 14px; align-items: end; }
-.client-field { grid-column: 1; grid-row: 1; }
-.model-field { grid-column: 2; grid-row: 1; }
-.mode-field { grid-column: 3; grid-row: 1; }
-.launch-button { grid-column: 4; grid-row: 1; }
-.workspace-field { grid-column: 1 / 4; grid-row: 2; }
+.setup-grid {
+  display: grid;
+  grid-template-columns: minmax(156px, .8fr) minmax(110px, .6fr) minmax(145px, 1.2fr) auto;
+  grid-template-areas: "client scope model model" "workspace workspace mode launch";
+  gap: 12px 14px;
+  align-items: end;
+}
+.setup-grid.system-scope { grid-template-areas: "client scope workspace launch"; }
+.client-field { grid-area: client; }
+.scope-field { grid-area: scope; }
+.model-field { grid-area: model; }
+.mode-field { grid-area: mode; }
+.launch-button { grid-area: launch; }
+.workspace-field { grid-area: workspace; }
 .field { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .field label { display: flex; align-items: center; justify-content: space-between; color: #555e68; font-size: 10px; font-weight: 600; }
 .field label span { color: #9098a1; font-family: var(--mono); font-size: 9px; font-weight: 400; }
 .segmented-control { height: 35px; display: flex; padding: 3px; border: 1px solid #dfe3e6; border-radius: 5px; background: #eceeef; }
 .segmented-control button { min-width: 0; flex: 1; padding: 0 8px; color: #626a73; border: 0; border-radius: 3px; background: transparent; font-size: 10px; cursor: pointer; }
-.segmented-control button.active { color: #202830; background: #fff; box-shadow: 0 1px 3px #1c273012; font-weight: 600; }
+.segmented-control button[aria-pressed="true"] { color: #202830; background: #fff; box-shadow: 0 1px 3px #1c273012; font-weight: 600; }
 .model-picker { position: relative; min-width: 0; display: grid; grid-template-columns: minmax(65px, .75fr) minmax(90px, 1fr) 29px; gap: 5px; }
 .model-select-wrap { position: relative; min-width: 0; }
 .model-refresh { display: grid; place-items: center; height: 35px; padding: 0; border: 1px solid #dce1e4; border-radius: 4px; background: #fff; color: #626a73; cursor: pointer; }
@@ -205,6 +218,8 @@ button { color: inherit; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
 .history-dialog { width: min(620px, 100%); }
 .history-dialog h2 { margin: 0; font-size: 16px; }
+.history-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.history-heading-row .secondary-button { display: inline-flex; align-items: center; gap: 5px; }
 .history-list { max-height: 46vh; overflow: auto; }
 .history-list button { display: grid; gap: 4px; width: 100%; padding: 8px; text-align: left; background: transparent; border: 0; border-bottom: 1px solid #dfe3e6; cursor: pointer; }
 .history-list button:hover { background: #eaf0f4; }
@@ -220,7 +235,7 @@ button { color: inherit; }
 @media (max-width: 1100px) {
   .sidebar { width: 208px; flex-basis: 208px; }
   .main-pane { padding-right: 15px; padding-left: 17px; }
-  .setup-grid { grid-template-columns: minmax(145px, .8fr) minmax(210px, 1.2fr) minmax(145px, .8fr) auto; gap: 11px 9px; }
+  .setup-grid { gap: 11px 9px; }
   .launch-button { min-width: 102px; padding: 0 9px; }
 }
 

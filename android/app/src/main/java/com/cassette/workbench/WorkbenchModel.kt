@@ -19,6 +19,7 @@ data class OutputChunk(val serial: Long, val encoded: String, val replay: Boolea
 data class LocalConversation(
     val id: String, val reference: String, val client: String, val title: String,
     val workspace: String, val model: String, val profileId: String, val updatedAt: Long,
+    val preview: String = "",
 )
 data class UsageSummary(
     val inputTokens: Long? = null,
@@ -59,6 +60,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     private var probeFailures = 0
     private var autoBootstrapAttempted = false
     private var bridgeIssue = ""
+    private val terminalBridgeRetryAt = mutableMapOf<Int, Long>()
     var profiles by mutableStateOf(store.profiles()); private set
     var sshTargets by mutableStateOf(store.sshTargets()); private set
     var options by mutableStateOf(store.options()); private set
@@ -81,6 +83,17 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     var runtimeStage by mutableStateOf("尚未检查本地 Agent 环境"); private set
     var runtimeLog by mutableStateOf(""); private set
     var runtimeState by mutableStateOf("idle"); private set
+    var runtimeEnvironment by mutableStateOf(store.runtimeEnvironment()); private set
+    var runtimeEnvironmentsKnown by mutableStateOf(false); private set
+    var debianInstalled by mutableStateOf(false); private set
+    var localAgentSupported by mutableStateOf(true); private set
+    var deviceArchitecture by mutableStateOf(""); private set
+    var vmInstalled by mutableStateOf(false); private set
+    var vmSupported by mutableStateOf(true); private set
+    var vmArchitecture by mutableStateOf(""); private set
+    var vmAcceleration by mutableStateOf("tcg"); private set
+    var vmState by mutableStateOf("stopped"); private set
+    var vmBusy by mutableStateOf(false); private set
     private var runtimePollAt = 0L
     private var usagePollAt = 0L
     private var runtimePolling = false
@@ -88,7 +101,9 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     val profile get() = profiles.firstOrNull { it.id == options.profileId }
     val sshTarget get() = sshTargets.firstOrNull { it.id == options.executionId }
     val localExecution get() = options.executionId == "local"
-    val executionName get() = if (localExecution) "手机本地 · Debian" else sshTarget?.name ?: "请选择电脑"
+    val executionName get() = if (localExecution) {
+        if (!localAgentSupported) "手机本地 · Shell" else "手机本地 · " + if (runtimeEnvironment == "vm") "Linux VM" else "Debian"
+    } else sshTarget?.name ?: "请选择电脑"
 
     init {
         sessions = store.sessionRows().let { rows -> (0 until rows.length()).mapNotNull { index ->
@@ -143,9 +158,13 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     fun message(value: String) { notice = value; error = "" }
     fun environmentChanged() { environmentRevision++ }
     fun updateOptions(value: TaskOptions) {
-        val next = if (value.mode == "resume" && (value.executionId != "local" || value.client != selectedHistory?.client))
+        val workspaceChanged = value.workspace != options.workspace
+        val selectedWorkspaceMismatch = selectedHistory?.workspace?.let { it != value.workspace } ?: false
+        val next = if (value.mode == "resume" && (value.executionId != "local"
+                || value.client != selectedHistory?.client || selectedWorkspaceMismatch))
             value.copy(mode = "new") else value
         if (next.mode != "resume") selectedHistory = null
+        if (workspaceChanged) history = emptyList()
         options = next
         store.saveOptions(if (next.mode == "resume") next.copy(mode = "new") else next)
     }
@@ -154,18 +173,34 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         if (historyLoading) return
         historyLoading = true
         historyError = ""
+        val requestedWorkspace = options.workspace
         worker.execute {
             val result = runCatching {
-                val rows = termux.request("/history", timeout = 15000).getJSONArray("sessions")
+                val encodedWorkspace = java.net.URLEncoder.encode(requestedWorkspace, Charsets.UTF_8.name())
+                val rows = termux.request("/history?workspace=$encodedWorkspace", timeout = 15000).getJSONArray("sessions")
                 (0 until rows.length()).map { index ->
                     val row = rows.getJSONObject(index)
                     LocalConversation(row.getString("id"), row.getString("history_ref"), row.getString("client"),
                         row.getString("title"), row.getString("workspace"), row.getString("model"),
-                        row.getString("profile_id"), row.getLong("updated_at"))
+                        row.getString("profile_id"), row.getLong("updated_at"), row.optString("preview"))
                 }
             }
             main.post {
-                result.onSuccess { history = it }.onFailure {
+                result.onSuccess { rows ->
+                    if (options.workspace == requestedWorkspace) {
+                        history = rows.filter { row ->
+                            fun canonical(value: String): String {
+                                val userHome = System.getProperty("user.home").orEmpty()
+                                val expanded = if (value == "~") userHome
+                                    else if (value.startsWith("~/")) userHome + value.substring(1)
+                                    else value
+                                return java.io.File(expanded).canonicalPath
+                            }
+                            runCatching { canonical(row.workspace) == canonical(requestedWorkspace) }
+                                .getOrDefault(false)
+                        }
+                    }
+                }.onFailure {
                     historyError = "无法读取本地历史，请在运行环境页重新连接 Termux"
                 }
                 historyLoading = false
@@ -286,15 +321,78 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
 
     fun connect() = connectInternal(false)
     fun installRuntime() = connectInternal(true)
+    fun selectRuntimeEnvironment(value: String) {
+        if (value !in listOf("debian", "vm")) return
+        if (value == "debian" && !localAgentSupported) {
+            runtimeEnvironment = value
+            store.saveRuntimeEnvironment(value)
+            return
+        }
+        if (value == "vm" && !vmSupported) {
+            error = "此设备的 Termux 架构暂不支持完整 Linux VM；可使用 Debian Shell 或 SSH 电脑"
+            return
+        }
+        runtimeEnvironment = value
+        store.saveRuntimeEnvironment(value)
+    }
+
+    fun selectExecutionLocation(value: String) {
+        when (value) {
+            "local-debian" -> { updateOptions(options.copy(executionId = "local")); selectRuntimeEnvironment("debian") }
+            "local-shell" -> { updateOptions(options.copy(executionId = "local")); selectRuntimeEnvironment("debian") }
+            "local-vm" -> if (vmSupported) {
+                updateOptions(options.copy(executionId = "local")); selectRuntimeEnvironment("vm")
+            } else error = "此设备的 Termux 架构暂不支持完整 Linux VM；可使用 Debian Shell 或 SSH 电脑"
+            else -> updateOptions(options.copy(executionId = value))
+        }
+    }
+
+    fun controlVirtualMachine(action: String) {
+        if (!connected || vmBusy || action !in listOf("start", "stop")) return
+        if (action == "start" && !vmSupported) {
+            error = "此设备的 Termux 架构暂不支持完整 Linux VM"
+            return
+        }
+        vmBusy = true
+        error = ""
+        worker.execute {
+            val result = runCatching { termux.request("/vm", "POST", JSONObject().put("action", action), 120000) }
+            main.post {
+                vmBusy = false
+                result.onSuccess {
+                    vmState = it.optString("state", "stopped")
+                    vmAcceleration = it.optString("acceleration", "tcg")
+                    notice = if (action == "start") "Linux 虚拟机进程已启动，可打开 Linux VM Shell 等待系统就绪" else "Linux 虚拟机已正常停止"
+                }.onFailure { error = it.message ?: "Linux 虚拟机操作失败" }
+            }
+        }
+    }
 
     private fun applyRuntime(data: JSONObject) {
         runtimeState = data.optString("state", "idle")
         runtimeStage = data.optString("stage")
         runtimeLog = data.optString("log")
+        debianInstalled = data.optBoolean("debian_installed")
+        deviceArchitecture = data.optString("architecture")
+        localAgentSupported = data.optBoolean("local_agent_supported")
+        data.optJSONObject("vm")?.let {
+            runtimeEnvironmentsKnown = true
+            vmInstalled = it.optBoolean("installed")
+            vmSupported = it.optBoolean("supported")
+            vmArchitecture = it.optString("architecture")
+            vmState = it.optString("state", "stopped")
+            vmAcceleration = it.optString("acceleration", "tcg")
+            if (!vmSupported && runtimeEnvironment == "vm") {
+                runtimeEnvironment = "debian"
+                store.saveRuntimeEnvironment("debian")
+                error = "已切换到 Debian：当前 Termux 架构不支持完整 Linux VM；也可通过 SSH 使用电脑环境"
+            }
+        }
     }
 
     private fun connectInternal(install: Boolean, onConnected: (() -> Unit)? = null) {
         if (busy) return
+        val selectedEnvironment = runtimeEnvironment
         connectionGeneration++
         busy = true; error = ""; notice = "正在连接 Termux 本地桥接…"
         worker.execute {
@@ -303,14 +401,14 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
             if (compatible) {
                 try {
                     val data = termux.request("/runtime", if (install) "POST" else "GET",
-                        if (install) JSONObject().put("clients", JSONArray(listOf("codex", "claude"))) else null, 5000)
+                        if (install) JSONObject().put("clients", JSONArray(listOf("codex", "claude"))).put("environment", selectedEnvironment) else null, 5000)
                     main.post { applyRuntime(data); bridgeRecovered(); busy = false; notice = "本地桥接已连接"; onConnected?.invoke() }
                 } catch (cause: Exception) { main.post { busy = false; error = safeError(cause) } }
                 return@execute
             }
             main.post {
                 try {
-                    runtimeStage = "准备基础桥接；首次可能需要下载 Python"
+                    runtimeStage = "准备基础桥接、Git 与 SSH；首次可能需要下载依赖"
                     saveSessions()
                     termux.startHost(upgrade = alive)
                     worker.execute {
@@ -324,7 +422,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                         }
                         val data = if (ready) runCatching {
                             termux.request("/runtime", if (install) "POST" else "GET",
-                                if (install) JSONObject().put("clients", JSONArray(listOf("codex", "claude"))) else null, 5000)
+                                if (install) JSONObject().put("clients", JSONArray(listOf("codex", "claude"))).put("environment", selectedEnvironment) else null, 5000)
                         }.getOrNull() else null
                         main.post {
                             busy = false
@@ -339,30 +437,37 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun launch(shell: Boolean = false, shellKind: String = "termux") {
+    fun launch(shell: Boolean = false, shellKind: String = "termux", onOpened: () -> Unit = {}) {
         if (!connected || busy) { error = "请先在环境页连接 Termux"; return }
         val snapshot = options
-        val source = selectedHistory.takeIf { !shell && snapshot.mode == "resume" && localExecution }
+        val selectedEnvironment = runtimeEnvironment
+        val vmEnvironment = localExecution && !shell && selectedEnvironment == "vm"
+        val source = selectedHistory.takeIf { !shell && snapshot.mode == "resume" && localExecution && !vmEnvironment }
         val selected = profile
-        val remote = sshTarget
-        if (!localExecution && remote == null) { error = "请先选择 SSH 电脑"; return }
+        val vmShell = shell && shellKind == "vm"
+        val remote = sshTarget.takeUnless { vmShell }
+        if (!localExecution && !vmShell && remote == null) { error = "请先选择 SSH 电脑"; return }
         if (localExecution && !shell && (selected == null || snapshot.model.isBlank())) { error = "请先选择调用配置和模型"; return }
-        if (localExecution && !shell && snapshot.mode == "resume" && source == null) { error = "请先选择要恢复的对话"; return }
+        if (localExecution && !shell && !localAgentSupported) { error = "本地 Codex/Claude 需要 64 位 ARM64 或 x86_64；请通过 SSH 电脑运行"; return }
+        if (vmEnvironment && !vmSupported) { error = "此设备的 Termux 架构暂不支持完整 Linux VM；可使用 Debian 或 SSH"; return }
+        if (vmEnvironment && !vmInstalled) { error = "请先在运行环境页安装 / 检查完整 Linux 虚拟机"; return }
+        if (localExecution && !shell && !vmEnvironment && snapshot.mode == "resume" && source == null) { error = "请先选择要恢复的对话"; return }
         busy = true; error = ""
         worker.execute {
             try {
                 // Upgrade only the endpoint for new tasks. Existing terminals
                 // retain their original bridge port and credential.
                 if (!termux.supportsRuntime()) {
-                    main.post { busy = false; connectInternal(false) { launch(shell, shellKind) } }
+                    main.post { busy = false; connectInternal(false) { launch(shell, shellKind, onOpened) } }
                     return@execute
                 }
                 val client = if (remote != null) "ssh" else if (shell) {
-                    if (shellKind == "debian") "debian-shell" else "shell"
+                    when (shellKind) { "debian" -> "debian-shell"; "vm" -> "vm-shell"; else -> "shell" }
                 } else source?.client ?: snapshot.client
                 val body = JSONObject().put("client", client)
                     .put("mode", if (remote == null) snapshot.mode else "new").put("workspace", snapshot.workspace)
                     .put("codex_compatibility", snapshot.codexCompatibility)
+                    .put("environment", if (remote == null && !shell) selectedEnvironment else "debian")
                 if (source != null) body.put("history_ref", source.reference).put("history_id", source.id)
                 if (remote != null) body.put("ssh", JSONObject().put("host", remote.host).put("user", remote.user).put("port", remote.port))
                 else if (!shell && selected != null) body.put("profile_id", selected.id).put("model", snapshot.model)
@@ -370,8 +475,9 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                 val result = termux.request("/sessions", "POST", body, if (source != null) 15000 else 4000)
                 val title = if (remote != null) "SSH · ${remote.name}" else when (client) {
                     "debian-shell" -> "Debian Shell"
+                    "vm-shell" -> "Linux VM Shell"
                     "shell" -> "Termux Shell"
-                    else -> "${if (client == "codex") "Codex" else "Claude"} · ${snapshot.model}"
+                    else -> "${if (client == "codex") "Codex" else "Claude"} · ${snapshot.model}" + if (vmEnvironment) " · Linux VM" else ""
                 }
                 val terminal = TerminalSession(result.getString("id"), title, remote?.destination ?: snapshot.workspace, client, bridgePort = termux.currentPort)
                 main.post {
@@ -379,10 +485,10 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                     sessions = sessions + terminal; selectedSession = terminal.id; saveSessions(); busy = false
                     notice = when {
                         remote != null -> "正在打开 SSH；请在终端核对主机指纹并登录"
-                        source?.client == "codex" -> "已从「${source.title}」创建 Codex 分支。旧消息不会显示在新终端；原对话保留，输入后沿用其上下文。"
-                        source != null -> "已从「${source.title}」创建 Claude 分支。原对话保留，新终端从该会话继续。"
+                        source != null -> "已启动「${source.title}」的恢复。同配置续接原会话；跨配置创建独立分支。"
                         else -> "已创建独立终端；Ctrl+C 保留当前 Shell"
                     }
+                    onOpened()
                 }
             } catch (cause: Exception) { main.post { busy = false; error = safeError(cause) } }
         }
@@ -435,10 +541,14 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
             usagePollAt = SystemClock.elapsedRealtime() + 5000
             refreshUsage()
         }
-        if (SystemClock.elapsedRealtime() < probeAt) return
+        val now = SystemClock.elapsedRealtime()
+        if (now < probeAt) return
         val generation = connectionGeneration
         val checking = needsProbe || !connected
-        val snapshot = if (checking) emptyList() else sessions.filter { it.exitCode == null && it.error.isBlank() }
+        val currentBridge = termux.currentPort
+        val snapshot = if (checking) emptyList() else sessions.filter {
+            it.exitCode == null && it.error.isBlank() && now >= (terminalBridgeRetryAt[it.bridgePort] ?: 0L)
+        }.sortedBy { it.bridgePort != currentBridge }
         if (!checking && snapshot.isEmpty()) return
         polling = true
         worker.execute {
@@ -451,8 +561,10 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 } else {
+                    val unavailablePorts = mutableSetOf<Int>()
                     for (session in snapshot) {
                         if (!foreground) break
+                        if (session.bridgePort in unavailablePorts) continue
                         try {
                             val data = termux.request("/sessions/${session.id}?after=${session.after}", bridgePort = session.bridgePort)
                             main.post {
@@ -472,18 +584,24 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                                 probeFailures = 0
                             }
                         } catch (cause: Exception) {
+                            val gone = cause.message?.contains("接口不存在") == true || cause.message?.contains("终端不存在") == true
+                            if (!gone) unavailablePorts += session.bridgePort
                             main.post {
                                 if (!foreground || generation != connectionGeneration) return@post
-                                if (cause.message?.contains("接口不存在") == true || cause.message?.contains("终端不存在") == true) {
+                                if (sessions.none { it.id == session.id }) return@post
+                                if (gone) {
                                     sessions = sessions.filterNot { it.id == session.id }
                                     if (selectedSession == session.id) selectedSession = sessions.lastOrNull()?.id.orEmpty()
                                     saveSessions()
                                     notice = "原终端进程已不存在；已移除失效标签，可以重新启动 Agent。"
                                 } else {
-                                    bridgeUnavailable()
+                                    // A legacy terminal can outlive its bridge. Keep other ports
+                                    // polling and only let a failed health probe disconnect the app.
+                                    terminalBridgeRetryAt[session.bridgePort] = SystemClock.elapsedRealtime() + 4000L
+                                    if (session.bridgePort == termux.currentPort) needsProbe = true
+                                    else if (session.id == selectedSession) notice = "此终端暂时无法连接，正在重试；其他终端可继续使用。"
                                 }
                             }
-                            break
                         }
                     }
                 }

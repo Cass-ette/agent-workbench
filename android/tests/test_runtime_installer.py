@@ -2,6 +2,7 @@ import importlib.util
 import fcntl
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 import time
@@ -9,11 +10,29 @@ import unittest
 from unittest.mock import patch
 
 source = Path(__file__).resolve().parents[1] / "app/src/main/assets/workbench_runtime.py"
+sys.path.insert(0, str(source.parent))
 spec = importlib.util.spec_from_file_location("runtime", source)
 R = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(R)
 
 class RuntimeTests(unittest.TestCase):
+    def test_versioned_bundle_uses_persistent_legacy_state_and_its_own_helpers(self):
+        with tempfile.TemporaryDirectory() as home:
+            state = Path(home) / "runtime"
+            bundle = state / "releases/build-one"
+            bundle.mkdir(parents=True)
+            (bundle / "runtime_setup.sh").write_text('bash "$(dirname "$0")/helper.sh"\n')
+            (bundle / "helper.sh").write_text('echo RELEASE_ONE\n')
+            (state / "runtime_setup.sh").write_text('echo WRONG_LEGACY_RECIPE; exit 9\n')
+            installer = R.RuntimeInstaller(state, bundle=bundle)
+            installer.start(["codex"])
+            result = self.wait_done(installer)
+            self.assertEqual(result["state"], "ready")
+            self.assertIn("RELEASE_ONE", result["log"])
+            self.assertNotIn("WRONG_LEGACY_RECIPE", result["log"])
+            self.assertEqual(R.RuntimeInstaller(state).status()["state"], "ready")
+            self.assertFalse((bundle / "status.json").exists())
+
     def wait_done(self, installer):
         limit = time.time() + 5
         while time.time() < limit:
@@ -56,6 +75,28 @@ class RuntimeTests(unittest.TestCase):
             installer = R.RuntimeInstaller(root)
             for choice in ([], ["codex; touch bad"], "claude", ["bash"]):
                 with self.assertRaises(ValueError): installer.start(choice)
+            with self.assertRaises(ValueError): installer.start(["codex"], "other")
+
+    def test_vm_can_be_installed_without_debian_or_agent_clients(self):
+        with tempfile.TemporaryDirectory() as root:
+            p = Path(root)
+            (p / "runtime_setup.sh").write_text('test "$#" -eq 1 && test "$1" = --vm\n')
+            installer = R.RuntimeInstaller(p)
+            installer.start(None, "vm")
+            status = self.wait_done(installer)
+            self.assertEqual(status["state"], "ready")
+            self.assertEqual(status["environment"], "vm")
+
+    def test_vm_install_can_install_both_agent_clients(self):
+        with tempfile.TemporaryDirectory() as root:
+            p = Path(root)
+            (p / "runtime_setup.sh").write_text('test "$#" -eq 3 && test "$1" = --vm && test "$2" = claude && test "$3" = codex\n')
+            installer = R.RuntimeInstaller(p)
+            installer.start(["codex", "claude"], "vm")
+            status = self.wait_done(installer)
+            self.assertEqual(status["state"], "ready")
+            self.assertEqual(status["environment"], "vm")
+            self.assertEqual(status["clients"], ["claude", "codex"])
 
     def test_recipe_is_not_changed_by_an_apk_refresh_during_install(self):
         with tempfile.TemporaryDirectory() as root:

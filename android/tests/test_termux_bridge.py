@@ -7,17 +7,129 @@ import tempfile
 import threading
 import time
 import unittest
+import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 path = Path(__file__).resolve().parents[1] / "app/src/main/assets/termux_bridge.py"
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 spec = importlib.util.spec_from_file_location("bridge", path)
 B = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(B)
 
 
 class BridgeTests(unittest.TestCase):
+    def test_history_restore_resumes_matching_config_and_forks_changed_model(self):
+        session_id = "01a1ec86-bf14-70f2-8144-874b179beb72"
+        for client in ("codex", "claude"):
+            with self.subTest(client=client), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                workspace = root / "projects/example"
+                workspace.mkdir(parents=True)
+                source_home = root / ".local/share/agent-workbench" / client / "source-scope"
+                source_home.mkdir(parents=True)
+                (source_home / "workbench-profile.json").write_text(json.dumps({
+                    "profile_id": "profile-one", "gateway": "https://gateway.test", "model": "model-a",
+                    "key_fingerprint": B.hashlib.sha256(b"test-private-key").hexdigest(),
+                }))
+                if client == "codex":
+                    history_file = source_home / "sessions/2026/11/21" / f"rollout-test-{session_id}.jsonl"
+                    history_file.parent.mkdir(parents=True)
+                    rows = [
+                        {"type": "session_meta", "payload": {"id": session_id, "cwd": str(workspace)}},
+                        {"type": "turn_context", "payload": {"model": "model-a"}},
+                        {"type": "response_item", "payload": {"role": "user", "content": "continue this"}},
+                    ]
+                else:
+                    history_file = source_home / "projects/project" / f"{session_id}.jsonl"
+                    history_file.parent.mkdir(parents=True)
+                    rows = [
+                        {"type": "user", "sessionId": session_id, "cwd": str(workspace),
+                         "message": {"content": "continue this"}},
+                        {"type": "assistant", "sessionId": session_id,
+                         "message": {"model": "model-a"}},
+                    ]
+                history_file.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+                history, codex_roots, claude_roots = B.history_context(root)
+                (source,) = history.scan_history(codex_roots, claude_roots)
+                base = dict(client=client, mode="resume", profile_id="profile-one", model="model-a",
+                            key="test-private-key", gateway="https://gateway.test", workspace=str(workspace),
+                            history_ref=source["history_ref"], history_id=session_id)
+                with patch.object(B.shutil, "which", side_effect=lambda name, **kw: "/usr/bin/" + name):
+                    args, env, _ = B.launch_spec(base, root)
+                    self.assertEqual(Path(env["CODEX_HOME"] if client == "codex" else env["CLAUDE_CONFIG_DIR"]), source_home)
+                    self.assertIn(("codex resume " if client == "codex" else "--resume ") + session_id, args[-1])
+                    self.assertNotIn("fork " + session_id, args[-1])
+                    self.assertNotIn("--fork-session", args[-1])
+                    B.launch_spec(base, root)
+                    self.assertEqual(list(source_home.parent.glob("branch-*")), [])
+
+                    changed_args, changed_env, _ = B.launch_spec({**base, "model": "model-b"}, root)
+                changed_home = Path(changed_env["CODEX_HOME"] if client == "codex" else changed_env["CLAUDE_CONFIG_DIR"])
+                self.assertNotEqual(changed_home, source_home)
+                if client == "codex":
+                    self.assertIn("codex fork " + session_id, changed_args[-1])
+                else:
+                    self.assertIn("--resume " + session_id + " --fork-session", changed_args[-1])
+                with patch.object(B.shutil, "which", side_effect=lambda name, **kw: "/usr/bin/" + name):
+                    for change in ({"profile_id": "profile-two"}, {"key": "replacement-key"}):
+                        next_args, next_env, _ = B.launch_spec({**base, **change}, root)
+                        self.assertNotEqual(Path(next_env["CODEX_HOME"] if client == "codex" else next_env["CLAUDE_CONFIG_DIR"]), source_home)
+                self.assertTrue(history_file.exists())
+
+    def test_history_resume_rejects_a_different_project_directory(self):
+        with tempfile.TemporaryDirectory() as home:
+            source_workspace = Path(home) / "project-a"
+            payload = dict(client="codex", mode="resume", profile_id="profile", model="model",
+                           key="private", gateway="https://gateway.test", workspace="~/project-b",
+                           history_ref="history-ref", history_id="session-id")
+            fake_history = SimpleNamespace(resolve_history=lambda *args: {
+                "id": "session-id", "workspace": str(source_workspace), "client": "codex",
+            })
+            with patch.object(B, "history_context", return_value=(fake_history, [], [])):
+                with self.assertRaisesRegex(B.HistoryUnavailable, "所属的项目目录"):
+                    B.launch_spec(payload, home)
+
+    def test_old_bridge_launch_keeps_its_runner_after_new_bundle_is_installed(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".local/share/agent-workbench/runtime"
+            old = root / "releases/old"
+            newer = root / "releases/new"
+            for bundle in (old, newer):
+                bundle.mkdir(parents=True)
+                (bundle / "debian_runner.py").touch()
+            payload = dict(client="codex", model="test", key="dummy", gateway="https://gateway.test")
+            with patch.object(B.shutil, "which", side_effect=lambda name, **kw: "/usr/bin/" + name):
+                args, env, _ = B.launch_spec(payload, home, bundle=old)
+            self.assertIn(str(old / "debian_runner.py"), args[-1])
+            self.assertNotIn(str(newer), args[-1])
+            self.assertNotIn("WORKBENCH_GATEWAY_KEY", env)
+
+    def test_vm_launch_uses_one_time_private_payload_without_key_in_process_args(self):
+        with tempfile.TemporaryDirectory() as home:
+            class InstalledVM:
+                def __init__(self, root): pass
+                def status(self): return {"installed": True}
+
+            payload = dict(client="codex", mode="new", profile_id="vm-profile", model="test-model",
+                           key="private-vm-key", gateway="https://gateway.test",
+                           workspace="~/projects/vm-project", environment="vm")
+            with patch.dict(B.sys.modules, {"linux_vm": SimpleNamespace(LinuxVM=InstalledVM)}), \
+                 patch.object(B.shutil, "which", side_effect=lambda name, **kw: "/bin/" + name):
+                args, env, workspace = B.launch_spec(payload, home)
+            self.assertNotIn(payload["key"], repr(args))
+            self.assertNotIn(payload["key"], repr(env))
+            self.assertTrue(workspace.endswith("projects/vm-project"))
+            launch_file = next((Path(home) / ".local/share/agent-workbench").glob("vm-launch-*.json"))
+            self.assertEqual(launch_file.stat().st_mode & 0o777, 0o600)
+            launch = json.loads(launch_file.read_text())
+            self.assertEqual(launch["key"], payload["key"])
+            self.assertEqual(launch["workspace"], str(Path(workspace).resolve()))
+            self.assertIn("linux_vm.py", args[-1])
+            self.assertIn("; unset", args[-1])
+
     def test_key_is_only_in_child_environment_and_configs_are_isolated(self):
         with tempfile.TemporaryDirectory() as home:
             payload = dict(client="codex", mode="new", profile_id="one", model="model; echo wrong", key="test-private-value",

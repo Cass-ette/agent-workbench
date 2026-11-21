@@ -1,0 +1,99 @@
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import plistlib
+import tempfile
+import unittest
+import zipfile
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "build-update-manifest.py"
+SPEC = importlib.util.spec_from_file_location("build_update_manifest", SCRIPT)
+MANIFEST = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MANIFEST)
+
+
+class UpdateManifestTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.artifacts = self.root / "artifacts"
+        self.output = self.root / "release-assets"
+        self._make_artifacts()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _make_artifacts(self):
+        mac_dir = self.artifacts / "macos-agent-workbench"
+        mac_dir.mkdir(parents=True)
+        mac_zip = mac_dir / "Agent-Workbench-macOS-universal.zip"
+        info = plistlib.dumps({
+            "CFBundleIdentifier": "com.cassette.cchpmodelmanager",
+            "CFBundleShortVersionString": "0.1.2",
+        })
+        with zipfile.ZipFile(mac_zip, "w") as archive:
+            archive.writestr("CCHP Model Manager.app/Contents/Info.plist", info)
+
+        windows_dir = self.artifacts / "windows-agent-workbench-installer"
+        windows_dir.mkdir()
+        (windows_dir / "Agent-Workbench-setup.exe").write_bytes(b"windows installer")
+        (windows_dir / "version.txt").write_text("0.1.4\n", encoding="utf-8")
+
+        android_dir = self.artifacts / "android-agent-workbench-preview-apk"
+        android_dir.mkdir()
+        (android_dir / "workbench.apk").write_bytes(b"signed apk")
+        (android_dir / "output-metadata.json").write_text(json.dumps({
+            "applicationId": "com.cassette.workbench",
+            "variantName": "debug",
+            "elements": [{"filters": [], "versionCode": 21, "versionName": "0.1.19"}],
+        }), encoding="utf-8")
+
+    def test_builds_manifest_and_hashes_copied_packages(self):
+        manifest = MANIFEST.build_manifest(self.artifacts, " Test release notes ", "workbench-preview-123-1", self.output)
+
+        self.assertTrue(all(p["channel"] == "preview" for p in manifest["packages"]))
+        self.assertEqual(manifest["packages"][-1]["signing"], "development")
+        self.assertEqual(manifest["schema"], 1)
+        self.assertEqual(manifest["notes"], "Test release notes")
+        self.assertEqual(
+            [(item["platform"], item["version"]) for item in manifest["packages"]],
+            [("macos", "0.1.2"), ("windows", "0.1.4"), ("android", "0.1.19")],
+        )
+        for item in manifest["packages"]:
+            copied = self.output / item["url"].rsplit("/", 1)[-1]
+            self.assertEqual(copied.stat().st_size, item["size"])
+            self.assertEqual(hashlib.sha256(copied.read_bytes()).hexdigest(), item["sha256"])
+        self.assertEqual(len((self.output / "SHA256SUMS.txt").read_text().splitlines()), 3)
+
+    def test_stable_requires_explicit_channel_and_release_variant(self):
+        preview = self.artifacts / "android-agent-workbench-preview-apk"
+        stable = self.artifacts / "android-agent-workbench-stable"
+        preview.rename(stable)
+        metadata = stable / "output-metadata.json"
+        data = json.loads(metadata.read_text())
+        data["variantName"] = "release"
+        metadata.write_text(json.dumps(data))
+        manifest = MANIFEST.build_manifest(self.artifacts, "stable notes", "workbench-v0.1.2", self.output, "stable")
+        self.assertTrue(all(p["channel"] == "stable" for p in manifest["packages"]))
+        self.assertEqual(manifest["packages"][-1]["signing"], "release")
+
+    def test_rejects_invalid_release_tag_before_creating_output(self):
+        with self.assertRaisesRegex(ValueError, "Release tag"):
+            MANIFEST.build_manifest(self.artifacts, "notes", "v0.1.2", self.output)
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_wrong_android_variant_before_creating_output(self):
+        metadata_path = self.artifacts / "android-agent-workbench-preview-apk" / "output-metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["variantName"] = "release"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "debug APK"):
+            MANIFEST.build_manifest(self.artifacts, "notes", "workbench-preview-123-1", self.output)
+        self.assertFalse(self.output.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

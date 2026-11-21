@@ -39,14 +39,17 @@ struct LocalHistoryEntry: Decodable, Identifiable, Equatable {
     let profile_name: String
     let gateway: String
     let updated_at: Int
+    let scope: String?
+    let preview: String?
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "id"
-        case history_ref, client, title, workspace, model, profile_id, profile_name, gateway, updated_at
+        case history_ref, client, title, workspace, model, profile_id, profile_name, gateway, updated_at, scope, preview
     }
 
     var id: String { history_ref }
     var clientKind: ClientKind { client == "codex" ? .codex : .claude }
+    var isGlobal: Bool { scope == "global" }
     var updatedDate: Date { Date(timeIntervalSince1970: TimeInterval(updated_at)) }
 }
 
@@ -177,6 +180,20 @@ enum ClientKind: String, CaseIterable, Identifiable {
     }
 }
 
+enum LaunchScope: String, CaseIterable, Identifiable {
+    case workbench
+    case system
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .workbench: "工作台"
+        case .system: "系统"
+        }
+    }
+}
+
 enum ModelFilter: String, CaseIterable, Identifiable {
     case all
     case favorites
@@ -224,25 +241,28 @@ final class TerminalSession: ObservableObject, Identifiable {
     let workspace: String
     let sessionMode: SessionMode
     let gateway: String
+    let isGlobal: Bool
     let launchSpec: TerminalLaunchSpec
     let control = EmbeddedTerminalControl()
     @Published private(set) var isRunning = true
     @Published private(set) var exitCode: Int32?
 
-    init(client: ClientKind, profile: KeyProfile, model: String, workspace: String,
-         sessionMode: SessionMode, gateway: String, launchSpec: TerminalLaunchSpec) {
+    init(client: ClientKind, profile: KeyProfile?, model: String, workspace: String,
+         sessionMode: SessionMode, gateway: String, launchSpec: TerminalLaunchSpec,
+         isGlobal: Bool = false) {
         id = launchSpec.id
         self.client = client
-        profileID = profile.id
-        profileName = profile.name
+        profileID = profile?.id ?? "global"
+        profileName = profile?.name ?? "系统全局"
         self.model = model
         self.workspace = workspace
         self.sessionMode = sessionMode
         self.gateway = gateway
+        self.isGlobal = isGlobal
         self.launchSpec = launchSpec
     }
 
-    var title: String { "\(client.title) · \(model)" }
+    var title: String { "\(client.title) · \(isGlobal ? "系统全局" : model)" }
     var workspaceName: String { URL(fileURLWithPath: workspace).lastPathComponent }
 
     func stop() {
@@ -339,6 +359,9 @@ final class ManagerModel: ObservableObject {
             isStatusError = false
         }
     }
+    @Published var launchScope: LaunchScope = .workbench {
+        didSet { UserDefaults.standard.set(launchScope.rawValue, forKey: "launch.scope") }
+    }
     @Published var profiles: [KeyProfile] = []
     @Published var selectedProfileID = ""
     @Published var models: [String] = []
@@ -365,6 +388,7 @@ final class ManagerModel: ObservableObject {
     @Published var historySessions: [LocalHistoryEntry] = []
     @Published var selectedHistory: LocalHistoryEntry?
     @Published var historyError = ""
+    @Published var historyScope: String = "workspace"
     @Published var addProfileError = ""
     @Published var addProfileStatus = ""
     @Published var statusMessage = "正在读取本机配置…"
@@ -400,6 +424,7 @@ final class ManagerModel: ObservableObject {
 
     init() {
         activeClient = ClientKind(rawValue: UserDefaults.standard.string(forKey: "client.kind") ?? "") ?? .claude
+        launchScope = LaunchScope(rawValue: UserDefaults.standard.string(forKey: "launch.scope") ?? "") ?? .workbench
     }
 
     var selectedProfile: KeyProfile? {
@@ -413,6 +438,14 @@ final class ManagerModel: ObservableObject {
     var agentRunning: Bool { terminalSessions.contains(where: \.isRunning) }
 
     var runningSessionCount: Int { terminalSessions.filter(\.isRunning).count }
+
+    @Published var installingApplicationUpdate = false
+
+    var canLaunch: Bool {
+        guard !installingApplicationUpdate, !workspace.isEmpty, FileManager.default.fileExists(atPath: workspace) else { return false }
+        if launchScope == .system { return true }
+        return selectedProfile != nil && !selectedModel.isEmpty && !isLoadingModels
+    }
 
     var filteredModels: [String] {
         models.filter { item in
@@ -760,14 +793,20 @@ final class ManagerModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
         if panel.runModal() == .OK, let url = panel.url {
-            workspace = url.standardizedFileURL.path
+            setWorkspace(url.standardizedFileURL.path)
             rememberWorkspace(workspace)
         }
     }
 
     func setWorkspace(_ path: String) {
         guard FileManager.default.fileExists(atPath: path) else { return }
-        workspace = URL(fileURLWithPath: path).standardizedFileURL.path
+        let next = URL(fileURLWithPath: path).standardizedFileURL.path
+        if let selectedHistory,
+           URL(fileURLWithPath: selectedHistory.workspace).standardizedFileURL.path != next {
+            self.selectedHistory = nil
+            sessionMode = .new
+        }
+        workspace = next
         rememberWorkspace(workspace)
     }
 
@@ -778,6 +817,11 @@ final class ManagerModel: ObservableObject {
     }
 
     func requestLaunch() {
+        guard !installingApplicationUpdate else { return }
+        if launchScope == .system {
+            launchGlobal(client: activeClient)
+            return
+        }
         guard !selectedProfileID.isEmpty, !selectedModel.isEmpty, !workspace.isEmpty else {
             setError("请选择调用 Key、模型和工作目录。")
             return
@@ -810,11 +854,28 @@ final class ManagerModel: ObservableObject {
     func showHistory() async {
         guard let backend else { return }
         guard !isLoadingHistory else { return }
+        historyScope = "workspace"
         isHistoryPresented = true
         isLoadingHistory = true
         historyError = ""
         do {
-            let data = try await backend.run(["history-list"])
+            let data = try await backend.run(["history-list", "--workspace", workspace])
+            historySessions = try JSONDecoder().decode(HistoryListResponse.self, from: data).sessions
+        } catch {
+            historyError = error.localizedDescription
+        }
+        isLoadingHistory = false
+    }
+
+    func showGlobalHistory() async {
+        guard let backend else { return }
+        guard !isLoadingHistory else { return }
+        historyScope = "global"
+        isHistoryPresented = true
+        isLoadingHistory = true
+        historyError = ""
+        do {
+            let data = try await backend.run(["history-list-global"])
             historySessions = try JSONDecoder().decode(HistoryListResponse.self, from: data).sessions
         } catch {
             historyError = error.localizedDescription
@@ -824,20 +885,24 @@ final class ManagerModel: ObservableObject {
 
     func chooseHistory(_ entry: LocalHistoryEntry) {
         activeClient = entry.clientKind
-        selectedHistory = entry
-        sessionMode = .resume
-        workspace = ""
         if !entry.workspace.isEmpty {
             setWorkspace(entry.workspace)
         }
+        selectedHistory = entry
+        sessionMode = .resume
         isHistoryPresented = false
     }
 
     func launchConfirmed() {
-        guard let backend, let selectedProfile else { return }
+        guard !installingApplicationUpdate, let backend, let selectedProfile else { return }
         let mode = pendingSessionMode
         let history = mode == .resume ? selectedHistory : nil
-        let action = history == nil ? (activeClient == .codex ? "codex-launch" : "launch") : "history-launch"
+        let action: String
+        if let history {
+            action = history.isGlobal ? "history-import-launch" : "history-launch"
+        } else {
+            action = activeClient == .codex ? "codex-launch" : "launch"
+        }
         let shellPath = ProcessInfo.processInfo.environment["SHELL"].flatMap {
             FileManager.default.isExecutableFile(atPath: $0) ? $0 : nil
         } ?? "/bin/zsh"
@@ -855,9 +920,10 @@ final class ManagerModel: ObservableObject {
         let backendCommand = ([backend.pythonPath] + backendArguments).map(shellQuote).joined(separator: " ")
         let inheritedPath = ProcessInfo.processInfo.environment["PATH"] ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         let terminalPath = "\(NSHomeDirectory())/.local/bin:\(inheritedPath)"
+        let backendStatus = "backend_status=$?; if [ \"$backend_status\" -ne 0 ]; then exit \"$backend_status\"; fi"
         let launch = TerminalLaunchSpec(
             executable: shellPath,
-            arguments: ["-l", "-i", "-c", "trap ':' INT; \(backendCommand); exec \(shellQuote(shellPath)) -l -i"],
+            arguments: ["-l", "-i", "-c", "trap ':' INT; \(backendCommand); \(backendStatus); exec \(shellQuote(shellPath)) -l -i"],
             workspace: workspace,
             environment: [
                 "HOME=\(NSHomeDirectory())",
@@ -880,13 +946,41 @@ final class ManagerModel: ObservableObject {
         sessionMode = .new
         if let history {
             if history.clientKind == .codex {
-                statusMessage = "已从「\(history.title)」创建 Codex 分支。旧消息不会显示在新终端；原对话保留，输入后沿用其上下文。"
+                statusMessage = "正在恢复「\(history.title)」。同配置续接原会话；跨配置创建独立分支。恢复方式会显示在终端。"
             } else {
-                statusMessage = "已从「\(history.title)」创建 Claude 分支。原对话保留，新终端从该会话继续。"
+                statusMessage = "正在恢复「\(history.title)」。同配置续接原会话；跨配置创建独立分支。恢复方式会显示在终端。"
             }
         } else {
             statusMessage = "已创建独立的 \(activeClient.title) 终端会话。"
         }
+        isStatusError = false
+    }
+
+    func launchGlobal(client: ClientKind) {
+        guard !installingApplicationUpdate else { return }
+        guard !workspace.isEmpty,
+              FileManager.default.fileExists(atPath: workspace) else {
+            setError("请选择一个存在的项目目录后再启动系统全局客户端。")
+            return
+        }
+        let shellPath = ProcessInfo.processInfo.environment["SHELL"].flatMap {
+            FileManager.default.isExecutableFile(atPath: $0) ? $0 : nil
+        } ?? "/bin/zsh"
+        let command = client == .codex ? "codex" : "claude"
+        let shellCommand = "cd \(shellQuote(workspace)); \(command); exec \(shellQuote(shellPath)) -l -i"
+        let inherited = ProcessInfo.processInfo.environment.map { "\($0.key)=\($0.value)" }
+        let launch = TerminalLaunchSpec(
+            executable: shellPath,
+            arguments: ["-l", "-i", "-c", shellCommand],
+            workspace: workspace,
+            environment: inherited
+        )
+        let session = TerminalSession(client: client, profile: nil, model: "系统配置",
+                                      workspace: workspace, sessionMode: .new,
+                                      gateway: "系统环境", launchSpec: launch, isGlobal: true)
+        terminalSessions.append(session)
+        selectedTerminalID = session.id
+        statusMessage = "已启动系统全局 \(client.title)；沿用系统配置，不会修改工作台配置。"
         isStatusError = false
     }
 

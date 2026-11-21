@@ -2,12 +2,47 @@ import AppKit
 import SwiftTerm
 import SwiftUI
 
+/// Accepts Finder file drops and inserts shell-safe paths into the active PTY.
+/// The trailing space lets the user keep composing the command without running it.
+@MainActor
+final class FileDropTerminalView: LocalProcessTerminalView {
+    override init(frame: CGRect, font: NSFont? = nil, options: TerminalOptions) {
+        super.init(frame: frame, font: font, options: options)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        fileURLs(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = fileURLs(from: sender.draggingPasteboard)
+        guard !urls.isEmpty else { return false }
+        pasteText(urls.map { Self.shellQuote($0.path) }.joined(separator: " ") + " ")
+        return true
+    }
+
+    private func fileURLs(from pasteboard: NSPasteboard) -> [URL] {
+        (pasteboard.readObjects(forClasses: [NSURL.self],
+                                options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+    }
+
+    private static func shellQuote(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
 @MainActor
 final class EmbeddedTerminalControl: ObservableObject {
-    private weak var terminalView: LocalProcessTerminalView?
+    private weak var terminalView: FileDropTerminalView?
     private var appliedStyle: TerminalStyleSettings?
 
-    func attach(_ view: LocalProcessTerminalView) {
+    func attach(_ view: FileDropTerminalView) {
         terminalView = view
     }
 
@@ -15,7 +50,7 @@ final class EmbeddedTerminalControl: ObservableObject {
         terminalView?.terminate()
     }
 
-    func apply(_ style: SharedTerminalStyle, to view: LocalProcessTerminalView) {
+    func apply(_ style: SharedTerminalStyle, to view: FileDropTerminalView) {
         guard appliedStyle != style.settings else { return }
         style.apply(to: view)
         appliedStyle = style.settings
@@ -36,9 +71,9 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
         Coordinator(onExit: onExit)
     }
 
-    func makeNSView(context: Context) -> LocalProcessTerminalView {
-        let view = LocalProcessTerminalView(frame: .zero, font: style.font,
-                                            options: TerminalOptions(scrollback: style.settings.scrollback))
+    func makeNSView(context: Context) -> FileDropTerminalView {
+        let view = FileDropTerminalView(frame: .zero, font: style.font,
+                                        options: TerminalOptions(scrollback: style.settings.scrollback))
         view.processDelegate = context.coordinator
         control.attach(view)
         control.apply(style, to: view)
@@ -54,7 +89,7 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ view: LocalProcessTerminalView, context: Context) {
+    func updateNSView(_ view: FileDropTerminalView, context: Context) {
         control.attach(view)
         control.apply(style, to: view)
     }

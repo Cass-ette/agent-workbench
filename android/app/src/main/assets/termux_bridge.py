@@ -177,10 +177,10 @@ def history_context(home):
     return session_history, homes("codex"), homes("claude")
 
 
-def launch_spec(payload, home=None):
+def launch_spec(payload, home=None, bundle=None):
     home = Path(home or Path.home())
     client = payload.get("client", "shell")
-    if client not in ("shell", "debian-shell", "claude", "codex", "ssh"):
+    if client not in ("shell", "debian-shell", "vm-shell", "claude", "codex", "ssh"):
         raise ValueError("不支持的客户端")
     mode = payload.get("mode", "new")
     if mode not in ("new", "continue", "resume"):
@@ -195,7 +195,7 @@ def launch_spec(payload, home=None):
                                              client, codex_homes, claude_homes)
         except ValueError:
             raise HistoryUnavailable() from None
-    workspace = str(home) if client == "ssh" else str(payload.get("workspace") or "~/projects")
+    workspace = str(home) if client in ("ssh", "vm-shell") else str(payload.get("workspace") or "~/projects")
     if "\0" in workspace or "\n" in workspace:
         raise ValueError("项目路径无效")
     if workspace == "~" or workspace.startswith("~/"):
@@ -203,11 +203,11 @@ def launch_spec(payload, home=None):
     workspace = Path(workspace)
     if not workspace.is_absolute():
         workspace = home / workspace
-    if source and not workspace.is_dir():
-        raise HistoryUnavailable("项目目录不存在，请重新填写")
-    if source and client == "claude" and (not source["workspace"]
+    if source and (not source["workspace"]
             or workspace.resolve() != Path(source["workspace"]).resolve()):
-        raise HistoryUnavailable("Claude 恢复需要原项目目录")
+        raise HistoryUnavailable("恢复必须使用这条会话所属的项目目录")
+    if source and not workspace.is_dir():
+        raise HistoryUnavailable("项目目录不存在，请重新选择该会话")
     workspace.mkdir(parents=True, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k not in SENSITIVE_ENV}
     env["PATH"] = str(home / ".local/bin") + ":" + str(home / "bin") + ":" + env.get("PATH", "")
@@ -217,6 +217,14 @@ def launch_spec(payload, home=None):
         raise ValueError("未找到 bash，请先在 Termux 安装 bash")
     if client == "shell":
         return [bash, "-l"], env, str(workspace)
+    if client == "vm-shell":
+        from linux_vm import LinuxVM
+        vm = LinuxVM(home)
+        if not vm.status()["installed"]:
+            raise ValueError("请先在运行环境页选装完整 Linux 虚拟机")
+        script = shlex.join([sys.executable, str(Path(__file__).with_name("linux_vm.py")), "shell"])
+        script += "; result=$?; printf '\\r\\n[Linux VM Shell 已退出：%s。已返回 Termux，可在运行环境页管理虚拟机。]\\r\\n' \"$result\"; exec " + shlex.quote(bash) + " -l"
+        return [bash, "--noprofile", "--norc", "-c", script], env, str(workspace)
     if client == "debian-shell":
         proot = shutil.which("proot-distro", path=env["PATH"])
         if not proot:
@@ -261,29 +269,58 @@ def launch_spec(payload, home=None):
     uri = urlsplit(gateway)
     if uri.scheme not in ("http", "https") or not uri.hostname or "@" in uri.netloc or uri.query or uri.fragment or uri.path:
         raise ValueError("网关地址无效")
+    environment = payload.get("environment", "debian")
+    if environment not in ("debian", "vm"):
+        raise ValueError("请选择 Debian 轻量环境或完整 Linux 虚拟机")
+    fingerprint = hashlib.sha256(key.encode()).hexdigest()
+    scope = hashlib.sha256(json.dumps([payload.get("profile_id"), gateway, model, str(workspace), fingerprint], ensure_ascii=False).encode()).hexdigest()[:24]
+    if environment == "vm":
+        from linux_vm import LinuxVM
+        vm = LinuxVM(home)
+        if not vm.status()["installed"]:
+            raise ValueError("请先在运行环境页安装完整 Linux 虚拟机")
+        projects = (home / "projects").resolve()
+        try:
+            workspace.resolve().relative_to(projects)
+        except ValueError:
+            raise ValueError("Linux VM Agent 仅支持手机 ~/projects 下的项目目录") from None
+        launch_file = home / ".local/share/agent-workbench" / ("vm-launch-" + uuid.uuid4().hex + ".json")
+        private_write(launch_file, json.dumps({
+            "client": client, "mode": mode, "profile_id": payload.get("profile_id"),
+            "model": model, "gateway": gateway, "key": key,
+            "workspace": str(workspace.resolve()), "codex_compatibility": payload.get("codex_compatibility") is True,
+        }, ensure_ascii=False))
+        vm_script = shlex.join([sys.executable, str(Path(__file__).with_name("linux_vm.py")), "agent", str(launch_file)])
+        vm_script += "; result=$?; rm -f -- " + shlex.quote(str(launch_file))
+        vm_script += "; printf '\\r\\n[VM Agent 已退出：%s；返回 Termux Shell]\\r\\n' \"$result\"; unset " + " ".join(SENSITIVE_ENV) + "; exec " + shlex.quote(bash) + " -l"
+        return [bash, "--noprofile", "--norc", "-c", vm_script], env, str(workspace)
     proot = shutil.which("proot-distro", path=env["PATH"])
-    runtime = home / ".local/share/agent-workbench/runtime"
+    runtime = Path(bundle) if bundle else home / ".local/share/agent-workbench/runtime"
     in_debian = bool(proot and (runtime / "debian_runner.py").is_file())
     executable = None if in_debian else shutil.which(client, path=env["PATH"])
     if not executable and not in_debian:
         raise ValueError("未找到 " + client + "；请在 Debian 或 Termux 完成安装")
-    scope = hashlib.sha256(json.dumps([payload.get("profile_id"), gateway, str(workspace)], ensure_ascii=False).encode()).hexdigest()[:24]
     parent = home / ".local/share/agent-workbench" / client
     seed = None
-    if source:
+    same_config = bool(source and history.can_resume_in_place(
+        source, str(payload.get("profile_id") or ""), model, gateway, fingerprint))
+    if source and not same_config:
         try:
-            config, seed = history.stage_branch(source, parent, payload.get("profile_id"), "", model, gateway)
+            config, seed = history.stage_branch(source, parent, payload.get("profile_id"), "", model, gateway, fingerprint)
         except ValueError as exc:
             raise HistoryUnavailable(str(exc)) from None
         if client == "codex":
             seed = None  # Codex's native fork keeps references to these private input copies.
+    elif source:
+        config = Path(source["_home"])
     else:
         config = parent / scope
     config.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(config, 0o700)
     if not source:
         private_write(config / "workbench-profile.json", json.dumps({
-            "profile_id": payload.get("profile_id"), "gateway": gateway,
+            "profile_id": payload.get("profile_id"), "gateway": gateway, "model": model,
+            "key_fingerprint": fingerprint,
         }))
     command = [executable] if executable else [client]
     if client == "codex":
@@ -296,7 +333,7 @@ def launch_spec(payload, home=None):
             # sandbox on tested Android kernels. Keep command approvals active.
             args += ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]
         if source:
-            args += ["fork", source["id"]]
+            args += ["resume" if same_config else "fork", source["id"]]
         elif mode != "new":
             args += ["resume"] + (["--last"] if mode == "continue" else [])
         args += ["--model", model, "--cd", str(workspace), "--no-alt-screen"]
@@ -320,7 +357,9 @@ def launch_spec(payload, home=None):
         if mode == "resume":
             args += ["--resume"]
             if source:
-                args += [source["id"], "--fork-session"]
+                args += [source["id"]]
+                if not same_config:
+                    args += ["--fork-session"]
     if in_debian:
         # A unique one-use file survives proot's environment clearing. The guest
         # reads and removes it before launching, so no key enters argv/profile.d.
@@ -345,8 +384,8 @@ def launch_spec(payload, home=None):
 
 
 class Session:
-    def __init__(self, payload):
-        args, env, workspace = launch_spec(payload)
+    def __init__(self, payload, bundle=None):
+        args, env, workspace = launch_spec(payload, bundle=bundle)
         self.id = uuid.uuid4().hex
         self.lock = threading.Lock()
         self.output, self.base, self.exit_code = bytearray(), 0, None
@@ -419,13 +458,16 @@ class BridgeServer(ThreadingHTTPServer):
         self.token, self.sessions, self.guard = token, {}, threading.Lock()
         self.version, self.build = version, build
         self.runtime = None
+        self.bundle = Path(__file__).resolve().parent
+        if str(self.bundle) not in sys.path:
+            sys.path.insert(0, str(self.bundle))
         runtime_dir = Path.home() / ".local/share/agent-workbench/runtime"
-        if (runtime_dir / "workbench_runtime.py").is_file():
+        if (self.bundle / "workbench_runtime.py").is_file():
             import importlib.util
-            spec = importlib.util.spec_from_file_location("workbench_runtime", runtime_dir / "workbench_runtime.py")
+            spec = importlib.util.spec_from_file_location("workbench_runtime", self.bundle / "workbench_runtime.py")
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            self.runtime = module.RuntimeInstaller(runtime_dir)
+            self.runtime = module.RuntimeInstaller(runtime_dir, bundle=self.bundle)
         super().__init__(address, Handler)
 
 
@@ -449,12 +491,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.command == "GET" and uri.path == "/health":
                 return self.reply(200, {"service": "agent-workbench-termux", "version": self.server.version,
-                                        "build": self.server.build, "capabilities": ["pty", "ssh", "debian-runtime", "debian-shell", "usage", "history"]})
+                                        "build": self.server.build, "capabilities": ["pty", "ssh", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history"]})
             if self.command == "GET" and uri.path == "/usage":
                 return self.reply(200, usage_snapshot())
             if self.command == "GET" and uri.path == "/history":
                 history, codex_homes, claude_homes = history_context(Path.home())
-                return self.reply(200, {"sessions": history.public_rows(history.scan_history(codex_homes, claude_homes, limit=500))})
+                selected_workspace = parse_qs(uri.query).get("workspace", [""])[0]
+                rows = history.scan_history(codex_homes, claude_homes, limit=500,
+                                            workspace=selected_workspace)
+                return self.reply(200, {"sessions": history.public_rows(
+                    history.mark_scope(rows, "workbench"))})
             payload = {}
             if self.command == "POST":
                 length = int(self.headers.get("Content-Length", 0))
@@ -463,12 +509,20 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(payload, dict): raise ValueError("请求格式错误")
             if uri.path == "/runtime" and self.server.runtime:
                 if self.command == "GET": return self.reply(200, self.server.runtime.status())
-                if self.command == "POST": return self.reply(202, self.server.runtime.start(payload.get("clients")))
+                if self.command == "POST": return self.reply(202, self.server.runtime.start(payload.get("clients"), payload.get("environment", "debian")))
+            if uri.path == "/vm" and self.command == "POST":
+                from linux_vm import LinuxVM
+                vm = LinuxVM()
+                action = payload.get("action")
+                if action == "start": result = vm.start()
+                elif action == "stop": result = vm.stop()
+                else: raise ValueError("虚拟机操作无效")
+                return self.reply(200, result)
             if uri.path == "/sessions" and self.command == "POST":
                 with self.server.guard:
                     if sum(s.exit_code is None for s in self.server.sessions.values()) >= 8:
                         return self.reply(409, {"error": "最多同时运行 8 个终端"})
-                    session = Session(payload)
+                    session = Session(payload, bundle=self.server.bundle)
                     self.server.sessions[session.id] = session
                 return self.reply(201, {"id": session.id})
             match = re.fullmatch(r"/sessions/([0-9a-f]{32})(/input|/resize)?", uri.path)

@@ -110,6 +110,8 @@ class ProfileStore(context: Context) {
     }
 
     fun removeSecret(id: String) { secrets.edit().remove(id).apply() }
+    fun runtimeEnvironment() = prefs.getString("runtime_environment", "debian").orEmpty().takeIf { it in listOf("debian", "vm") } ?: "debian"
+    fun saveRuntimeEnvironment(value: String) { prefs.edit().putString("runtime_environment", value).apply() }
     fun bridgePort() = prefs.getInt("bridge_port", 0)
     fun saveBridgePort(port: Int) { prefs.edit().putInt("bridge_port", port).apply() }
     fun bootstrapOperation() = prefs.getString("bootstrap_operation", "").orEmpty()

@@ -8,12 +8,24 @@ import android.content.pm.PackageManager
 import org.json.JSONObject
 import java.net.ServerSocket
 import java.security.SecureRandom
+import java.security.MessageDigest
 import java.util.UUID
 import android.util.Base64
 
 const val TERMUX_PERMISSION = "com.termux.permission.RUN_COMMAND"
 const val TERMUX_RELEASE = "https://github.com/termux/termux-app/releases/tag/v0.118.3"
-const val TERMUX_ARM64_APK = "https://github.com/termux/termux-app/releases/download/v0.118.3/termux-app_v0.118.3%2Bgithub-debug_arm64-v8a.apk"
+private const val TERMUX_APK_PREFIX = "https://github.com/termux/termux-app/releases/download/v0.118.3/termux-app_v0.118.3%2Bgithub-debug_"
+private val TERMUX_APK_ARCHES = mapOf(
+    "arm64-v8a" to "arm64-v8a",
+    "armeabi-v7a" to "armeabi-v7a",
+    "x86_64" to "x86_64",
+    "x86" to "x86",
+)
+
+fun termuxApkUrl(supportedAbis: Array<String>): String? {
+    val abi = supportedAbis.firstOrNull { it in TERMUX_APK_ARCHES } ?: return null
+    return TERMUX_APK_PREFIX + TERMUX_APK_ARCHES.getValue(abi) + ".apk"
+}
 
 class TermuxConnection(private val context: Context, private val store: ProfileStore) {
     private var port = store.bridgePort()
@@ -33,7 +45,7 @@ class TermuxConnection(private val context: Context, private val store: ProfileS
     fun supportsRuntime() = try {
         val health = request("/health")
         health.optString("version") == BuildConfig.VERSION_NAME && health.optInt("build") == BuildConfig.VERSION_CODE &&
-            health.optJSONArray("capabilities").strings().containsAll(listOf("debian-runtime", "debian-shell", "history"))
+            health.optJSONArray("capabilities").strings().containsAll(listOf("debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "history"))
     } catch (_: Exception) { false }
 
     fun startHost(upgrade: Boolean = false) {
@@ -50,21 +62,28 @@ class TermuxConnection(private val context: Context, private val store: ProfileS
             store.saveSecret("bridge:$port", token)
             store.saveBridgePort(port)
         }
-        val root = "/data/data/com.termux/files/home/.local/share/agent-workbench/runtime"
-        val files = listOf("termux_bridge.py", "debian_runner.py", "runtime_setup.sh", "workbench_runtime.py", "session_history.py")
+        val files = listOf("termux_bridge.py", "debian_runner.py", "runtime_setup.sh", "workbench_runtime.py", "linux_vm.py", "session_history.py")
+        val assets = files.associateWith { name -> context.assets.open(name).use { it.readBytes() } }
+        val digest = MessageDigest.getInstance("SHA-256")
+        assets.forEach { (name, bytes) -> digest.update(name.toByteArray(Charsets.UTF_8)); digest.update(bytes) }
+        val revision = digest.digest().joinToString("") { "%02x".format(it) }.take(16)
+        // Keep old bundles for their still-running terminals. Projects, VM
+        // disks, install status and API profiles remain outside this directory.
+        val root = "/data/data/com.termux/files/home/.local/share/agent-workbench/runtime/releases/${BuildConfig.VERSION_CODE}-$revision"
+        val operation = UUID.randomUUID().toString()
         val script = buildString {
             append("set -eu\numask 077\n")
             append("export PREFIX=/data/data/com.termux/files/usr\nexport HOME=/data/data/com.termux/files/home\n")
             append("export PATH=\"\u0024PREFIX/bin:/system/bin\"\nexport TMPDIR=\"\u0024PREFIX/tmp\"\n")
-            append("if ! command -v python3 >/dev/null; then pkg update -y; pkg install -y -o Dpkg::Options::=--force-confold python; fi\n")
+            append("missing=()\nfor pair in python3:python git:git ssh:openssh; do command -v \"\u0024{pair%%:*}\" >/dev/null || missing+=(\"\u0024{pair#*:}\"); done\n")
+            append("if (( \u0024{#missing[@]} )); then pkg update -y; pkg install -y -o Dpkg::Options::=--force-confold \"\u0024{missing[@]}\"; fi\n")
             append("mkdir -p '$root'\nchmod 700 '$root'\n")
-            files.forEach { name ->
-                val data = Base64.encodeToString(context.assets.open(name).use { it.readBytes() }, Base64.NO_WRAP)
-                append("printf '%s' '$data' | base64 -d > '$root/$name.tmp'\nmv '$root/$name.tmp' '$root/$name'\n")
+            assets.forEach { (name, bytes) ->
+                val data = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                append("printf '%s' '$data' | base64 -d > '$root/$name.$operation.tmp'\nmv '$root/$name.$operation.tmp' '$root/$name'\n")
             }
             append("exec python3 '$root/termux_bridge.py' --port $port --token '$token' --version '${BuildConfig.VERSION_NAME}' --build ${BuildConfig.VERSION_CODE}\n")
         }
-        val operation = UUID.randomUUID().toString()
         store.saveBootstrapOperation(operation)
         val callback = PendingIntent.getBroadcast(context, 0,
             Intent(context, TermuxBootstrapResult::class.java).setAction("com.cassette.workbench.BOOTSTRAP.$operation"),

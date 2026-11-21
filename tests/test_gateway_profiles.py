@@ -31,6 +31,7 @@ class GatewayProfileTests(unittest.TestCase):
         BACKEND.SETTINGS = BACKEND.CONFIG_DIR / "settings.json"
         BACKEND.EMPTY_MCP = BACKEND.TEST_ROOT / "empty-mcp.json"
         BACKEND.CODEX_HOME_ROOT = BACKEND.TEST_ROOT / "codex"
+        BACKEND.CLAUDE_BRANCH_ROOT = BACKEND.TEST_ROOT / "claude-branches"
         BACKEND.GATEWAY_CONFIG = BACKEND.TEST_ROOT / "gateway.json"
         self.addCleanup(self.temporary.cleanup)
 

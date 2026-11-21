@@ -1,6 +1,7 @@
 mod history;
 mod pricing;
 mod usage;
+mod updates;
 use keyring::Entry;
 use portable_pty::{Child, MasterPty, PtySize, native_pty_system};
 use reqwest::{Client, Url};
@@ -112,6 +113,7 @@ struct AppState {
     config_path: PathBuf,
     config: Mutex<AppConfig>,
     terminals: Mutex<HashMap<String, Arc<TerminalHandle>>>,
+    closing_for_update: Mutex<bool>,
 }
 
 impl AppState {
@@ -121,6 +123,7 @@ impl AppState {
             config_path,
             config: Mutex::new(config),
             terminals: Mutex::new(HashMap::new()),
+            closing_for_update: Mutex::new(false),
         }
     }
 }
@@ -461,11 +464,20 @@ fn quote_powershell(value: &str) -> String {
 }
 
 #[tauri::command]
-async fn list_history(app: tauri::AppHandle) -> Result<Vec<history::Conversation>, String> {
+async fn list_history(app: tauri::AppHandle, workspace: String) -> Result<Vec<history::Conversation>, String> {
     let root = app.path().app_config_dir().map_err(|error| error.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || history::scan(&root))
+    let workspace = PathBuf::from(workspace);
+    tauri::async_runtime::spawn_blocking(move || history::scan_workspace(&root, &workspace))
         .await
         .map_err(|_| "读取本地对话历史失败".into())
+}
+
+#[tauri::command]
+async fn list_all_history(app: tauri::AppHandle) -> Result<Vec<history::Conversation>, String> {
+    let root = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || history::scan_all(&root))
+        .await
+        .map_err(|_| "读取全部本地对话历史失败".into())
 }
 
 #[tauri::command]
@@ -474,6 +486,8 @@ fn start_terminal(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TerminalInfo, String> {
+    let closing = state.closing_for_update.lock().map_err(|_| "终端状态不可用。")?;
+    if *closing { return Err("正在安装更新。".into()); }
     if !matches!(request.client.as_str(), "claude" | "codex") {
         return Err("暂不支持所选客户端".into());
     }
@@ -507,7 +521,7 @@ fn start_terminal(
     let source = match (&request.history_ref, &request.history_id) {
         (None, None) => None,
         (Some(reference), Some(id)) if request.session_mode == "resume" => {
-            Some(history::scan(&config_root).into_iter().find(|entry| {
+            Some(history::scan_all(&config_root).into_iter().find(|entry| {
                 entry.history_ref == *reference && entry.id == *id && entry.client == request.client
             }).ok_or("找不到这条本地会话，请刷新对话历史")?)
         }
@@ -516,25 +530,35 @@ fn start_terminal(
     if source.is_some() && request.confirmed_gateway.as_deref() != Some(profile.gateway.as_str()) {
         return Err("目标网关已变更，请刷新后重新确认".into());
     }
-    if let Some(entry) = source.as_ref().filter(|entry| entry.client == "claude") {
+    if let Some(entry) = source.as_ref() {
         if entry.workspace.is_empty()
-            || workspace.canonicalize().ok() != PathBuf::from(&entry.workspace).canonicalize().ok()
+            || !history::same_workspace(&workspace, PathBuf::from(&entry.workspace).as_path())
         {
-            return Err("Claude 恢复需要原项目目录".into());
+            return Err("恢复必须使用这条会话所属的项目目录".into());
         }
     }
-    let branch = source.as_ref().map(|entry| {
-        history::stage_branch(entry, &config_root, &profile.id, &profile.name, &request.model, &profile.gateway)
+    use sha2::{Digest, Sha256};
+    let fingerprint = format!("{:x}", Sha256::digest(key.as_bytes()));
+    let needs_fork = source.as_ref().is_some_and(|entry| {
+        !history::can_resume_in_place(entry, &profile.id, &request.model, &profile.gateway, &fingerprint)
+    });
+    let branch = source.as_ref().filter(|_| needs_fork).map(|entry| {
+        history::stage_branch(entry, &config_root, &profile.id, &profile.name, &request.model, &profile.gateway, &fingerprint)
     }).transpose()?;
+    let selected_home = history::launch_home(source.as_ref(), branch.as_ref(),
+        history::configuration_home(&config_root, &request.client, &profile.id, &request.model,
+                                    &profile.gateway, &workspace, &fingerprint));
+    if source.is_none() {
+        history::record_profile(&selected_home, &profile.id, &profile.name, &request.model, &profile.gateway, &fingerprint)?;
+    }
     let mut shell = portable_pty::CommandBuilder::new("powershell.exe");
     shell.args(["-NoLogo", "-NoExit"]);
-    if branch.is_some() {
+    if source.is_some() {
         shell.arg("-NoProfile");
     }
     shell.arg("-Command");
     let command_text = if request.client == "codex" {
-        let codex_home = branch.as_ref().map(|(home, _)| home.clone())
-            .unwrap_or_else(|| config_root.join("codex").join(&profile.id));
+        let codex_home = selected_home.clone();
         fs::create_dir_all(&codex_home)
             .map_err(|error| format!("创建隔离 Codex 配置失败：{error}"))?;
         let config_text = format!(
@@ -543,8 +567,10 @@ fn start_terminal(
             serde_json::to_string(&format!("{}/v1", profile.gateway))
                 .map_err(|error| error.to_string())?,
         );
-        fs::write(codex_home.join("config.toml"), config_text)
-            .map_err(|error| format!("写入隔离 Codex 配置失败：{error}"))?;
+        if source.is_none() || branch.is_some() {
+            fs::write(codex_home.join("config.toml"), config_text)
+                .map_err(|error| format!("写入隔离 Codex 配置失败：{error}"))?;
+        }
         let mut args = vec![
             "--model".to_string(),
             request.model.clone(),
@@ -566,7 +592,8 @@ fn start_terminal(
             ];
         }
         if let Some(entry) = &source {
-            args.splice(0..0, ["fork".into(), entry.id.clone()]);
+            let action = if branch.is_some() { "fork" } else { "resume" };
+            args.splice(0..0, [action.into(), entry.id.clone()]);
         } else if request.session_mode == "resume" {
             args = vec![
                 "resume".into(),
@@ -587,8 +614,7 @@ fn start_terminal(
             .join(" ");
         format!("& 'codex' {command_args}")
     } else if request.client == "claude" {
-        let claude_home = branch.as_ref().map(|(home, _)| home.clone())
-            .unwrap_or_else(|| config_root.join("claude").join(&profile.id));
+        let claude_home = selected_home.clone();
         fs::create_dir_all(&claude_home)
             .map_err(|error| format!("创建隔离 Claude 配置失败：{error}"))?;
         shell.env("CLAUDE_CONFIG_DIR", claude_home);
@@ -600,7 +626,7 @@ fn start_terminal(
             "--add-dir".into(),
             workspace.display().to_string(),
         ];
-        if branch.is_some() {
+        if source.is_some() {
             for name in ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
                 "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"] {
                 shell.env_remove(name);
@@ -611,7 +637,7 @@ fn start_terminal(
                 "ANTHROPIC_SMALL_FAST_MODEL"] {
                 shell.env(name, &request.model);
             }
-            let empty_mcp = branch.as_ref().unwrap().0.join("empty-mcp.json");
+            let empty_mcp = selected_home.join("empty-mcp.json");
             fs::write(&empty_mcp, r#"{"mcpServers":{}}"#)
                 .map_err(|error| format!("写入隔离 Claude MCP 设置失败：{error}"))?;
             args.extend(["--bare".into(), "--strict-mcp-config".into(),
@@ -625,7 +651,10 @@ fn start_terminal(
             "resume" => {
                 args.push("--resume".into());
                 if let Some(entry) = &source {
-                    args.extend([entry.id.clone(), "--fork-session".into()]);
+                    args.push(entry.id.clone());
+                    if branch.is_some() {
+                        args.push("--fork-session".into());
+                    }
                 }
             }
             _ => return Err("会话模式无效".into()),
@@ -702,6 +731,61 @@ fn start_terminal(
     let app_for_reader = app.clone();
     let session_id = id;
     thread::spawn(move || stream_terminal(reader, handle, app_for_reader, session_id));
+    Ok(info)
+}
+
+#[tauri::command]
+fn start_global_terminal(
+    client: String,
+    workspace: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TerminalInfo, String> {
+    let closing = state.closing_for_update.lock().map_err(|_| "终端状态不可用。")?;
+    if *closing { return Err("正在安装更新。".into()); }
+    if !matches!(client.as_str(), "claude" | "codex") {
+        return Err("暂不支持所选客户端".into());
+    }
+    let workspace = PathBuf::from(workspace.trim());
+    if !workspace.is_absolute() || !workspace.is_dir() {
+        return Err("请选择一个存在的项目目录".into());
+    }
+    let id = Uuid::new_v4().to_string();
+    let executable = client.clone();
+    let mut shell = portable_pty::CommandBuilder::new("powershell.exe");
+    shell.args(["-NoLogo", "-NoExit"]);
+    shell.arg("-Command");
+    shell.arg(format!(
+        "chcp 65001 > $null; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $env:TERM = 'xterm-256color'; $env:COLORTERM = 'truecolor'; Set-Location -LiteralPath {}; & '{}'",
+        quote_powershell(&workspace.to_string_lossy()),
+        quote_powershell(&executable),
+    ));
+    shell.cwd(&workspace);
+    let system = native_pty_system();
+    let pair = system
+        .openpty(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 })
+        .map_err(|error| format!("创建 ConPTY 失败：{error}"))?;
+    let child = pair.slave.spawn_command(shell)
+        .map_err(|error| format!("启动系统全局客户端失败：{error}"))?;
+    drop(pair.slave);
+    let reader = pair.master.try_clone_reader()
+        .map_err(|error| format!("读取终端失败：{error}"))?;
+    let writer = pair.master.take_writer()
+        .map_err(|error| format!("打开终端输入失败：{error}"))?;
+    let handle = Arc::new(TerminalHandle {
+        writer: Mutex::new(writer),
+        master: Mutex::new(pair.master),
+        child: Mutex::new(child),
+    });
+    state.terminals.lock().map_err(|_| "终端会话锁异常")?
+        .insert(id.clone(), Arc::clone(&handle));
+    let info = TerminalInfo {
+        id: id.clone(),
+        title: format!("{} · 系统全局", client),
+        workspace: workspace.display().to_string(),
+    };
+    let app_for_reader = app.clone();
+    thread::spawn(move || stream_terminal(reader, handle, app_for_reader, id));
     Ok(info)
 }
 
@@ -817,6 +901,7 @@ pub fn run() {
         .setup(|app| {
             let config_path = app.path().app_config_dir()?.join("settings.json");
             app.manage(AppState::new(config_path));
+            app.manage(updates::UpdateState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -830,10 +915,16 @@ pub fn run() {
             save_preferences,
             remove_profile,
             start_terminal,
+            start_global_terminal,
             list_history,
+            list_all_history,
             write_terminal,
             resize_terminal,
-            stop_terminal
+            stop_terminal,
+            updates::check_workbench_update,
+            updates::download_workbench_update,
+            updates::cancel_workbench_update,
+            updates::install_workbench_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

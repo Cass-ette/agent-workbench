@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
@@ -11,6 +12,7 @@ import {
   ChevronDown,
   CircleHelp,
   FolderOpen,
+  Globe2,
   KeyRound,
   Maximize2,
   Minimize2,
@@ -27,10 +29,12 @@ import {
 import "@xterm/xterm/css/xterm.css";
 import "./App.css";
 import { UsageStatus } from "./UsagePanel";
+import { WorkbenchUpdate } from "./WorkbenchUpdate";
 import type { UsageSnapshot } from "./UsagePanel";
 
 type ClientKind = "claude" | "codex";
 type SessionMode = "new" | "continue" | "resume";
+type LaunchScope = "workbench" | "system";
 
 interface KeyProfile {
   id: string;
@@ -67,11 +71,13 @@ interface LocalConversation {
   history_ref: string;
   client: ClientKind;
   title: string;
+  preview?: string;
   workspace: string;
   model: string;
   profile_id: string;
   profile_name: string;
   updated_at: number;
+  scope?: "local" | "workbench" | "global";
 }
 
 interface Session extends TerminalInfo {
@@ -110,7 +116,11 @@ function App() {
   const [modelLoadError, setModelLoadError] = useState("");
   const [modelReload, setModelReload] = useState(0);
   const [sessionMode, setSessionMode] = useState<SessionMode>("new");
+  const [launchScope, setLaunchScope] = useState<LaunchScope>(() =>
+    window.localStorage.getItem("launchScope") === "system" ? "system" : "workbench",
+  );
   const [history, setHistory] = useState<LocalConversation[]>([]);
+  const [historyScope, setHistoryScope] = useState<"workspace" | "global">("workspace");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyQuery, setHistoryQuery] = useState("");
@@ -142,6 +152,12 @@ function App() {
   }, [modelQuery, models]);
 
   const selectedModelOutsideFilter = !!config.model && !filteredModels.includes(config.model);
+  const canStart = !!config.workspace && !isStarting
+    && (launchScope === "system" || (!!selectedProfile && !!config.model));
+
+  useEffect(() => {
+    window.localStorage.setItem("launchScope", launchScope);
+  }, [launchScope]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -200,6 +216,36 @@ function App() {
     };
   }, [loaded]);
 
+  useEffect(() => {
+    if (!isNativeTauri() || !loaded) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    getCurrentWebview().onDragDropEvent((event) => {
+      if (event.payload.type !== "drop") return;
+      const { paths } = event.payload;
+      if (!paths.length) return;
+      const sessionId = selectedSessionId;
+      if (!sessionId) {
+        setNotice("请先启动一个 Codex 或 Claude 终端，再拖入文件。");
+        return;
+      }
+      const text = `${paths.map(shellQuotePowerShell).join(" ")} `;
+      invoke("write_terminal", {
+        sessionId,
+        data: Array.from(new TextEncoder().encode(text)),
+      })
+        .then(() => setNotice(`已将 ${paths.length} 个路径插入当前终端。`))
+        .catch((cause: unknown) => setError(errorMessage(cause)));
+    }).then((remove) => {
+      if (cancelled) remove();
+      else unlisten = remove;
+    }).catch((cause: unknown) => setError(errorMessage(cause)));
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [loaded, selectedSessionId]);
+
   const refreshUsage = useCallback(async () => {
     if (!isTauri() || usageBusy.current) return;
     usageBusy.current = true;
@@ -233,7 +279,7 @@ function App() {
   }, [config.client, config.model, config.workspace, loaded]);
 
   useEffect(() => {
-    if (!loaded || !selectedProfile || !isTauri()) {
+    if (!loaded || launchScope === "system" || !selectedProfile || !isTauri()) {
       setModels([]);
       setIsLoadingModels(false);
       setModelLoadError("");
@@ -262,7 +308,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [loaded, selectedProfile?.id, modelReload]);
+  }, [launchScope, loaded, selectedProfile?.id, modelReload]);
 
   const registerTerminal = useCallback((id: string, terminal: Terminal) => {
     terminalRefs.current.set(id, terminal);
@@ -292,14 +338,24 @@ function App() {
   async function chooseWorkspace() {
     if (!isTauri()) return;
     const result = await open({ directory: true, multiple: false, title: "选择项目工作目录" });
-    if (typeof result === "string") setConfig((current) => ({ ...current, workspace: result }));
+    if (typeof result === "string") {
+      setConfig((current) => ({ ...current, workspace: result }));
+      if (selectedHistory && selectedHistory.workspace !== result) {
+        setSelectedHistory(null);
+        setSessionMode("new");
+      }
+    }
   }
 
   async function startSession(mode: SessionMode = sessionMode) {
+    if (!canStart) return;
+    if (launchScope === "system") {
+      return startGlobalSession(config.client as ClientKind);
+    }
     if (!selectedProfile || !config.model || !config.workspace) return;
     const source = mode === "resume" ? selectedHistory : null;
     if (mode === "resume" && !source) return openHistory();
-    if (source && !window.confirm(`分支继续「${source.title}」？\n调用配置：${selectedProfile.name}\n网关：${selectedProfile.gateway}\n模型：${config.model}\n历史上下文会发送给这个网关，可能产生费用。原会话会保留。`)) return;
+    if (source && !window.confirm(`恢复「${source.title}」？\n调用配置：${selectedProfile.name}\n网关：${selectedProfile.gateway}\n模型：${config.model}\n相同配置续接原会话；更换配置、导入系统历史或来源不明时创建独立分支。\n历史上下文会发送给这个网关，可能产生费用。`)) return;
     const client = source?.client ?? config.client as ClientKind;
     setError("");
     setNotice("");
@@ -328,9 +384,7 @@ function App() {
       setSessions((current) => [...current, session]);
       setSelectedSessionId(info.id);
       setNotice(source
-        ? source.client === "codex"
-          ? `已从「${source.title}」创建 Codex 分支。旧消息不会显示在新终端；原对话保留，输入后沿用其上下文。`
-          : `已从「${source.title}」创建 Claude 分支。原对话保留，新终端从该会话继续。`
+        ? `已启动「${source.title}」的恢复。同配置续接原会话；跨配置创建独立分支。`
         : `${client === "codex" ? "Codex" : "Claude Code"} 已在独立终端中启动。`);
       if (source) {
         setSelectedHistory(null);
@@ -343,12 +397,44 @@ function App() {
     }
   }
 
-  async function openHistory() {
+  async function startGlobalSession(client: ClientKind) {
+    if (!config.workspace) return;
+    setError("");
+    setNotice("");
+    setIsStarting(true);
+    try {
+      const info = await invoke<TerminalInfo>("start_global_terminal", {
+        client,
+        workspace: config.workspace,
+      });
+      const session: Session = {
+        ...info,
+        client,
+        model: "系统配置",
+        profileName: "系统全局",
+        mode: "new",
+        exitCode: null,
+      };
+      setSessions((current) => [...current, session]);
+      setSelectedSessionId(info.id);
+      setNotice(`已启动系统全局 ${client === "codex" ? "Codex" : "Claude Code"}；沿用系统配置，不会修改工作台配置。`);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setIsStarting(false);
+    }
+  }
+
+  async function openHistory(scope: "workspace" | "global" = "workspace") {
+    setHistoryScope(scope);
     setHistoryOpen(true);
     setHistoryLoading(true);
     setHistoryError("");
     try {
-      setHistory(await invoke<LocalConversation[]>("list_history"));
+      const rows = scope === "global"
+        ? await invoke<LocalConversation[]>("list_all_history")
+        : await invoke<LocalConversation[]>("list_history", { workspace: config.workspace });
+      setHistory(rows);
     } catch (cause) {
       setHistoryError(errorMessage(cause));
     } finally {
@@ -357,6 +443,7 @@ function App() {
   }
 
   function selectHistory(entry: LocalConversation) {
+    setLaunchScope("workbench");
     setSelectedHistory(entry);
     setSessionMode("resume");
     setConfig((current) => ({ ...current, client: entry.client, workspace: entry.workspace }));
@@ -412,7 +499,10 @@ function App() {
             <div className="brand-caption">LOCAL SESSION MANAGER</div>
           </div>
         </div>
-        <div className="topbar-status"><span className="status-dot" />本机工作区</div>
+        <div className="topbar-status">
+          <span className="status-dot" />本机工作区
+          <WorkbenchUpdate running={sessions.filter((session) => session.exitCode === null).length} />
+        </div>
       </header>
 
       <div className="app-body">
@@ -420,7 +510,7 @@ function App() {
           <div className="sidebar-heading">
             <div>
               <span className="eyebrow">CONNECTIONS</span>
-              <h2>调用配置</h2>
+              <h2>工作台调用配置</h2>
             </div>
             <button className="icon-button sidebar-add" title="添加调用配置" onClick={() => setShowProfileDialog(true)}>
               <Plus size={16} />
@@ -453,7 +543,7 @@ function App() {
           </div>
 
           <div className="sidebar-bottom">
-            <button className="sidebar-link" onClick={openHistory}>对话历史</button>
+            <button className="sidebar-link" onClick={() => void openHistory("global")}>对话历史</button>
             <div className="security-note"><span className="security-dot" />密钥保存在 Windows 凭据管理器</div>
             <button className="sidebar-link" onClick={() => setShowProfileDialog(true)}>
               <Settings2 size={15} />管理调用配置
@@ -470,46 +560,57 @@ function App() {
               </div>
               <div className="profile-current">
                 <span>当前配置</span>
-                <strong>{selectedProfile?.name ?? "尚未配置"}</strong>
+                <strong>{launchScope === "system" ? "系统配置" : (selectedProfile?.name ?? "尚未配置")}</strong>
               </div>
             </div>
 
-            <div className="setup-grid">
+            <div className={`setup-grid ${launchScope === "system" ? "system-scope" : ""}`}>
               <div className="field client-field">
                 <label>客户端</label>
                 <div className="segmented-control" role="group" aria-label="选择客户端">
-                  <button className={config.client === "claude" ? "active" : ""} onClick={() => selectClient("claude")}>Claude Code</button>
-                  <button className={config.client === "codex" ? "active" : ""} onClick={() => selectClient("codex")}>Codex</button>
+                  <button aria-pressed={config.client === "claude"} onClick={() => selectClient("claude")}>Claude Code</button>
+                  <button aria-pressed={config.client === "codex"} onClick={() => selectClient("codex")}>Codex</button>
                 </div>
               </div>
 
-              <div className="field model-field">
-                <label htmlFor="model-query">模型 <span>{models.length ? `${models.length} 个可用` : ""}</span></label>
-                <div className="model-picker">
-                  <div className="search-box">
-                    <Search size={14} />
-                    <input id="model-query" value={modelQuery} onChange={(event) => setModelQuery(event.currentTarget.value)} placeholder="搜索模型" disabled={!models.length} />
-                  </div>
-                  <div className="model-select-wrap"><select aria-label="选择模型" value={config.model} onChange={(event) => {
-                    const model = event.currentTarget.value;
-                    setConfig((current) => ({ ...current, model }));
-                  }} disabled={!selectedProfile || isLoadingModels || !filteredModels.length}>
-                    {isLoadingModels && <option value="">正在读取模型…</option>}
-                    {!isLoadingModels && !selectedProfile && <option value="">先添加调用配置</option>}
-                    {!isLoadingModels && selectedProfile && !models.length && !config.model && <option value="">{modelLoadError ? "模型列表读取失败" : "网关未返回可用模型"}</option>}
-                    {!isLoadingModels && models.length > 0 && !filteredModels.length && <option value="" disabled>没有匹配模型</option>}
-                    {selectedModelOutsideFilter && <option value={config.model}>{config.model}（{models.includes(config.model) ? "当前" : "已保存"}）</option>}
-                    {filteredModels.map((model) => <option key={model} value={model}>{model}</option>)}
-                  </select>
-                  <ChevronDown size={14} className="select-chevron" />
-                  </div>
-                  <button className="model-refresh" aria-label="刷新模型列表" title="刷新模型列表" onClick={() => setModelReload((value) => value + 1)} disabled={!selectedProfile || isLoadingModels}>
-                    <RefreshCw size={14} className={isLoadingModels ? "spinning" : ""} />
-                  </button>
+              <div className="field scope-field">
+                <label>运行范围</label>
+                <div className="segmented-control" role="group" aria-label="选择运行范围">
+                  <button aria-pressed={launchScope === "workbench"} onClick={() => setLaunchScope("workbench")}>工作台</button>
+                  <button aria-pressed={launchScope === "system"} onClick={() => setLaunchScope("system")}>系统</button>
                 </div>
-                {modelLoadError && <span className="model-load-error" role="status">模型列表读取失败：{modelLoadError}</span>}
-                {!modelLoadError && !isLoadingModels && selectedProfile && !models.length && <span className="model-load-note">网关未返回可用模型</span>}
               </div>
+
+              {launchScope === "workbench" && (
+                <div className="field model-field">
+                  <label htmlFor="model-query">模型 <span>{models.length ? `${models.length} 个可用` : ""}</span></label>
+                  <div className="model-picker">
+                    <div className="search-box">
+                      <Search size={14} />
+                      <input id="model-query" value={modelQuery} onChange={(event) => setModelQuery(event.currentTarget.value)} placeholder="搜索模型" disabled={!models.length} />
+                    </div>
+                    <div className="model-select-wrap">
+                      <select aria-label="选择模型" value={config.model} onChange={(event) => {
+                        const model = event.currentTarget.value;
+                        setConfig((current) => ({ ...current, model }));
+                      }} disabled={!selectedProfile || isLoadingModels || !filteredModels.length}>
+                        {isLoadingModels && <option value="">正在读取模型…</option>}
+                        {!isLoadingModels && !selectedProfile && <option value="">先添加调用配置</option>}
+                        {!isLoadingModels && selectedProfile && !models.length && !config.model && <option value="">{modelLoadError ? "模型列表读取失败" : "网关未返回可用模型"}</option>}
+                        {!isLoadingModels && models.length > 0 && !filteredModels.length && <option value="" disabled>没有匹配模型</option>}
+                        {selectedModelOutsideFilter && <option value={config.model}>{config.model}（{models.includes(config.model) ? "当前" : "已保存"}）</option>}
+                        {filteredModels.map((model) => <option key={model} value={model}>{model}</option>)}
+                      </select>
+                      <ChevronDown size={14} className="select-chevron" />
+                    </div>
+                    <button className="model-refresh" aria-label="刷新模型列表" title="刷新模型列表" onClick={() => setModelReload((value) => value + 1)} disabled={!selectedProfile || isLoadingModels}>
+                      <RefreshCw size={14} className={isLoadingModels ? "spinning" : ""} />
+                    </button>
+                  </div>
+                  {modelLoadError && <span className="model-load-error" role="status">模型列表读取失败：{modelLoadError}</span>}
+                  {!modelLoadError && !isLoadingModels && selectedProfile && !models.length && <span className="model-load-note">网关未返回可用模型</span>}
+                </div>
+              )}
 
               <div className="field workspace-field">
                 <label htmlFor="workspace">项目目录</label>
@@ -517,35 +618,41 @@ function App() {
                   <input id="workspace" value={config.workspace} onChange={(event) => {
                     const workspace = event.currentTarget.value;
                     setConfig((current) => ({ ...current, workspace }));
+                    if (selectedHistory && selectedHistory.workspace !== workspace) {
+                      setSelectedHistory(null);
+                      setSessionMode("new");
+                    }
                   }} placeholder="选择或输入项目目录" />
                   <button className="browse-button" onClick={chooseWorkspace} title="浏览项目目录"><FolderOpen size={16} /><span>浏览</span></button>
                 </div>
               </div>
 
-              <div className="field mode-field">
-                <label htmlFor="session-mode">会话</label>
-                <div className="mode-select-wrap">
-                  <select id="session-mode" value={sessionMode} onChange={(event) => {
-                    const mode = event.currentTarget.value as SessionMode;
-                    if (mode === "resume") void openHistory();
-                    else { setSelectedHistory(null); setSessionMode(mode); }
-                  }}>
-                    <option value="new">新会话</option>
-                    <option value="continue">继续最近会话</option>
-                    <option value="resume">{selectedHistory?.title ?? "选择历史会话"}</option>
-                  </select>
-                  <ChevronDown size={14} className="select-chevron" />
+              {launchScope === "workbench" && (
+                <div className="field mode-field">
+                  <label htmlFor="session-mode">会话</label>
+                  <div className="mode-select-wrap">
+                    <select id="session-mode" value={sessionMode} onChange={(event) => {
+                      const mode = event.currentTarget.value as SessionMode;
+                      if (mode === "resume") void openHistory("workspace");
+                      else { setSelectedHistory(null); setSessionMode(mode); }
+                    }}>
+                      <option value="new">新会话</option>
+                      <option value="continue">继续最近会话</option>
+                      <option value="resume">{selectedHistory?.title ?? "选择历史会话"}</option>
+                    </select>
+                    <ChevronDown size={14} className="select-chevron" />
+                  </div>
                 </div>
-              </div>
+              )}
 
-              <button className="launch-button" disabled={!selectedProfile || !config.model || !config.workspace || isStarting} onClick={() => startSession()}>
+              <button className="launch-button" disabled={!canStart} onClick={() => startSession()}>
                 <Zap size={16} fill="currentColor" />
-                {isStarting ? "正在启动" : "启动终端"}
+                {isStarting ? "正在启动" : "启动"}
               </button>
             </div>
             <div className="setup-footnote">
-              <span><CircleHelp size={13} />每个标签使用独立终端进程</span>
-              {selectedProfile && <span className="gateway-address">{selectedProfile.gateway}</span>}
+              <span><CircleHelp size={13} />{launchScope === "system" ? "沿用系统已有命令、Key 和配置" : "每个标签使用独立终端进程"}</span>
+              {launchScope === "workbench" && selectedProfile && <span className="gateway-address">{selectedProfile.gateway}</span>}
             </div>
           </section>
 
@@ -563,7 +670,7 @@ function App() {
                 <button className="icon-button fullscreen-button" title={terminalFullscreen ? "退出终端全屏" : "终端全屏"} onClick={() => setTerminalFullscreen((value) => !value)}>
                   {terminalFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
                 </button>
-                <button className="new-terminal-button" disabled={!selectedProfile || !config.model || !config.workspace} onClick={() => startSession("new")}><Plus size={14} />新建会话</button>
+                <button className="new-terminal-button" disabled={!canStart} onClick={() => startSession("new")}><Plus size={14} />新建会话</button>
               </div>
             </div>
 
@@ -589,8 +696,8 @@ function App() {
                 <div className="terminal-empty">
                   <div className="empty-icon"><TerminalSquare size={22} /></div>
                   <strong>准备运行</strong>
-                  <span>选择模型和项目目录，启动一个终端工作会话。</span>
-                  {!selectedProfile && <button onClick={() => setShowProfileDialog(true)}><Plus size={14} />添加调用配置</button>}
+                  <span>{launchScope === "system" ? "选择项目目录，使用系统配置启动。" : "选择模型和项目目录，启动一个终端工作会话。"}</span>
+                  {launchScope === "workbench" && !selectedProfile && <button onClick={() => setShowProfileDialog(true)}><Plus size={14} />添加调用配置</button>}
                 </div>
               )}
               {sessions.map((session) => (
@@ -609,7 +716,7 @@ function App() {
             <div className={`status-message ${error ? "error" : ""}`}>
               <span className="status-dot" />{error || notice || (loaded ? "就绪" : "正在读取本机配置…")}
             </div>
-            <UsageStatus usage={usage} error={usageError} busy={isLoadingUsage} refresh={() => void refreshUsage()} profileId={config.selected_profile_id} />
+            {launchScope === "workbench" && <UsageStatus usage={usage} error={usageError} busy={isLoadingUsage} refresh={() => void refreshUsage()} profileId={config.selected_profile_id} />}
             <span className="config-location">{configPath ? `配置文件 · ${configPath}` : "本机配置"}</span>
           </footer>
         </main>
@@ -618,7 +725,17 @@ function App() {
       {historyOpen && (
         <div className="dialog-backdrop" onKeyDown={(event) => { if (event.key === "Escape") setHistoryOpen(false); }}>
           <section className="profile-dialog history-dialog" role="dialog" aria-label="本地对话历史" aria-modal="true">
-            <h2>本地对话历史</h2>
+            <div className="history-heading-row">
+              <div>
+                <h2>{historyScope === "global" ? "全部目录的对话历史" : "当前项目的对话历史"}</h2>
+                {historyScope === "workspace" && <small>{config.workspace || "请先选择项目目录"}</small>}
+              </div>
+              {historyScope === "global" && (
+                <button className="secondary-button" onClick={() => void openHistory("workspace")}>
+                  <Globe2 size={13} />当前项目
+                </button>
+              )}
+            </div>
             <label className="dialog-field">
               搜索对话
               <input autoFocus value={historyQuery} onChange={(event) => setHistoryQuery(event.currentTarget.value)}
@@ -626,12 +743,13 @@ function App() {
             </label>
             <div className="history-list">
               {historyLoading ? <p>正在读取本地会话…</p> : historyError ? <p role="alert">{historyError}</p>
-                : history.filter((entry) => [entry.title, entry.workspace, entry.client, entry.model].some(
+                : history.filter((entry) => [entry.title, entry.preview ?? "", entry.workspace, entry.client, entry.model].some(
                   (value) => value.toLocaleLowerCase().includes(historyQuery.trim().toLocaleLowerCase()),
                 )).map((entry) => (
                   <button key={entry.history_ref} onClick={() => selectHistory(entry)}>
                     <strong>{entry.title}</strong>
-                    <small>{entry.client === "codex" ? "Codex" : "Claude"} · {entry.model || "模型未知"} · {config.profiles.find((profile) => profile.id === entry.profile_id)?.name ?? (entry.profile_name || "来源配置未知")} · {new Date(entry.updated_at * 1000).toLocaleString()}</small>
+                    <small>{entry.client === "codex" ? "Codex" : "Claude"} · {entry.model || "模型未知"} · {entry.scope === "global" ? "系统全局 · 点击后导入" : (config.profiles.find((profile) => profile.id === entry.profile_id)?.name ?? (entry.profile_name || "来源配置未知"))} · {new Date(entry.updated_at * 1000).toLocaleString()}</small>
+                    {entry.preview && <small>{entry.preview}</small>}
                     <small title={entry.workspace}>{entry.workspace || "项目目录未知"}</small>
                   </button>
                 ))}
@@ -741,6 +859,16 @@ function TerminalPane({
   }, [register, session.id, session.title, session.workspace, unregister]);
 
   return <div className={`terminal-pane ${active ? "visible" : "hidden"}`} ref={host} aria-hidden={!active} />;
+}
+
+function shellQuotePowerShell(path: string): string {
+  return `'${path.replace(/'/g, "''")}'`;
+}
+
+function isNativeTauri(): boolean {
+  return isTauri()
+    && typeof window !== "undefined"
+    && "__TAURI_INTERNALS__" in window;
 }
 
 function ProfileDialog({

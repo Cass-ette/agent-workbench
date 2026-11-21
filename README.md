@@ -38,7 +38,7 @@ The repository includes a separate [optional CCHP deployment template](deploymen
 
 ## Features
 
-- Save multiple gateway keys and their gateway URLs separately; changing one profile does not retarget the others.
+- Save multiple gateway keys and their gateway URLs separately; remove custom key profiles from the sidebar when no longer needed. Removing a profile also deletes its local read-only billing token while preserving conversation history; the built-in free profile cannot be removed.
 - Remember the selected profile, model, workspace, and session mode.
 - After the first task starts, the setup area collapses into a compact task context bar so the running agents remain the focus; expand it only when creating the next task.
 - Choose a recent or new working directory and start a new, continued, or resumed Claude session.

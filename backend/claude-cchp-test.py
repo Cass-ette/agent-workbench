@@ -216,6 +216,45 @@ def add_profile_from_stdin():
                       "model_count": profile["model_count"]}, ensure_ascii=False))
 
 
+def remove_profile_key(profile_id):
+    if profile_id == "free" or not isinstance(profile_id, str) or not profile_id.startswith("p-"):
+        raise RuntimeError("默认免费配置不能删除。")
+    if Path(profile_id).name != profile_id or ".." in profile_id:
+        raise RuntimeError("调用配置标识无效。")
+    if PROFILE_INDEX.is_symlink() or not PROFILE_INDEX.is_file():
+        raise RuntimeError("找不到本机调用配置索引，未删除任何文件。")
+    index = json.loads(PROFILE_INDEX.read_text(encoding="utf-8"))
+    if not isinstance(index, dict) or profile_id not in index:
+        raise RuntimeError("找不到这把调用 Key；请刷新列表。")
+    if KEY_DIR.is_symlink():
+        raise RuntimeError("Key 目录是符号链接，已停止删除。")
+
+    key_path = KEY_DIR / (profile_id + ".key")
+    if key_path.is_symlink():
+        raise RuntimeError("本机 Key 文件是符号链接，已停止删除。")
+    if not key_path.is_file():
+        raise RuntimeError("本机 Key 文件不存在或不是普通文件，已停止删除。")
+    billing_dir = TEST_ROOT / "billing"
+    if billing_dir.is_symlink():
+        raise RuntimeError("账单目录是符号链接，已停止删除。")
+    billing_paths = [billing_dir / (profile_id + ".json"),
+                     billing_dir / (profile_id + ".json.bak")]
+    for path in billing_paths:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise RuntimeError("关联的账单凭据不是普通文件，已停止删除。")
+
+    name = index.pop(profile_id)
+    if isinstance(name, dict):
+        name = name.get("name", "未知配置")
+    if not isinstance(name, str):
+        name = "未知配置"
+    for path in billing_paths:
+        path.unlink(missing_ok=True)
+    key_path.unlink()
+    private_write(PROFILE_INDEX, json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({"id": profile_id, "name": name, "removed": True}, ensure_ascii=False))
+
+
 def gui_state():
     prepare_isolated_config()
     print(json.dumps({
@@ -1028,7 +1067,7 @@ def main():
         "profile-account", "profile-billing", "billing-settings", "save-billing-stdin", "remove-billing",
         "profile-pricing", "save-pricing-source-stdin",
         "gui-state", "history-list", "history-list-global", "history-launch", "history-import-launch", "history-resume-original",
-        "profile-models", "add-profile-stdin", "set-gateway-stdin",
+        "profile-models", "add-profile-stdin", "remove-profile", "set-gateway-stdin",
         "set-profile-gateway-stdin", "launch", "codex-launch",
     ])
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -1080,6 +1119,9 @@ def main():
         if not arguments.profile_id: raise RuntimeError("缺少 profile-id。")
         profile_models(arguments.profile_id, arguments.gateway_url); return 0
     if arguments.action == "add-profile-stdin": add_profile_from_stdin(); return 0
+    if arguments.action == "remove-profile":
+        if not arguments.profile_id: raise RuntimeError("缺少 profile-id。")
+        remove_profile_key(arguments.profile_id); return 0
     if arguments.action == "set-gateway-stdin": set_gateway_from_stdin(); return 0
     if arguments.action == "set-profile-gateway-stdin":
         if not arguments.profile_id: raise RuntimeError("缺少 profile-id。")

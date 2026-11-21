@@ -139,6 +139,12 @@ private struct AddedProfile: Decodable {
     let model_count: Int
 }
 
+private struct RemovedProfile: Decodable {
+    let id: String
+    let name: String
+    let removed: Bool
+}
+
 private struct GatewayUpdateResponse: Decodable {
     let gateway: String
 }
@@ -385,6 +391,7 @@ final class ManagerModel: ObservableObject {
     @Published var isSavingGateway = false
     @Published var isAddProfilePresented = false
     @Published var isAddingProfile = false
+    @Published var isDeletingProfile = false
     @Published var isRestoreConfirmationPresented = false
     @Published private(set) var isFindingRecentSession = false
     @Published var isHistoryPresented = false
@@ -777,6 +784,48 @@ final class ManagerModel: ObservableObject {
             addProfileStatus = ""
             isAddingProfile = false
             return false
+        }
+    }
+
+    func deleteProfile(_ profile: KeyProfile) async {
+        guard profile.id != "free", !isDeletingProfile, let backend else { return }
+        isDeletingProfile = true
+        defer { isDeletingProfile = false }
+        let activeSessions = terminalSessions.filter { $0.isRunning && $0.profileID == profile.id }.count
+        do {
+            let data = try await backend.run(["remove-profile", "--profile-id", profile.id])
+            let result = try JSONDecoder().decode(RemovedProfile.self, from: data)
+            guard result.removed, result.id == profile.id else {
+                throw BackendError(message: "本机没有确认删除这把 Key。")
+            }
+            try await refreshProfiles()
+            favoriteKeys = favoriteKeys.filter {
+                !$0.hasPrefix("claude|\(profile.id)|") && !$0.hasPrefix("codex|\(profile.id)|")
+            }
+            UserDefaults.standard.set(Array(favoriteKeys).sorted(), forKey: "models.favorite")
+            if billingSettingsProfileID == profile.id {
+                isBillingSettingsPresented = false
+                billingTokenDraft = ""
+                hasBillingToken = false
+            }
+            if selectedProfileID == profile.id {
+                selectedProfileID = profiles.first?.id ?? ""
+                selectedModel = ""
+                gateway = selectedProfile?.gateway ?? defaultGateway
+                models = []
+                resetGatewayUsage()
+                if !selectedProfileID.isEmpty {
+                    await loadModels(for: selectedProfileID)
+                    await refreshGatewayUsage()
+                }
+            }
+            let runningNotice = activeSessions == 0
+                ? ""
+                : " 已启动的 \(activeSessions) 个终端仍可能持有该 Key，结束终端后凭据才会从进程中释放。"
+            statusMessage = "已删除调用配置「\(result.name)」及其本机 Key 和账单 Token；历史对话已保留。\(runningNotice)"
+            isStatusError = false
+        } catch {
+            setError(error.localizedDescription)
         }
     }
 

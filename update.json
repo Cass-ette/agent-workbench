@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "notes": "测试版（Pre-release），可下载安装，尚未经维护者确认为正式版。\n\n本次为三端测试版，可以下载安装。覆盖升级保留配置、Key 与对话历史。\n\n- macOS、Windows 和 Android 优先读取固定更新清单。GitHub API 仅作为备用，检查失败会显示原因。`0.x.y` 显示为测试版，`1.0.0` 起显示为正式版，两者都可以通过应用下载安装。旧客户端如果仍找不到此次更新，可从本页手动覆盖安装一次。\n- macOS 和 Windows 的左侧「恢复最近对话」可以浏览所有项目的最近对话，也可展开目录树查找。点击对话即用原配置恢复。\n- 右侧「恢复最近对话」只看当前项目与客户端。「从历史创建分支」会用当前选定的配置创建独立会话。桌面启动方式显示为「工作台配置」或「系统 CLI」。\n- Android 的 Debian 支持跨项目查找和在项目内恢复、创建分支。Linux VM 可恢复虚拟机里当前配置的历史。SSH 使用电脑上的历史。\n- Mac 和 Windows 增加「手机连接」。Android 粘贴连接码后可打开 SSH 终端，首次登录时可由应用记住手机。电脑需开启系统 SSH 服务。异地连接可用 Tailscale 或可达的公网地址。\n\nWindows 默认管理员账号使用密码登录。Windows 安装包尚未使用商业代码签名，Android 测试包使用固定开发签名。\n\n\n源码提交：9e84040ade457647044df570a647f11e0a54a8ec",
+  "packages": [
+    {
+      "platform": "macos",
+      "arch": "universal",
+      "channel": "preview",
+      "version": "0.1.16",
+      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-44914750160-1/Agent-Workbench-macos-universal-0.1.16.zip",
+      "size": 5785540,
+      "sha256": "0f0e3d8c8bb2399374a19eb95a5f91244f8217b23d9fce0fff1bed0a040a6e65"
+    },
+    {
+      "platform": "windows",
+      "arch": "x64",
+      "channel": "preview",
+      "version": "0.1.18",
+      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-44914750160-1/Agent-Workbench-windows-x64-0.1.18-setup.exe",
+      "size": 2619209,
+      "sha256": "03d27fc6be1812b69c592eee8131441a6b7f588054f0da69caeb2a3d8a66eefe"
+    },
+    {
+      "platform": "android",
+      "arch": "universal",
+      "channel": "preview",
+      "version": "0.1.33",
+      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-44914750160-1/Agent-Workbench-android-universal-0.1.33.apk",
+      "size": 9091792,
+      "sha256": "0044aec9a8240078387848c4a3facf188415723869950027d97468d2fdd74b3f",
+      "build": 35,
+      "signing": "development"
+    }
+  ]
+}

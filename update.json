@@ -1,34 +1,34 @@
 {
   "schema": 1,
-  "notes": "测试版（Pre-release），可下载安装，尚未经维护者确认为正式版。\n\n本次为三端测试版，可以下载安装。覆盖升级保留配置、Key 与对话历史。\n\n- macOS 左侧调用配置现在可以删除自定义 Key；确认后同时删除该配置的本机 Key 和只读账单 Token，保留历史对话。默认免费配置不能删除；已有终端进程可能暂时仍持有已删除的 Key。\n- 修复 macOS 多标签终端中只有最后创建的标签能拖入文件的问题。后台标签不再抢占文件拖放，切回较早的 Codex 或 Claude 标签也能插入图片、文件路径。\n- Mac 左侧常驻「检查更新」入口，有更新时显示新版版本号；Windows 右上角继续提供常驻入口，无需在菜单中寻找。\n- macOS、Windows 和 Android 优先读取固定更新清单。GitHub API 仅作为备用，检查失败会显示原因。`0.x.y` 显示为测试版，`1.0.0` 起显示为正式版，两者都可以通过应用下载安装。旧客户端如果仍找不到此次更新，可从本页手动覆盖安装一次。\n- macOS 和 Windows 的左侧「恢复最近对话」可以浏览所有项目的最近对话，也可展开目录树查找。点击对话即用原配置恢复。\n- 右侧「恢复最近对话」只看当前项目与客户端。「从历史创建分支」会用当前选定的配置创建独立会话。桌面启动方式显示为「工作台配置」或「系统 CLI」。\n- Android 的 Debian 支持跨项目查找和在项目内恢复、创建分支。Linux VM 可恢复虚拟机里当前配置的历史。SSH 使用电脑上的历史。\n- Mac 和 Windows 增加「手机连接」。Android 粘贴连接码后可打开 SSH 终端，首次登录时可由应用记住手机。电脑需开启系统 SSH 服务。异地连接可用 Tailscale 或可达的公网地址。\n\nWindows 默认管理员账号使用密码登录。Windows 安装包尚未使用商业代码签名，Android 测试包使用固定开发签名。\n\n\n源码提交：1d06b30efc3c27698c86d1afa8960c53bfd73b52",
+  "notes": "测试版（Pre-release），可下载安装，尚未经维护者确认为正式版。\n\n本次为三端测试版，可以下载安装。覆盖升级保留配置、Key 与对话历史。\n\n- macOS 左侧调用配置现在可以删除自定义 Key；确认后同时删除该配置的本机 Key 和只读账单 Token，保留历史对话。默认免费配置不能删除；已有终端进程可能暂时仍持有已删除的 Key。\n- 修复 macOS 和 Windows 切换终端标签后拖放可能串到上一个对话的问题。拖进终端的文件路径只会插入当前选中的 Codex 或 Claude 对话。\n- Mac 左侧常驻「检查更新」入口，有更新时显示新版版本号；Windows 右上角继续提供常驻入口，无需在菜单中寻找。\n- macOS、Windows 和 Android 优先读取固定更新清单。GitHub API 仅作为备用，检查失败会显示原因。`0.x.y` 显示为测试版，`1.0.0` 起显示为正式版，两者都可以通过应用下载安装。旧客户端如果仍找不到此次更新，可从本页手动覆盖安装一次。\n- macOS 和 Windows 的左侧「恢复最近对话」可以浏览所有项目的最近对话，也可展开目录树查找。点击对话即用原配置恢复。\n- 右侧「恢复最近对话」只看当前项目与客户端。「从历史创建分支」会用当前选定的配置创建独立会话。桌面启动方式显示为「工作台配置」或「系统 CLI」。\n- Android 的 Debian 支持跨项目查找和在项目内恢复、创建分支。Linux VM 可恢复虚拟机里当前配置的历史。SSH 使用电脑上的历史。\n- Mac 和 Windows 增加「手机连接」。Android 粘贴连接码后可打开 SSH 终端，首次登录时可由应用记住手机。电脑需开启系统 SSH 服务。异地连接可用 Tailscale 或可达的公网地址。\n\nWindows 默认管理员账号使用密码登录。Windows 安装包尚未使用商业代码签名，Android 测试包使用固定开发签名。\n\n\n源码提交：9d7d1d87b4674d0fedc2e5ea32488454eec8d994",
   "packages": [
     {
       "platform": "macos",
       "arch": "universal",
       "channel": "preview",
-      "version": "0.1.18",
-      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-44922203428-1/Agent-Workbench-macos-universal-0.1.18.zip",
-      "size": 5834835,
-      "sha256": "73d5fca637348a3cd9e1ac4ed1203d8cf655d171323ee8ef093ce4bc65688505"
+      "version": "0.1.19",
+      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-44925313478-1/Agent-Workbench-macos-universal-0.1.19.zip",
+      "size": 5836666,
+      "sha256": "4be4bfe70b3b32a09e6a5bcf55212088345f7a8bff8bb84ca9b19e3eae4f1397"
     },
     {
       "platform": "windows",
       "arch": "x64",
       "channel": "preview",
-      "version": "0.1.20",
-      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-44922203428-1/Agent-Workbench-windows-x64-0.1.20-setup.exe",
-      "size": 2618564,
-      "sha256": "dd2f4059d0003c3037c95096b0fa328740c66eeef0935b3e065d48b0d8faee27"
+      "version": "0.1.21",
+      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-44925313478-1/Agent-Workbench-windows-x64-0.1.21-setup.exe",
+      "size": 2618918,
+      "sha256": "087db27cbb7761e6aec5fb5c28a413014f11e20315370a06241dd99ba9c4f9af"
     },
     {
       "platform": "android",
       "arch": "universal",
       "channel": "preview",
-      "version": "0.1.35",
-      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-44922203428-1/Agent-Workbench-android-universal-0.1.35.apk",
-      "size": 9091832,
-      "sha256": "0510daca12f5195b59ae7d6a0e313284d299f328d938dea2acdc1382326f8494",
-      "build": 37,
+      "version": "0.1.36",
+      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-44925313478-1/Agent-Workbench-android-universal-0.1.36.apk",
+      "size": 9091952,
+      "sha256": "838211a8723112927152a07cbc6eee1e2ba6ba259598def0c0767928efb0685b",
+      "build": 38,
       "signing": "development"
     }
   ]

@@ -87,6 +87,7 @@ interface Session extends TerminalInfo {
   profileName: string;
   mode: SessionMode;
   exitCode: number | null;
+  originalHistoryRef?: string;
 }
 
 interface TerminalOutput {
@@ -133,6 +134,9 @@ function App() {
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const currentSessionId = useRef("");
   const [isStarting, setIsStarting] = useState(false);
+  const starting = useRef(false);
+  const closing = useRef(new Map<string, Promise<boolean>>());
+  const [closingIds, setClosingIds] = useState<string[]>([]);
   const [showProfileDialog, setShowProfileDialog] = useState(false);
   const [terminalFullscreen, setTerminalFullscreen] = useState(false);
   const [notice, setNotice] = useState("");
@@ -143,6 +147,7 @@ function App() {
   const usageBusy = useRef(false);
   const terminalRefs = useRef(new Map<string, Terminal>());
   const pendingOutput = useRef(new Map<string, Uint8Array[]>());
+  const pendingExits = useRef(new Map<string, number>());
 
   const selectedProfile = useMemo(
     () => config.profiles.find((profile) => profile.id === config.selected_profile_id),
@@ -218,7 +223,14 @@ function App() {
     });
     listen<TerminalExit>("terminal-exit", (event) => {
       const { session_id, exit_code } = event.payload;
-      setSessions((current) => current.map((session) => session.id === session_id ? { ...session, exitCode: exit_code ?? 0 } : session));
+      if (starting.current) pendingExits.current.set(session_id, exit_code ?? 1);
+      setSessions((current) => current.map((session) => session.id === session_id ? { ...session, exitCode: exit_code ?? 1 } : session));
+    }).then((unlisten) => {
+      if (cancelled) unlisten();
+      else unlisteners.push(unlisten);
+    });
+    listen<{ session_id: string; error: string }>("terminal-stop-error", (event) => {
+      setError(event.payload.error);
     }).then((unlisten) => {
       if (cancelled) unlisten();
       else unlisteners.push(unlisten);
@@ -361,7 +373,7 @@ function App() {
   }
 
   async function startSession(mode: SessionMode = sessionMode, original?: LocalConversation) {
-    if (isStarting) return;
+    if (starting.current) return;
     if (!original && !canStart) return;
     if (!original && launchScope === "system") {
       return startGlobalSession(config.client as ClientKind);
@@ -379,8 +391,21 @@ function App() {
     const profileName = original
       ? (original.scope === "global" ? "系统 CLI" : config.profiles.find((profile) => profile.id === original.profile_id)?.name ?? original.profile_name)
       : selectedProfile?.name ?? "";
+    const existing = original && sessions.find((session) =>
+      session.originalHistoryRef === original.history_ref && session.exitCode === null);
+    if (existing) {
+      const closingSession = closing.current.get(existing.id);
+      if (!closingSession) {
+        selectSession(existing.id);
+        setError("");
+        setNotice("已切回正在运行的对话。");
+        return;
+      }
+      if (!await closingSession || starting.current) return;
+    }
     setError("");
     setNotice("");
+    starting.current = true;
     setIsStarting(true);
     try {
       const info = await invoke<TerminalInfo>("start_terminal", {
@@ -402,11 +427,12 @@ function App() {
         model,
         profileName,
         mode,
-        exitCode: null,
+        exitCode: pendingExits.current.get(info.id) ?? null,
+        originalHistoryRef: original?.history_ref,
       };
       setSessions((current) => [...current, session]);
       selectSession(info.id);
-      setNotice(source
+      if (session.exitCode === null) setNotice(source
         ? original ? `已用原配置恢复「${source.title}」。` : `已从「${source.title}」创建分支。`
         : `${client === "codex" ? "Codex" : "Claude Code"} 已在独立终端中启动。`);
       if (source && !original) {
@@ -416,14 +442,17 @@ function App() {
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
+      starting.current = false;
+      pendingExits.current.clear();
       setIsStarting(false);
     }
   }
 
   async function startGlobalSession(client: ClientKind) {
-    if (!config.workspace) return;
+    if (starting.current || !config.workspace) return;
     setError("");
     setNotice("");
+    starting.current = true;
     setIsStarting(true);
     try {
       const info = await invoke<TerminalInfo>("start_global_terminal", {
@@ -436,14 +465,16 @@ function App() {
         model: "系统配置",
         profileName: "系统全局",
         mode: "new",
-        exitCode: null,
+        exitCode: pendingExits.current.get(info.id) ?? null,
       };
       setSessions((current) => [...current, session]);
       selectSession(info.id);
-      setNotice(`已启动系统全局 ${client === "codex" ? "Codex" : "Claude Code"}；沿用系统配置，不会修改工作台配置。`);
+      if (session.exitCode === null) setNotice(`已启动系统全局 ${client === "codex" ? "Codex" : "Claude Code"}；沿用系统配置，不会修改工作台配置。`);
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
+      starting.current = false;
+      pendingExits.current.clear();
       setIsStarting(false);
     }
   }
@@ -500,14 +531,27 @@ function App() {
   }
 
   async function closeSession(session: Session) {
-    if (isTauri() && session.exitCode === null) {
-      await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
-    }
-    setSessions((current) => current.filter((item) => item.id !== session.id));
-    if (currentSessionId.current === session.id) selectSession("");
-    terminalRefs.current.get(session.id)?.dispose();
-    terminalRefs.current.delete(session.id);
-    pendingOutput.current.delete(session.id);
+    if (closing.current.has(session.id)) return;
+    setError("");
+    setClosingIds((ids) => [...ids, session.id]);
+    const completion = (async () => {
+      try {
+        if (isTauri() && session.exitCode === null) {
+          await invoke("stop_terminal", { sessionId: session.id });
+        }
+        setSessions((current) => current.filter((item) => item.id !== session.id));
+        if (currentSessionId.current === session.id) selectSession("");
+        pendingOutput.current.delete(session.id);
+        return true;
+      } catch (cause) {
+        setError("关闭终端失败：" + errorMessage(cause));
+        return false;
+      }
+    })();
+    closing.current.set(session.id, completion);
+    await completion;
+    closing.current.delete(session.id);
+    setClosingIds((ids) => ids.filter((id) => id !== session.id));
   }
 
   async function removeProfile(profile: KeyProfile) {
@@ -708,7 +752,7 @@ function App() {
               </div>
               <div className="terminal-toolbar-actions">
                 {activeSession && activeSession.exitCode === null && (
-                  <button className="icon-button stop-button" title="停止并关闭此终端" onClick={() => closeSession(activeSession)}><Square size={13} fill="currentColor" /></button>
+                  <button className="icon-button stop-button" title="停止并关闭此终端" disabled={closingIds.includes(activeSession.id)} onClick={() => closeSession(activeSession)}><Square size={13} fill="currentColor" /></button>
                 )}
                 <button className="icon-button fullscreen-button" title={terminalFullscreen ? "退出终端全屏" : "终端全屏"} onClick={() => setTerminalFullscreen((value) => !value)}>
                   {terminalFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
@@ -728,7 +772,7 @@ function App() {
                         <small>{pathBasename(session.workspace)} · {session.model}</small>
                       </span>
                     </button>
-                    <button className="tab-close" title="关闭会话标签" onClick={() => closeSession(session)}><X size={13} /></button>
+                    <button className="tab-close" title={closingIds.includes(session.id) ? "正在关闭…" : "关闭会话标签"} disabled={closingIds.includes(session.id)} onClick={() => closeSession(session)}><X size={13} /></button>
                   </div>
                 ))}
               </div>
@@ -757,7 +801,7 @@ function App() {
 
           <footer className="statusbar">
             <div className={`status-message ${error ? "error" : ""}`}>
-              <span className="status-dot" />{error || notice || (loaded ? "就绪" : "正在读取本机配置…")}
+              <span className="status-dot" />{error || (closingIds.length > 0 ? "正在关闭终端…" : activeSession?.exitCode ? "终端退出码 " + activeSession.exitCode : notice) || (loaded ? "就绪" : "正在读取本机配置…")}
             </div>
             {launchScope === "workbench" && <UsageStatus usage={usage} error={usageError} busy={isLoadingUsage} refresh={() => void refreshUsage()} profileId={config.selected_profile_id} />}
             <span className="config-location">{configPath ? `配置文件 · ${configPath}` : "本机配置"}</span>

@@ -109,7 +109,7 @@ struct ExitNotice {
 }
 
 struct TerminalHandle {
-    writer: Mutex<Box<dyn Write + Send>>,
+    writer: Mutex<Option<Box<dyn Write + Send>>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     #[cfg(windows)]
     job: Mutex<terminal_job::TerminalJob>,
@@ -821,7 +821,7 @@ fn launch_terminal(
 
     let reader_id = id.clone();
     let reader_app = app.clone();
-    let output = thread::spawn(move || stream_terminal(reader, reader_app, reader_id));
+    thread::spawn(move || stream_terminal(reader, reader_app, reader_id));
     thread::spawn(move || {
         let exit_code = child.wait().ok().map(|status| status.exit_code());
         #[cfg(windows)]
@@ -830,14 +830,13 @@ fn launch_terminal(
             let _ = app.emit("terminal-stop-error", StopError { session_id: id, error });
             return;
         }
-        handle.close_pty();
-        let _ = output.join();
         if let Some(state) = app.try_state::<AppState>() {
             if let Ok(mut terminals) = state.terminals.lock() {
                 terminals.remove(&id);
             }
         }
         let _ = app.emit("terminal-exit", ExitNotice { session_id: id, exit_code });
+        handle.close_pty();
     });
     Ok(info)
 }
@@ -851,10 +850,24 @@ struct StopError {
 
 impl TerminalHandle {
     fn close_pty(&self) {
-        // ClosePseudoConsole can flush output synchronously. The reader remains active.
+        // Close input before closing ConPTY. Its output is drained on a separate thread.
+        drop(self.writer.lock().ok().and_then(|mut writer| writer.take()));
         let master = self.master.lock().ok().and_then(|mut master| master.take());
         drop(master);
     }
+}
+
+fn terminal_script(mut script: String, command: &str, load_profiles: bool, keep_shell: bool) -> String {
+    if load_profiles {
+        // Apply profiles in PowerShell's normal order after the process is assigned to its job.
+        script.push_str("foreach ($workbenchProfile in @($PROFILE.AllUsersAllHosts, $PROFILE.AllUsersCurrentHost, $PROFILE.CurrentUserAllHosts, $PROFILE.CurrentUserCurrentHost)) { if ([IO.File]::Exists($workbenchProfile)) { . $workbenchProfile } }; Remove-Variable workbenchProfile -ErrorAction SilentlyContinue; ");
+    }
+    script.push_str("chcp 65001 > $null; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $env:TERM = 'xterm-256color'; $env:COLORTERM = 'truecolor'; ");
+    script.push_str(command);
+    if !keep_shell {
+        script.push_str(&format!("; $workbenchExitCode = {POWERSHELL_EXIT_CODE}; exit $workbenchExitCode"));
+    }
+    script
 }
 
 type TerminalReader = Box<dyn Read + Send>;
@@ -869,22 +882,14 @@ fn spawn_terminal(
     #[cfg(windows)]
     let job = terminal_job::TerminalJob::new().map_err(|error| format!("创建终端进程组失败：{error}"))?;
     #[cfg(windows)]
-    let mut script = job.startup_script();
+    let startup = job.startup_script();
     #[cfg(not(windows))]
-    let mut script = String::new();
+    let startup = String::new();
     shell.args(["-NoLogo", "-NoProfile"]);
     if keep_shell {
         shell.arg("-NoExit");
     }
-    if load_profiles {
-        // Apply profiles in PowerShell's normal order after the process is assigned to its job.
-        script.push_str("foreach ($workbenchProfile in @($PROFILE.AllUsersAllHosts, $PROFILE.AllUsersCurrentHost, $PROFILE.CurrentUserAllHosts, $PROFILE.CurrentUserCurrentHost)) { if ([IO.File]::Exists($workbenchProfile)) { . $workbenchProfile } }; Remove-Variable workbenchProfile -ErrorAction SilentlyContinue; ");
-    }
-    script.push_str("chcp 65001 > $null; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $env:TERM = 'xterm-256color'; $env:COLORTERM = 'truecolor'; ");
-    script.push_str(command);
-    if !keep_shell {
-        script.push_str(&format!("; $workbenchExitCode = {POWERSHELL_EXIT_CODE}; exit $workbenchExitCode"));
-    }
+    let script = terminal_script(startup, command, load_profiles, keep_shell);
     shell.args(["-Command", &script]);
     let system = native_pty_system();
     let pair = system
@@ -903,7 +908,7 @@ fn spawn_terminal(
     }
     drop(pair.slave);
     let handle = TerminalHandle {
-        writer: Mutex::new(writer),
+        writer: Mutex::new(Some(writer)),
         master: Mutex::new(Some(pair.master)),
         #[cfg(windows)]
         job: Mutex::new(job),
@@ -950,6 +955,8 @@ fn write_terminal(
         .ok_or("终端会话不存在")?;
     let mut writer = handle.writer.lock().map_err(|_| "终端输入锁异常")?;
     writer
+        .as_mut()
+        .ok_or("终端已退出")?
         .write_all(&data)
         .map_err(|error| format!("写入终端失败：{error}"))
 }
@@ -992,12 +999,13 @@ async fn stop_terminal(session_id: String, state: State<'_, AppState>) -> Result
         .get(&session_id)
         .cloned();
     let Some(handle) = handle else { return Ok(()); };
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        handle.stop()?;
-        handle.close_pty();
-        Ok(())
-    }).await.map_err(|error| format!("停止终端失败：{error}"))??;
+    let stop_handle = Arc::clone(&handle);
+    tauri::async_runtime::spawn_blocking(move || stop_handle.stop())
+        .await.map_err(|error| format!("停止终端失败：{error}"))??;
     state.terminals.lock().map_err(|_| "终端会话锁异常")?.remove(&session_id);
+    // Release ConPTY independently of the process tree. Windows can block here while
+    // flushing output; a restart of the same conversation only depends on the job.
+    thread::spawn(move || handle.close_pty());
     Ok(())
 }
 
@@ -1046,69 +1054,63 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn closing_terminal_releases_exclusive_file_held_by_child() {
-        use super::{CommandBuilder, spawn_terminal};
-        use std::{fs, io, thread, time::{Duration, Instant}};
+        use super::terminal_job::TerminalJob;
+        use std::{fs, process::Command, thread, time::{Duration, Instant}};
 
         let dir = std::env::temp_dir().join(format!("workbench-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
         let lock = dir.join("session.lock");
         let ready = dir.join("ready");
         fs::write(&lock, b"test").unwrap();
-        let mut shell = CommandBuilder::new("powershell.exe");
-        shell.env("WORKBENCH_TEST_LOCK", &lock);
-        shell.env("WORKBENCH_TEST_READY", &ready);
-        let (terminal, mut output, mut parent) = spawn_terminal(
-            shell,
-            r#"Start-Process -FilePath powershell.exe -NoNewWindow -ArgumentList '-NoProfile -Command "$f = [IO.File]::Open($env:WORKBENCH_TEST_LOCK, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); [IO.File]::WriteAllText($env:WORKBENCH_TEST_READY, [string]$PID); Start-Sleep -Seconds 90"'"#,
-            false,
-            true,
-        ).unwrap();
-        let drain = thread::spawn(move || {
-            let mut output_bytes = Vec::new();
-            let _ = io::copy(&mut output, &mut output_bytes);
-            String::from_utf8_lossy(&output_bytes).into_owned()
-        });
+        let job = TerminalJob::new().unwrap();
+        let script = job.startup_script() + r#"
+            Start-Process -FilePath powershell.exe -NoNewWindow -ArgumentList '-NoProfile -Command "$f = [IO.File]::Open($env:WORKBENCH_TEST_LOCK, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); [IO.File]::WriteAllText($env:WORKBENCH_TEST_READY, [string]$PID); Start-Sleep -Seconds 90"'
+            Start-Sleep -Seconds 90
+        "#;
+        let mut parent = Command::new("powershell.exe")
+            .env("WORKBENCH_TEST_LOCK", &lock)
+            .env("WORKBENCH_TEST_READY", &ready)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .spawn()
+            .unwrap();
+        job.attach(&parent).unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(15);
         while !ready.exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(25));
         }
         let child_held_lock = ready.exists() && fs::read(&lock).is_err();
-        terminal.stop().unwrap();
+        job.terminate_and_wait().unwrap();
         let released = fs::read(&lock);
-        terminal.close_pty();
         parent.wait().unwrap();
-        let output = drain.join().unwrap();
         fs::remove_dir_all(dir).unwrap();
 
-        assert!(child_held_lock, "child never acquired the exclusive file: {output}");
+        assert!(child_held_lock, "child never acquired the exclusive file");
         assert_eq!(released.unwrap(), b"test");
     }
 
     #[cfg(windows)]
     #[test]
     fn failed_restore_exits_with_the_cli_status() {
-        use super::{CommandBuilder, spawn_terminal};
-        use std::{io, thread, time::{Duration, Instant}};
+        use super::{terminal_job::TerminalJob, terminal_script};
+        use std::{process::Command, thread, time::{Duration, Instant}};
 
-        let (terminal, mut output, mut child) = spawn_terminal(
-            CommandBuilder::new("powershell.exe"),
-            "cmd.exe /d /c exit 37",
-            false,
-            false,
-        ).unwrap();
-        let drain = thread::spawn(move || { let _ = io::copy(&mut output, &mut io::sink()); });
+        let job = TerminalJob::new().unwrap();
+        let script = terminal_script(job.startup_script(), "cmd.exe /d /c exit 37", false, false);
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .spawn()
+            .unwrap();
+        job.attach(&child).unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
         let code = loop {
             if let Some(status) = child.try_wait().unwrap() {
-                break Some(status.exit_code());
+                break status.code();
             }
             if Instant::now() >= deadline { break None; }
             thread::sleep(Duration::from_millis(25));
         };
-        terminal.stop().unwrap();
-        terminal.close_pty();
-        drain.join().unwrap();
+        job.terminate_and_wait().unwrap();
         assert_eq!(code, Some(37));
     }
 

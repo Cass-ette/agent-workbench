@@ -76,8 +76,18 @@ class UpdateManifestTests(unittest.TestCase):
         data["variantName"] = "release"
         metadata.write_text(json.dumps(data))
         manifest = MANIFEST.build_manifest(self.artifacts, "stable notes", "workbench-v0.1.2", self.output, "stable")
-        self.assertTrue(all(p["channel"] == "stable" for p in manifest["packages"]))
+        self.assertTrue(all(p["channel"] == "preview" for p in manifest["packages"]))
         self.assertEqual(manifest["packages"][-1]["signing"], "release")
+
+    def test_version_controls_status_even_when_release_mode_differs(self):
+        info_path = self.artifacts / "macos-agent-workbench" / "Agent-Workbench-macOS-universal.zip"
+        with zipfile.ZipFile(info_path, "w") as archive:
+            archive.writestr("CCHP Model Manager.app/Contents/Info.plist", plistlib.dumps({
+                "CFBundleIdentifier": "com.cassette.cchpmodelmanager", "CFBundleShortVersionString": "1.0.0",
+            }))
+        manifest = MANIFEST.build_manifest(self.artifacts, "notes", "workbench-preview-123-1", self.output)
+        self.assertEqual(manifest["packages"][0]["channel"], "stable")
+        self.assertEqual(manifest["packages"][1]["channel"], "preview")
 
     def test_rejects_invalid_release_tag_before_creating_output(self):
         with self.assertRaisesRegex(ValueError, "Release tag"):

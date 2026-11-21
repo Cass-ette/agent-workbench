@@ -33,7 +33,8 @@ import javax.net.ssl.HttpsURLConnection
 import kotlin.math.min
 
 private const val RELEASE_PAGE = "https://github.com/Cass-ette/claude-cchp-manager/releases"
-private const val RELEASE_FEED = "https://api.github.com/repos/Cass-ette/claude-cchp-manager/releases?per_page=20"
+internal const val UPDATE_MANIFEST = "https://raw.githubusercontent.com/Cass-ette/claude-cchp-manager/update-feed/update.json"
+internal const val RELEASE_FEED = "https://api.github.com/repos/Cass-ette/claude-cchp-manager/releases?per_page=20"
 private const val APK_MIME = "application/vnd.android.package-archive"
 private val CHECK_INTERVAL = 86_400_000L
 private val RETRY_INTERVAL = 1_800_000L
@@ -81,11 +82,10 @@ internal data class AndroidUpdateCandidate(
 internal fun selectAndroidUpdatePackage(
     packages: List<AndroidUpdateCandidate>,
     architectures: List<String>,
-    channel: String,
     signing: String,
 ): AndroidUpdateCandidate? {
     val candidates = packages.filter {
-        it.platform == "android" && it.channel == channel && it.signing == signing
+        it.platform == "android" && it.signing == signing
     }
     return (architectures + "universal").firstNotNullOfOrNull { architecture ->
         val matches = candidates.filter { it.arch == architecture }
@@ -98,7 +98,7 @@ internal data class WorkbenchReleaseAsset(val name: String, val url: String)
 internal data class WorkbenchRelease(
     val draft: Boolean, val prerelease: Boolean, val publishedAt: String?, val assets: List<WorkbenchReleaseAsset>,
 )
-internal data class ReleaseManifestSource(val url: String, val channel: String)
+internal data class ReleaseManifestSource(val url: String)
 
 internal fun selectReleaseManifest(releases: List<WorkbenchRelease>): ReleaseManifestSource? {
     for (release in releases.filter { !it.draft && it.publishedAt != null }.sortedByDescending { it.publishedAt }) {
@@ -107,16 +107,32 @@ internal fun selectReleaseManifest(releases: List<WorkbenchRelease>): ReleaseMan
         if (uri.scheme == "https" && uri.host == "github.com" && uri.rawUserInfo == null && uri.port == -1 &&
             uri.rawQuery == null && uri.rawFragment == null &&
             uri.path.startsWith("/Cass-ette/claude-cchp-manager/releases/download/") && uri.path.endsWith("/update.json")) {
-            return ReleaseManifestSource(asset.url, if (release.prerelease) "preview" else "stable")
+            return ReleaseManifestSource(asset.url)
         }
     }
     return null
 }
 
+// Read the fixed manifest before touching the anonymous GitHub API.
+internal fun <T> loadWorkbenchUpdate(
+    read: (String) -> String,
+    parse: (String) -> T,
+    selectFallback: (String) -> String,
+): T {
+    val primary = try { return parse(read(UPDATE_MANIFEST)) } catch (error: Exception) { error }
+    try {
+        return parse(read(selectFallback(read(RELEASE_FEED))))
+    } catch (error: Exception) {
+        throw IllegalStateException("固定更新清单：${primary.localizedMessage}\n备用发布列表：${error.localizedMessage}", error)
+    }
+}
+
+internal fun isPreviewVersion(version: String) = version.substringBefore('.') == "0"
+
 private object AndroidUpdateService {
-    fun lookup(): AndroidUpdate? {
-        val releases = JSONArray(readDocument(RELEASE_FEED))
-        val source = selectReleaseManifest((0 until releases.length()).map { index ->
+    fun lookup(): AndroidUpdate? = loadWorkbenchUpdate(::readDocument, ::parse) { data ->
+        val releases = JSONArray(data)
+        selectReleaseManifest((0 until releases.length()).map { index ->
             val release = releases.getJSONObject(index)
             val assets = release.getJSONArray("assets")
             WorkbenchRelease(release.getBoolean("draft"), release.getBoolean("prerelease"),
@@ -125,8 +141,11 @@ private object AndroidUpdateService {
                     val asset = assets.getJSONObject(i)
                     WorkbenchReleaseAsset(asset.getString("name"), asset.getString("browser_download_url"))
                 })
-        }) ?: error("发布页暂时没有完整更新包，可以稍后重试或手动下载。")
-        val document = JSONObject(readDocument(source.url))
+        })?.url ?: error("发布页暂时没有完整更新包。")
+    }
+
+    private fun parse(data: String): AndroidUpdate? {
+        val document = JSONObject(data)
         check(document.getInt("schema") == 1) { "无法识别发布清单版本。" }
         val packages = document.getJSONArray("packages")
         val signing = if (BuildConfig.DEBUG) "development" else "release"
@@ -137,7 +156,6 @@ private object AndroidUpdateService {
                     item.optString("arch"), item.optString("version"), item.optString("signing"))
             },
             Build.SUPPORTED_ABIS.toList(),
-            source.channel,
             signing,
         )?.let { packages.getJSONObject(it.index) }
             ?: error(if (BuildConfig.DEBUG) "此开发预览版暂无匹配的更新包。" else "发布清单没有适用于这台设备的安装包。")
@@ -251,7 +269,7 @@ class WorkbenchUpdates(private val application: Application) : AndroidViewModel(
     val ready get() = staged != null
     val nextVersion get() = selected?.version
     val notes get() = selected?.notes.orEmpty()
-    val isPreview get() = selected?.channel == "preview"
+    val isPreview get() = selected?.let { isPreviewVersion(it.version) } == true
 
     private val checkLoop = object : Runnable {
         override fun run() {
@@ -390,7 +408,7 @@ internal fun WorkbenchUpdateDialog(updates: WorkbenchUpdates, running: Int, busy
         title = { Text("工作台更新") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (updates.isPreview) Text("测试版 · 可下载安装，尚未确认为正式版")
+                if (updates.isPreview) Text("测试版 · 可下载安装")
                 Text("当前版本 ${BuildConfig.VERSION_NAME}" + (updates.nextVersion?.let { " · 新版本 $it" } ?: ""))
                 if (updates.nextVersion != null) Text(updates.notes.ifBlank { "此版本暂无更新说明。" })
                 if (updates.checking) LinearProgressIndicator(Modifier.fillMaxWidth())

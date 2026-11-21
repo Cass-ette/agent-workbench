@@ -55,9 +55,9 @@ it("有运行中的终端时不安装，安装包丢失时可以重新下载", a
 });
 
 it("测试版显示标记并允许下载", async () => {
-  invoke.mockResolvedValueOnce({ ...update, package: { ...update.package, channel: "preview" } });
+  invoke.mockResolvedValueOnce({ ...update, package: { ...update.package, version: "0.1.16", channel: "stable" } });
   render(<WorkbenchUpdate running={0} />);
-  fireEvent.click(await screen.findByRole("button", { name: "测试版 9.0.1" }));
-  expect(screen.getByText("测试版 · 可下载安装，尚未确认为正式版")).toBeTruthy();
+  fireEvent.click(await screen.findByRole("button", { name: "测试版 0.1.16" }));
+  expect(screen.getByText("测试版 · 可下载安装")).toBeTruthy();
   expect(screen.getByRole("button", { name: "下载更新" })).toBeTruthy();
 });

@@ -13,13 +13,17 @@ use std::{
 };
 use tauri::{AppHandle, Manager, State, ipc::Channel};
 
+const UPDATE_MANIFEST: &str =
+    "https://raw.githubusercontent.com/Cass-ette/claude-cchp-manager/update-feed/update.json";
+
 const RELEASE_FEED: &str =
     "https://api.github.com/repos/Cass-ette/claude-cchp-manager/releases?per_page=20";
 
 #[derive(Deserialize)]
 struct Release {
     draft: bool,
-    prerelease: bool,
+    #[serde(rename = "prerelease")]
+    _prerelease: bool,
     published_at: Option<String>,
     assets: Vec<ReleaseAsset>,
 }
@@ -45,7 +49,7 @@ fn trusted_release_url(address: &str) -> bool {
     })
 }
 
-fn select_manifest(mut releases: Vec<Release>) -> Option<(String, &'static str)> {
+fn select_manifest(mut releases: Vec<Release>) -> Option<String> {
     releases.retain(|r| !r.draft && r.published_at.is_some());
     releases.sort_by(|a, b| b.published_at.cmp(&a.published_at));
     for release in releases {
@@ -61,14 +65,7 @@ fn select_manifest(mut releases: Vec<Release>) -> Option<(String, &'static str)>
                 .path()
                 .ends_with("/update.json")
         {
-            return Some((
-                assets[0].browser_download_url.clone(),
-                if release.prerelease {
-                    "preview"
-                } else {
-                    "stable"
-                },
-            ));
+            return Some(assets[0].browser_download_url.clone());
         }
     }
     None
@@ -153,6 +150,7 @@ fn client() -> Result<Client, String> {
 async fn fetch(client: &Client, url: &str) -> Result<Response, String> {
     client
         .get(url)
+        .header("Cache-Control", "no-cache")
         .send()
         .await
         .and_then(Response::error_for_status)
@@ -179,27 +177,54 @@ async fn read_document(client: &Client, url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-async fn lookup(client: &Client, current: &str) -> Result<Option<Available>, String> {
-    let releases: Vec<Release> =
-        serde_json::from_slice(&read_document(client, RELEASE_FEED).await?)
+async fn load_update<F, Fut>(
+    current: &str,
+    arch: &str,
+    mut read: F,
+) -> Result<Option<Available>, String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
+{
+    let primary = match read(UPDATE_MANIFEST.into()).await {
+        Ok(bytes) => match parse_update(&bytes, current, arch) {
+            Ok(update) => return Ok(update),
+            Err(error) => error,
+        },
+        Err(error) => error,
+    };
+    let fallback = async {
+        let releases: Vec<Release> = serde_json::from_slice(&read(RELEASE_FEED.into()).await?)
             .map_err(|_| "无法识别发布列表。")?;
-    let (url, channel) =
-        select_manifest(releases).ok_or("发布页暂时没有完整更新包，可以稍后重试或手动下载。")?;
-    let bytes = read_document(client, &url).await?;
-    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| "无法识别发布清单。")?;
-    if manifest.schema != 1 {
-        return Err("无法识别发布清单版本。".into());
+        let url = select_manifest(releases).ok_or("发布页暂时没有完整更新包。")?;
+        parse_update(&read(url).await?, current, arch)
     }
+    .await;
+    fallback.map_err(|error: String| format!("固定更新清单：{primary}\n备用发布列表：{error}"))
+}
+
+async fn lookup(client: &Client, current: &str) -> Result<Option<Available>, String> {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x64",
         "aarch64" => "arm64",
         _ => return Err("当前系统架构暂无安装包。".into()),
     };
+    load_update(current, arch, |url| async move {
+        read_document(client, &url).await
+    })
+    .await
+}
+
+fn parse_update(bytes: &[u8], current: &str, arch: &str) -> Result<Option<Available>, String> {
+    let manifest: Manifest = serde_json::from_slice(bytes).map_err(|_| "无法识别发布清单。")?;
+    if manifest.schema != 1 {
+        return Err("无法识别发布清单版本。".into());
+    }
     let mut packages = manifest
         .packages
         .into_iter()
-        .filter(|p| p.platform == "windows" && p.arch == arch && p.channel == channel);
-    let package = packages
+        .filter(|p| p.platform == "windows" && p.arch == arch);
+    let mut package = packages
         .next()
         .ok_or("发布清单没有适用于这台电脑的安装包。")?;
     if packages.next().is_some() {
@@ -229,6 +254,7 @@ async fn lookup(client: &Client, current: &str) -> Result<Option<Available>, Str
     }
     let new = version(&package.version).ok_or("新版的版本号无效。")?;
     let old = version(current).ok_or("当前版本号无效。")?;
+    package.channel = if new[0] == 0 { "preview" } else { "stable" }.into();
     Ok((new > old).then_some(Available {
         package,
         notes: manifest.notes,
@@ -444,7 +470,7 @@ mod tests {
         fn release(date: &str, preview: bool, draft: bool, url: &str) -> Release {
             Release {
                 draft,
-                prerelease: preview,
+                _prerelease: preview,
                 published_at: Some(date.into()),
                 assets: vec![ReleaseAsset {
                     name: "update.json".into(),
@@ -459,14 +485,14 @@ mod tests {
                 release("2026-01-01", false, false, url),
                 release("2026-02-01", true, false, url)
             ]),
-            Some((url.into(), "preview"))
+            Some(url.into())
         );
         assert_eq!(
             select_manifest(vec![
                 release("2026-01-01", false, false, url),
                 release("2026-02-01", true, true, url)
             ]),
-            Some((url.into(), "stable"))
+            Some(url.into())
         );
         for bad in [
             url.replace("github.com", "example.com"),
@@ -476,6 +502,28 @@ mod tests {
             assert!(select_manifest(vec![release("2026-02-01", true, false, &bad)]).is_none());
         }
         assert!(select_manifest(vec![]).is_none());
+    }
+
+    #[test]
+    fn package_maturity_comes_from_version_not_release_metadata() {
+        let manifest = serde_json::json!({
+            "schema": 1,
+            "notes": "test",
+            "packages": [{
+                "platform": "windows",
+                "arch": "x64",
+                "channel": "stable",
+                "version": "0.2.0",
+                "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/test/app-setup.exe",
+                "size": 10,
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }]
+        });
+        let result = parse_update(&serde_json::to_vec(&manifest).unwrap(), "0.1.0", "x64")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.package.channel, "preview");
+        assert_eq!(result.package.version, "0.2.0");
     }
 
     #[test]

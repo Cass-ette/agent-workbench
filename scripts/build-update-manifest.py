@@ -41,7 +41,9 @@ def build_manifest(artifacts: Path, notes: str, tag: str, output: Path, channel:
                 digest.update(chunk)
         digest = digest.hexdigest()
         shutil.copyfile(source, output / name)
-        return dict(platform=platform, arch=arch, channel=channel, version=version,
+        # Release metadata does not determine product maturity or update eligibility.
+        status = "preview" if version.split(".")[0] == "0" else "stable"
+        return dict(platform=platform, arch=arch, channel=status, version=version,
                     url=f"{REPO}/releases/download/{tag}/{name}", size=size, sha256=digest, **extra)
 
     mac = one_file(artifacts / "macos-agent-workbench", "*.zip")

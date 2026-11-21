@@ -107,7 +107,7 @@ export function WorkbenchUpdate({ running }: { running: number }) {
     <button className="secondary-button update-entry" onClick={() => {
       setVisible(true);
       if (!available) void check(true);
-    }}>{available ? `${available.package.channel === "preview" ? "测试版" : "新版"} ${available.package.version}` : "检查更新"}</button>
+    }}>{available ? `${available.package.version.startsWith("0.") ? "测试版" : "新版"} ${available.package.version}` : "检查更新"}</button>
 
     {visible && (
       <div className="dialog-backdrop" onKeyDown={(event) => {
@@ -115,7 +115,7 @@ export function WorkbenchUpdate({ running }: { running: number }) {
       }}>
         <section className="profile-dialog update-dialog" role="dialog" aria-modal="true" aria-label="工作台更新">
           <h2>工作台更新</h2>
-          {available?.package.channel === "preview" && <p>测试版 · 可下载安装，尚未确认为正式版</p>}
+          {available?.package.version.startsWith("0.") && <p>测试版 · 可下载安装</p>}
           <p>当前版本 {version}{available && ` · 新版本 ${available.package.version}`}</p>
           {available && <div className="update-notes">{available.notes || "此版本暂无更新说明。"}</div>}
           {state === "downloading" && <progress aria-label="下载进度" max={100} value={progress} />}

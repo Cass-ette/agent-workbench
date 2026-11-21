@@ -160,3 +160,7 @@ jobs:
             --title "Agent Workbench 测试版 #${GITHUB_RUN_NUMBER}" --notes-file release-notes.md
           gh release upload "$RELEASE_TAG" release-assets/*
           gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+      - name: Publish fixed update feed after all release assets are public
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/publish-update-feed.py release-assets/update.json

@@ -88,6 +88,6 @@ Native Jetpack Compose implementation is under `android/`. It targets local Term
 
 ## 测试版与更新
 
-日常构建默认发布为 [GitHub 测试版（Pre-release）](https://github.com/Cass-ette/claude-cchp-manager/releases)，允许下载安装；只有维护者明确确认后才发布正式版。macOS、Windows、Android 的应用内更新会发现带完整清单的最新发布，并明确显示测试版标记。升级保留原用户目录中的配置、Key 和历史，安装由用户确认，不会在检查或下载时重启终端。
+日常构建发布到 [GitHub Releases](https://github.com/Cass-ette/claude-cchp-manager/releases)，允许下载安装。客户端按版本号显示成熟度：`0.x.y` 是测试版，`1.0.0` 起是正式版；GitHub 的 Pre-release / Latest 标签不控制更新发现。macOS、Windows、Android 优先读取固定更新清单，失败时回退 Release 清单。升级保留原用户目录中的配置、Key 和历史，安装由用户确认，不会在检查或下载时重启终端。
 
 旧客户端若无法发现测试版，请先从发布页手动覆盖安装一次。Android 必须使用与现有安装同签名的包。详见 [三端更新与发布](docs/updates.zh-CN.md)。

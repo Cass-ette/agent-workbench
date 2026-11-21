@@ -1,20 +1,30 @@
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import App from "../src/App";
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+const { invoke, onDragDropEvent } = vi.hoisted(() => ({ invoke: vi.fn(), onDragDropEvent: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
+vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent }) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
-vi.mock("@xterm/xterm", () => ({ Terminal: class {} }));
+vi.mock("@xterm/xterm", () => ({
+  Terminal: class {
+    loadAddon() {}
+    open() {}
+    onData() { return { dispose() {} }; }
+    writeln() {}
+    dispose() {}
+  },
+}));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class {} }));
 
 const models = Array.from({ length: 430 }, (_, index) => `test-model-${String(index + 1).padStart(3, "0")}`);
 
 beforeEach(() => {
   window.localStorage.clear();
+  onDragDropEvent.mockReset().mockResolvedValue(() => undefined);
   invoke.mockReset();
   invoke.mockImplementation(async (command: string) => {
     if (command === "load_app_state") {
@@ -35,7 +45,10 @@ beforeEach(() => {
   });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 async function openApp() {
   render(<StrictMode><App /></StrictMode>);
@@ -44,6 +57,37 @@ async function openApp() {
 }
 
 describe("工作会话配置", () => {
+  it("切回较早的对话时已注册的拖放回调立即使用新选中的终端", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    let nextId = 0;
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "start_terminal") {
+        return { id: String(++nextId), title: "Terminal", workspace: "C:\\test-project" };
+      }
+      return normalInvoke(command, args);
+    });
+    await openApp();
+    const drop = onDragDropEvent.mock.lastCall?.[0];
+    expect(drop).toBeTypeOf("function");
+
+    const addTab = screen.getByRole("button", { name: "新建会话" });
+    fireEvent.click(addTab);
+    await screen.findByRole("tab", { selected: true });
+    fireEvent.click(addTab);
+    await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(2));
+    const [first, second] = screen.getAllByRole("tab");
+    expect(second.getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(first);
+    const path = "C:\\test-project\\file name.png";
+    await act(async () => drop({ payload: { type: "drop", paths: [path] } }));
+    expect(invoke.mock.calls.filter(([command]) => command === "write_terminal")).toEqual([
+      ["write_terminal", { sessionId: "1", data: Array.from(new TextEncoder().encode(`'${path}' `)) }],
+    ]);
+    expect(onDragDropEvent).toHaveBeenCalledTimes(1);
+  });
+
   it("侧栏历史跨目录打开全部会话", async () => {
     const normalInvoke = invoke.getMockImplementation()!;
     invoke.mockImplementation(async (command: string, args: unknown) => {

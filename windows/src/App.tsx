@@ -131,6 +131,7 @@ function App() {
   const [selectedHistory, setSelectedHistory] = useState<LocalConversation | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState("");
+  const currentSessionId = useRef("");
   const [isStarting, setIsStarting] = useState(false);
   const [showProfileDialog, setShowProfileDialog] = useState(false);
   const [terminalFullscreen, setTerminalFullscreen] = useState(false);
@@ -161,6 +162,11 @@ function App() {
   const selectedModelOutsideFilter = !!config.model && !filteredModels.includes(config.model);
   const canStart = !!config.workspace && !isStarting
     && (launchScope === "system" || (!!selectedProfile && !!config.model));
+
+  function selectSession(id: string) {
+    currentSessionId.current = id;
+    setSelectedSessionId(id);
+  }
 
   useEffect(() => {
     window.localStorage.setItem("launchScope", launchScope);
@@ -228,10 +234,10 @@ function App() {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type !== "drop") return;
+      if (cancelled || event.payload.type !== "drop") return;
       const { paths } = event.payload;
       if (!paths.length) return;
-      const sessionId = selectedSessionId;
+      const sessionId = currentSessionId.current;
       if (!sessionId) {
         setNotice("请先启动一个 Codex 或 Claude 终端，再拖入文件。");
         return;
@@ -251,7 +257,7 @@ function App() {
       cancelled = true;
       unlisten?.();
     };
-  }, [loaded, selectedSessionId]);
+  }, [loaded]);
 
   const refreshUsage = useCallback(async () => {
     if (!isTauri() || usageBusy.current) return;
@@ -399,7 +405,7 @@ function App() {
         exitCode: null,
       };
       setSessions((current) => [...current, session]);
-      setSelectedSessionId(info.id);
+      selectSession(info.id);
       setNotice(source
         ? original ? `已用原配置恢复「${source.title}」。` : `已从「${source.title}」创建分支。`
         : `${client === "codex" ? "Codex" : "Claude Code"} 已在独立终端中启动。`);
@@ -433,7 +439,7 @@ function App() {
         exitCode: null,
       };
       setSessions((current) => [...current, session]);
-      setSelectedSessionId(info.id);
+      selectSession(info.id);
       setNotice(`已启动系统全局 ${client === "codex" ? "Codex" : "Claude Code"}；沿用系统配置，不会修改工作台配置。`);
     } catch (cause) {
       setError(errorMessage(cause));
@@ -498,7 +504,7 @@ function App() {
       await invoke("stop_terminal", { sessionId: session.id }).catch(() => undefined);
     }
     setSessions((current) => current.filter((item) => item.id !== session.id));
-    setSelectedSessionId((current) => current === session.id ? "" : current);
+    if (currentSessionId.current === session.id) selectSession("");
     terminalRefs.current.get(session.id)?.dispose();
     terminalRefs.current.delete(session.id);
     pendingOutput.current.delete(session.id);
@@ -715,7 +721,7 @@ function App() {
               <div className="terminal-tabs" role="tablist">
                 {sessions.map((session) => (
                   <div key={session.id} className={`terminal-tab ${session.id === selectedSessionId ? "active" : ""}`}>
-                    <button className="terminal-tab-select" role="tab" aria-selected={session.id === selectedSessionId} onClick={() => setSelectedSessionId(session.id)}>
+                    <button className="terminal-tab-select" role="tab" aria-selected={session.id === selectedSessionId} onClick={() => selectSession(session.id)}>
                       <span className={`tab-state ${session.exitCode === null ? "running" : "ended"}`} />
                       <span className="tab-label" title={`${session.title}\n${session.workspace}\n配置：${session.profileName}`}>
                         {session.client === "codex" ? "Codex" : "Claude Code"} · {modeLabel(session.mode)}

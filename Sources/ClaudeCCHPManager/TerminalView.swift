@@ -9,15 +9,14 @@ final class FileDropTerminalView: LocalProcessTerminalView {
     private(set) var isSelectedForInput = false
 
     func setSelected(_ selected: Bool) {
-        // SwiftUI's opacity/hit testing does not remove an NSView from AppKit's
-        // drag destinations. Keep the PTY mounted, but hide its native view.
-        isHidden = !selected
-        guard isSelectedForInput != selected else { return }
         isSelectedForInput = selected
         if selected {
+            isHidden = false
             registerForDraggedTypes([.fileURL])
         } else {
             unregisterDraggedTypes()
+            if let window, window.firstResponder === self { window.makeFirstResponder(nil) }
+            isHidden = true
         }
     }
 
@@ -33,9 +32,13 @@ final class FileDropTerminalView: LocalProcessTerminalView {
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        performFileDrop(from: sender.draggingPasteboard)
+    }
+
+    func performFileDrop(from pasteboard: NSPasteboard) -> Bool {
         guard isSelectedForInput, !isHiddenOrHasHiddenAncestor else { return false }
-        let urls = fileURLs(from: sender.draggingPasteboard)
-        guard !urls.isEmpty else { return false }
+        let urls = fileURLs(from: pasteboard)
+        guard !urls.isEmpty, isSelectedForInput, !isHiddenOrHasHiddenAncestor else { return false }
         window?.makeFirstResponder(self)
         pasteText(urls.map { Self.shellQuote($0.path) }.joined(separator: " ") + " ")
         return true
@@ -54,10 +57,25 @@ final class FileDropTerminalView: LocalProcessTerminalView {
 @MainActor
 final class EmbeddedTerminalControl: ObservableObject {
     private weak var terminalView: FileDropTerminalView?
+    private var isSelected = false
     private var appliedStyle: TerminalStyleSettings?
 
     func attach(_ view: FileDropTerminalView) {
+        terminalView?.setSelected(false)
         terminalView = view
+        appliedStyle = nil
+        view.setSelected(isSelected)
+    }
+
+    func detach(_ view: FileDropTerminalView) {
+        view.setSelected(false)
+        if terminalView === view { terminalView = nil }
+    }
+
+    func setSelected(_ selected: Bool) {
+        isSelected = selected
+        // Revoke old destinations in the same action as the tab selection.
+        terminalView?.setSelected(selected)
     }
 
     func stop() {
@@ -71,7 +89,8 @@ final class EmbeddedTerminalControl: ObservableObject {
     }
 
     func focus() {
-        guard let terminalView, terminalView.isSelectedForInput else { return }
+        guard let terminalView, terminalView.isSelectedForInput,
+              !terminalView.isHiddenOrHasHiddenAncestor else { return }
         terminalView.window?.makeFirstResponder(terminalView)
     }
 }
@@ -80,17 +99,15 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
     @ObservedObject var control: EmbeddedTerminalControl
     @ObservedObject var style: SharedTerminalStyle
     let launch: TerminalLaunchSpec?
-    let isSelected: Bool
     let onExit: (Int32?) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onExit: onExit)
+        Coordinator(control: control, onExit: onExit)
     }
 
     func makeNSView(context: Context) -> FileDropTerminalView {
         let view = FileDropTerminalView(frame: .zero, font: style.font,
                                         options: TerminalOptions(scrollback: style.settings.scrollback))
-        view.setSelected(isSelected)
         view.processDelegate = context.coordinator
         control.attach(view)
         control.apply(style, to: view)
@@ -107,16 +124,20 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
     }
 
     func updateNSView(_ view: FileDropTerminalView, context: Context) {
-        view.setSelected(isSelected)
-        control.attach(view)
         control.apply(style, to: view)
+    }
+
+    static func dismantleNSView(_ view: FileDropTerminalView, coordinator: Coordinator) {
+        coordinator.control.detach(view)
     }
 
     @MainActor
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
+        let control: EmbeddedTerminalControl
         private let onExit: (Int32?) -> Void
 
-        init(onExit: @escaping (Int32?) -> Void) {
+        init(control: EmbeddedTerminalControl, onExit: @escaping (Int32?) -> Void) {
+            self.control = control
             self.onExit = onExit
         }
 
@@ -196,7 +217,7 @@ struct TerminalPanel: View {
                         ForEach(model.terminalSessions) { session in
                             TerminalSessionTab(session: session,
                                                selected: model.selectedTerminalID == session.id,
-                                               onSelect: { model.selectedTerminalID = session.id },
+                                               onSelect: { model.selectTerminal(session.id) },
                                                onClose: { model.closeSession(session) })
                         }
                     }
@@ -296,14 +317,13 @@ private struct TerminalSessionPane: View {
     let onExit: (Int32?) -> Void
 
     var body: some View {
-        EmbeddedAgentTerminal(control: session.control, style: style, launch: session.launchSpec,
-                              isSelected: isSelected, onExit: onExit)
+        EmbeddedAgentTerminal(control: session.control, style: style, launch: session.launchSpec, onExit: onExit)
             .id(session.id)
             .opacity(isSelected ? 1 : 0)
             .allowsHitTesting(isSelected)
             .accessibilityHidden(!isSelected)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onChange(of: isSelected) { _, selected in
+            .onChange(of: isSelected, initial: true) { _, selected in
                 if selected { DispatchQueue.main.async { session.control.focus() } }
             }
     }

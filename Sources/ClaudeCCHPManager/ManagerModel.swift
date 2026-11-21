@@ -405,7 +405,7 @@ final class ManagerModel: ObservableObject {
     @Published var statusMessage = "正在读取本机配置…"
     @Published var isStatusError = false
     @Published var terminalSessions: [TerminalSession] = []
-    @Published var selectedTerminalID: UUID?
+    @Published private(set) var selectedTerminalID: UUID?
     @Published var usage = UsageSnapshot.empty
     @Published var isLoadingUsage = false
     @Published var usageError = ""
@@ -444,6 +444,13 @@ final class ManagerModel: ObservableObject {
 
     var selectedTerminal: TerminalSession? {
         terminalSessions.first { $0.id == selectedTerminalID }
+    }
+
+    func selectTerminal(_ id: UUID?) {
+        guard selectedTerminalID != id else { return }
+        selectedTerminal?.control.setSelected(false)
+        selectedTerminalID = id
+        selectedTerminal?.control.setSelected(true)
     }
 
     var agentRunning: Bool { terminalSessions.contains(where: \.isRunning) }
@@ -981,7 +988,7 @@ final class ManagerModel: ObservableObject {
             return
         }
         if let existing = terminalSessions.first(where: { $0.isRunning && $0.sourceHistoryRef == entry.history_ref }) {
-            selectedTerminalID = existing.id
+            selectTerminal(existing.id)
             return
         }
         if entry.isGlobal {
@@ -1055,7 +1062,7 @@ final class ManagerModel: ObservableObject {
                                       workspace: directory, sessionMode: mode, gateway: targetGateway,
                                       launchSpec: launch, sourceHistoryRef: original ? history?.history_ref : nil)
         terminalSessions.append(session)
-        selectedTerminalID = session.id
+        selectTerminal(session.id)
         if let history {
             statusMessage = original ? "正在用原配置恢复「\(history.title)」。" : "正在从「\(history.title)」创建分支。"
         } else {
@@ -1093,7 +1100,7 @@ final class ManagerModel: ObservableObject {
                                       workspace: directory, sessionMode: history == nil ? .new : .resume,
                                       gateway: "系统环境", launchSpec: launch, isGlobal: true, sourceHistoryRef: history?.history_ref)
         terminalSessions.append(session)
-        selectedTerminalID = session.id
+        selectTerminal(session.id)
         statusMessage = history.map { "正在用系统 CLI 恢复「\($0.title)」。" } ?? "已用系统配置启动 \(client.title)。"
         isStatusError = false
     }
@@ -1112,10 +1119,10 @@ final class ManagerModel: ObservableObject {
 
     func closeSession(_ session: TerminalSession) {
         if session.isRunning { session.stop() }
-        terminalSessions.removeAll { $0.id == session.id }
         if selectedTerminalID == session.id {
-            selectedTerminalID = terminalSessions.last?.id
+            selectTerminal(terminalSessions.last(where: { $0.id != session.id })?.id)
         }
+        terminalSessions.removeAll { $0.id == session.id }
     }
 
     private func setError(_ message: String) {

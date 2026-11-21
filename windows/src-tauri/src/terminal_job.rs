@@ -5,20 +5,29 @@ use std::{
     ptr, thread,
     time::{Duration, Instant},
 };
-use windows_sys::Win32::System::{
-    JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+use windows_sys::Win32::{
+    Foundation::{ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    System::{
+        JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+            JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
+            JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+            TerminateJobObject,
+        },
+        Threading::{
+            CreateEventW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            SetEvent, WaitForSingleObject,
+        },
     },
-    Threading::{CreateEventW, SetEvent},
 };
 
 pub(super) struct TerminalJob {
     job: OwnedHandle,
     ready: OwnedHandle,
     event_name: String,
+    stopping: Vec<OwnedHandle>,
 }
 
 impl TerminalJob {
@@ -54,6 +63,7 @@ impl TerminalJob {
             job,
             ready,
             event_name,
+            stopping: Vec::new(),
         })
     }
 
@@ -84,24 +94,104 @@ impl TerminalJob {
         Ok(())
     }
 
-    pub(super) fn terminate_and_wait(&self) -> io::Result<()> {
-        if self.active_processes()? == 0 {
-            return Ok(());
-        }
-        if unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) } == 0 {
-            return Err(io::Error::last_os_error());
+    pub(super) fn terminate_and_wait(&mut self) -> io::Result<()> {
+        let active = self.active_processes()?;
+        if active != 0 {
+            // The job's process count can reach zero before the processes release
+            // their open files. Keep handles so we can wait for each process to exit.
+            let processes = self.processes(active)?;
+            self.stopping.extend(processes);
+            if unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
         let deadline = Instant::now() + Duration::from_secs(5);
+        let timeout = || {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "terminal processes are still running",
+            )
+        };
+        for process in &self.stopping {
+            let millis = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u32;
+            match unsafe { WaitForSingleObject(process.as_raw_handle(), millis) } {
+                WAIT_OBJECT_0 => {}
+                WAIT_TIMEOUT => return Err(timeout()),
+                _ => return Err(io::Error::last_os_error()),
+            }
+        }
         while self.active_processes()? != 0 {
             if Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "terminal processes are still running",
-                ));
+                return Err(timeout());
             }
             thread::sleep(Duration::from_millis(20));
         }
+        self.stopping.clear();
         Ok(())
+    }
+
+    fn processes(&self, estimate: u32) -> io::Result<Vec<OwnedHandle>> {
+        const HEADER: usize = mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList)
+            / mem::size_of::<usize>();
+        let mut capacity = estimate.max(8) as usize;
+        let (buffer, count) = loop {
+            // The Win32 structure ends in a variable-length array of pointer-sized IDs.
+            let mut buffer = vec![0usize; HEADER + capacity];
+            if unsafe {
+                QueryInformationJobObject(
+                    self.job.as_raw_handle(),
+                    JobObjectBasicProcessIdList,
+                    buffer.as_mut_ptr().cast(),
+                    mem::size_of_val(buffer.as_slice()) as u32,
+                    ptr::null_mut(),
+                )
+            } != 0
+            {
+                let header = unsafe { &*buffer.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
+                break (buffer, header.NumberOfProcessIdsInList as usize);
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_MORE_DATA as i32) {
+                return Err(error);
+            }
+            capacity *= 2;
+        };
+
+        let mut processes = Vec::with_capacity(count);
+        for &id in &buffer[HEADER..HEADER + count] {
+            let process = unsafe {
+                OpenProcess(
+                    PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                    0,
+                    id as u32,
+                )
+            };
+            if process.is_null() {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                    continue; // The process exited before we could open it.
+                }
+                return Err(error);
+            }
+            let process = unsafe { OwnedHandle::from_raw_handle(process) };
+            let mut in_job = 0;
+            if unsafe {
+                IsProcessInJob(
+                    process.as_raw_handle(),
+                    self.job.as_raw_handle(),
+                    &mut in_job,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if in_job != 0 {
+                processes.push(process);
+            }
+        }
+        Ok(processes)
     }
 
     fn active_processes(&self) -> io::Result<u32> {

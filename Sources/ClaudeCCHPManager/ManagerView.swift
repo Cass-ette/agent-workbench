@@ -103,11 +103,14 @@ struct ManagerView: View {
             .padding(.horizontal, 16)
             .padding(.top, 14)
             .padding(.bottom, 20)
-            if let version = updates.nextVersion {
-                Button("新版 \(version)") { updates.open() }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 8)
+            Button { updates.open() } label: {
+                Label(updates.nextVersion.map { "新版 \($0)" } ?? "检查更新",
+                      systemImage: updates.nextVersion == nil ? "arrow.triangle.2.circlepath" : "arrow.down.circle")
             }
+            .buttonStyle(.borderless)
+            .help("当前版本 \(updates.current) · 查看更新说明或检查新版本")
+            .padding(.horizontal, 16)
+            .padding(.bottom, 14)
 
             Button {
                 isTaskSetupVisible = true

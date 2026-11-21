@@ -1,9 +1,11 @@
 mod history;
 mod pricing;
+#[cfg(windows)]
+mod terminal_job;
 mod usage;
 mod updates;
 use keyring::Entry;
-use portable_pty::{Child, MasterPty, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,6 +23,8 @@ use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
 
 const KEYRING_SERVICE: &str = "com.cassette.agentworkbench";
+const POWERSHELL_EXIT_CODE: &str =
+    "if ($?) { 0 } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }";
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -106,8 +110,21 @@ struct ExitNotice {
 
 struct TerminalHandle {
     writer: Mutex<Box<dyn Write + Send>>,
-    master: Mutex<Box<dyn MasterPty + Send>>,
-    child: Mutex<Box<dyn Child + Send>>,
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
+    #[cfg(windows)]
+    job: Mutex<terminal_job::TerminalJob>,
+    #[cfg(not(windows))]
+    killer: Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
+}
+
+impl TerminalHandle {
+    fn stop(&self) -> Result<(), String> {
+        #[cfg(windows)]
+        let result = self.job.lock().map_err(|_| "终端进程锁异常")?.terminate_and_wait();
+        #[cfg(not(windows))]
+        let result = self.killer.lock().map_err(|_| "终端进程锁异常")?.kill();
+        result.map_err(|error| format!("无法确认终端已停止：{error}"))
+    }
 }
 
 struct AppState {
@@ -571,7 +588,6 @@ fn start_terminal(
     };
     let key = key_entry(&profile.id)?.get_password()
         .map_err(|_| "Windows 凭据管理器中没有这把 Key".to_string())?;
-    let id = Uuid::new_v4().to_string();
     if source.is_some() && !original && request.confirmed_gateway.as_deref() != Some(profile.gateway.as_str()) {
         return Err("目标网关已变更，请刷新后重新确认".into());
     }
@@ -600,12 +616,7 @@ fn start_terminal(
     if source.is_none() {
         history::record_profile(&selected_home, &profile.id, &profile.name, &request.model, &profile.gateway, &fingerprint)?;
     }
-    let mut shell = portable_pty::CommandBuilder::new("powershell.exe");
-    shell.args(["-NoLogo", "-NoExit"]);
-    if source.is_some() {
-        shell.arg("-NoProfile");
-    }
-    shell.arg("-Command");
+    let mut shell = CommandBuilder::new("powershell.exe");
     let command_text = if request.client == "codex" {
         let codex_home = selected_home.clone();
         fs::create_dir_all(&codex_home)
@@ -725,14 +736,11 @@ fn start_terminal(
             String::new()
         };
         format!(
-            "try {{ {command_text} }} finally {{ {cleanup}Remove-Item Env:CCH_API_KEY,Env:ANTHROPIC_API_KEY,Env:ANTHROPIC_BASE_URL,Env:CODEX_HOME,Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }}",
+            "try {{ {command_text}; $workbenchExitCode = {POWERSHELL_EXIT_CODE} }} finally {{ {cleanup}Remove-Item Env:CCH_API_KEY,Env:ANTHROPIC_API_KEY,Env:ANTHROPIC_BASE_URL,Env:CODEX_HOME,Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }}; exit $workbenchExitCode",
         )
     } else {
         command_text
     };
-    shell.arg(format!(
-        "chcp 65001 > $null; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $env:TERM = 'xterm-256color'; $env:COLORTERM = 'truecolor'; {command_text}"
-    ));
     shell.cwd(&workspace);
     if request.client == "codex" {
         shell.env_remove("OPENAI_API_KEY");
@@ -740,47 +748,13 @@ fn start_terminal(
         shell.env_remove("CODEX_SQLITE_HOME");
         shell.env_remove("ANTHROPIC_API_KEY");
     }
-    let system = native_pty_system();
-    let pair = system
-        .openpty(PtySize {
-            rows: 30,
-            cols: 100,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|error| format!("创建 ConPTY 失败：{error}"))?;
-    let child = pair
-        .slave
-        .spawn_command(shell)
-        .map_err(|error| format!("启动 Agent 失败：{error}"))?;
-    drop(pair.slave);
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|error| format!("读取终端失败：{error}"))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|error| format!("打开终端输入失败：{error}"))?;
-    let handle = Arc::new(TerminalHandle {
-        writer: Mutex::new(writer),
-        master: Mutex::new(pair.master),
-        child: Mutex::new(child),
-    });
-    state
-        .terminals
-        .lock()
-        .map_err(|_| "终端会话锁异常")?
-        .insert(id.clone(), Arc::clone(&handle));
     let info = TerminalInfo {
-        id: id.clone(),
+        id: Uuid::new_v4().to_string(),
         title: format!("{} · {}", request.client, request.model),
         workspace: workspace.display().to_string(),
     };
-    let app_for_reader = app.clone();
-    let session_id = id;
-    thread::spawn(move || stream_terminal(reader, handle, app_for_reader, session_id));
-    Ok(info)
+    let restoring = request.session_mode != "new";
+    launch_terminal(shell, command_text, source.is_none(), !restoring, info, app, &state)
 }
 
 #[tauri::command]
@@ -809,53 +783,138 @@ fn launch_system_terminal(
     if !workspace.is_absolute() || !workspace.is_dir() {
         return Err("请选择一个存在的项目目录".into());
     }
-    let id = Uuid::new_v4().to_string();
     let mut command = format!("& {}", quote_powershell(&client));
     if let Some(history_id) = history_id {
         Uuid::parse_str(history_id).map_err(|_| "历史会话标识无效")?;
         let flag = if client == "codex" { "resume" } else { "--resume" };
         command.push_str(&format!(" {flag} {}", quote_powershell(history_id)));
     }
-    let mut shell = portable_pty::CommandBuilder::new("powershell.exe");
-    shell.args(["-NoLogo", "-NoExit"]);
-    shell.arg("-Command");
-    shell.arg(format!(
-        "chcp 65001 > $null; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $env:TERM = 'xterm-256color'; $env:COLORTERM = 'truecolor'; Set-Location -LiteralPath {} -ErrorAction Stop; {}",
+    let mut shell = CommandBuilder::new("powershell.exe");
+    let command = format!(
+        "Set-Location -LiteralPath {} -ErrorAction Stop; {command}",
         quote_powershell(&workspace.to_string_lossy()),
-        command,
-    ));
+    );
     shell.cwd(&workspace);
+    let info = TerminalInfo {
+        id: Uuid::new_v4().to_string(),
+        title: format!("{} · 系统全局", client),
+        workspace: workspace.display().to_string(),
+    };
+    launch_terminal(shell, command, true, history_id.is_none(), info, app, &state)
+}
+
+fn launch_terminal(
+    shell: CommandBuilder,
+    command: String,
+    load_profiles: bool,
+    keep_shell: bool,
+    info: TerminalInfo,
+    app: tauri::AppHandle,
+    state: &AppState,
+) -> Result<TerminalInfo, String> {
+    let mut terminals = state.terminals.lock().map_err(|_| "终端会话锁异常")?;
+    let (handle, reader, mut child) = spawn_terminal(shell, &command, load_profiles, keep_shell)?;
+    let handle = Arc::new(handle);
+    let id = info.id.clone();
+    terminals.insert(id.clone(), Arc::clone(&handle));
+    drop(terminals);
+
+    let reader_id = id.clone();
+    let reader_app = app.clone();
+    let output = thread::spawn(move || stream_terminal(reader, reader_app, reader_id));
+    thread::spawn(move || {
+        let exit_code = child.wait().ok().map(|status| status.exit_code());
+        #[cfg(windows)]
+        if let Err(error) = handle.stop() {
+            // Keep the handle registered so Stop can retry if descendants are still alive.
+            let _ = app.emit("terminal-stop-error", StopError { session_id: id, error });
+            return;
+        }
+        handle.close_pty();
+        let _ = output.join();
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut terminals) = state.terminals.lock() {
+                terminals.remove(&id);
+            }
+        }
+        let _ = app.emit("terminal-exit", ExitNotice { session_id: id, exit_code });
+    });
+    Ok(info)
+}
+
+#[cfg(windows)]
+#[derive(Clone, Serialize)]
+struct StopError {
+    session_id: String,
+    error: String,
+}
+
+impl TerminalHandle {
+    fn close_pty(&self) {
+        // ClosePseudoConsole can flush output synchronously. The reader remains active.
+        let master = self.master.lock().ok().and_then(|mut master| master.take());
+        drop(master);
+    }
+}
+
+type TerminalReader = Box<dyn Read + Send>;
+type TerminalChild = Box<dyn portable_pty::Child + Send + Sync>;
+
+fn spawn_terminal(
+    mut shell: CommandBuilder,
+    command: &str,
+    load_profiles: bool,
+    keep_shell: bool,
+) -> Result<(TerminalHandle, TerminalReader, TerminalChild), String> {
+    #[cfg(windows)]
+    let job = terminal_job::TerminalJob::new().map_err(|error| format!("创建终端进程组失败：{error}"))?;
+    #[cfg(windows)]
+    let mut script = job.startup_script();
+    #[cfg(not(windows))]
+    let mut script = String::new();
+    shell.args(["-NoLogo", "-NoProfile"]);
+    if keep_shell {
+        shell.arg("-NoExit");
+    }
+    if load_profiles {
+        // Apply profiles in PowerShell's normal order after the process is assigned to its job.
+        script.push_str("foreach ($workbenchProfile in @($PROFILE.AllUsersAllHosts, $PROFILE.AllUsersCurrentHost, $PROFILE.CurrentUserAllHosts, $PROFILE.CurrentUserCurrentHost)) { if ([IO.File]::Exists($workbenchProfile)) { . $workbenchProfile } }; Remove-Variable workbenchProfile -ErrorAction SilentlyContinue; ");
+    }
+    script.push_str("chcp 65001 > $null; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $env:TERM = 'xterm-256color'; $env:COLORTERM = 'truecolor'; ");
+    script.push_str(command);
+    if !keep_shell {
+        script.push_str(&format!("; $workbenchExitCode = {POWERSHELL_EXIT_CODE}; exit $workbenchExitCode"));
+    }
+    shell.args(["-Command", &script]);
     let system = native_pty_system();
     let pair = system
         .openpty(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 })
         .map_err(|error| format!("创建 ConPTY 失败：{error}"))?;
-    let child = pair.slave.spawn_command(shell)
-        .map_err(|error| format!("启动系统全局客户端失败：{error}"))?;
-    drop(pair.slave);
     let reader = pair.master.try_clone_reader()
         .map_err(|error| format!("读取终端失败：{error}"))?;
     let writer = pair.master.take_writer()
         .map_err(|error| format!("打开终端输入失败：{error}"))?;
-    let handle = Arc::new(TerminalHandle {
+    let child = pair.slave.spawn_command(shell)
+        .map_err(|error| format!("启动 Agent 失败：{error}"))?;
+    #[cfg(windows)]
+    if let Err(error) = job.attach(&*child) {
+        let _ = child.clone_killer().kill();
+        return Err(format!("绑定终端进程组失败：{error}"));
+    }
+    drop(pair.slave);
+    let handle = TerminalHandle {
         writer: Mutex::new(writer),
-        master: Mutex::new(pair.master),
-        child: Mutex::new(child),
-    });
-    state.terminals.lock().map_err(|_| "终端会话锁异常")?
-        .insert(id.clone(), Arc::clone(&handle));
-    let info = TerminalInfo {
-        id: id.clone(),
-        title: format!("{} · 系统全局", client),
-        workspace: workspace.display().to_string(),
+        master: Mutex::new(Some(pair.master)),
+        #[cfg(windows)]
+        job: Mutex::new(job),
+        #[cfg(not(windows))]
+        killer: Mutex::new(child.clone_killer()),
     };
-    let app_for_reader = app.clone();
-    thread::spawn(move || stream_terminal(reader, handle, app_for_reader, id));
-    Ok(info)
+    Ok((handle, reader, child))
 }
 
 fn stream_terminal(
     mut reader: Box<dyn Read + Send>,
-    handle: Arc<TerminalHandle>,
     app: tauri::AppHandle,
     session_id: String,
 ) {
@@ -874,24 +933,6 @@ fn stream_terminal(
             }
         }
     }
-    let exit_code = handle
-        .child
-        .lock()
-        .ok()
-        .and_then(|mut child| child.wait().ok())
-        .map(|status| status.exit_code());
-    if let Some(state) = app.try_state::<AppState>() {
-        if let Ok(mut terminals) = state.terminals.lock() {
-            terminals.remove(&session_id);
-        }
-    }
-    let _ = app.emit(
-        "terminal-exit",
-        ExitNotice {
-            session_id,
-            exit_code,
-        },
-    );
 }
 
 #[tauri::command]
@@ -931,6 +972,8 @@ fn resize_terminal(
         .master
         .lock()
         .map_err(|_| "终端尺寸锁异常")?
+        .as_ref()
+        .ok_or("终端已退出")?
         .resize(PtySize {
             rows,
             cols,
@@ -941,20 +984,21 @@ fn resize_terminal(
 }
 
 #[tauri::command]
-fn stop_terminal(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn stop_terminal(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let handle = state
         .terminals
         .lock()
         .map_err(|_| "终端会话锁异常")?
         .get(&session_id)
-        .cloned()
-        .ok_or("终端会话不存在")?;
-    handle
-        .child
-        .lock()
-        .map_err(|_| "终端进程锁异常")?
-        .kill()
-        .map_err(|error| format!("停止 Agent 失败：{error}"))
+        .cloned();
+    let Some(handle) = handle else { return Ok(()); };
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        handle.stop()?;
+        handle.close_pty();
+        Ok(())
+    }).await.map_err(|error| format!("停止终端失败：{error}"))??;
+    state.terminals.lock().map_err(|_| "终端会话锁异常")?.remove(&session_id);
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -998,6 +1042,75 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::normalize_gateway;
+
+    #[cfg(windows)]
+    #[test]
+    fn closing_terminal_releases_exclusive_file_held_by_child() {
+        use super::{CommandBuilder, spawn_terminal};
+        use std::{fs, io, thread, time::{Duration, Instant}};
+
+        let dir = std::env::temp_dir().join(format!("workbench-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let lock = dir.join("session.lock");
+        let ready = dir.join("ready");
+        fs::write(&lock, b"test").unwrap();
+        let mut shell = CommandBuilder::new("powershell.exe");
+        shell.env("WORKBENCH_TEST_LOCK", &lock);
+        shell.env("WORKBENCH_TEST_READY", &ready);
+        let (terminal, mut output, mut parent) = spawn_terminal(
+            shell,
+            r#"Start-Process -FilePath powershell.exe -NoNewWindow -ArgumentList '-NoProfile -Command "$f = [IO.File]::Open($env:WORKBENCH_TEST_LOCK, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); [IO.File]::WriteAllText($env:WORKBENCH_TEST_READY, [string]$PID); Start-Sleep -Seconds 90"'"#,
+            false,
+            true,
+        ).unwrap();
+        let drain = thread::spawn(move || {
+            let mut output_bytes = Vec::new();
+            let _ = io::copy(&mut output, &mut output_bytes);
+            String::from_utf8_lossy(&output_bytes).into_owned()
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !ready.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        let child_held_lock = ready.exists() && fs::read(&lock).is_err();
+        terminal.stop().unwrap();
+        let released = fs::read(&lock);
+        terminal.close_pty();
+        parent.wait().unwrap();
+        let output = drain.join().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+
+        assert!(child_held_lock, "child never acquired the exclusive file: {output}");
+        assert_eq!(released.unwrap(), b"test");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_restore_exits_with_the_cli_status() {
+        use super::{CommandBuilder, spawn_terminal};
+        use std::{io, thread, time::{Duration, Instant}};
+
+        let (terminal, mut output, mut child) = spawn_terminal(
+            CommandBuilder::new("powershell.exe"),
+            "cmd.exe /d /c exit 37",
+            false,
+            false,
+        ).unwrap();
+        let drain = thread::spawn(move || { let _ = io::copy(&mut output, &mut io::sink()); });
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let code = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status.exit_code());
+            }
+            if Instant::now() >= deadline { break None; }
+            thread::sleep(Duration::from_millis(25));
+        };
+        terminal.stop().unwrap();
+        terminal.close_pty();
+        drain.join().unwrap();
+        assert_eq!(code, Some(37));
+    }
 
     #[cfg(target_os = "windows")]
     #[test]

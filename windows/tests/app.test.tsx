@@ -101,6 +101,56 @@ describe("工作会话配置", () => {
     expect(invoke).toHaveBeenCalledWith("list_all_history");
   });
 
+  it("原对话仍在运行时切回已有标签，关闭后再启动同一条历史", async () => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    const row = {
+      id: "8123cb5e-1984-435a-9803-976796d3075c",
+      history_ref: "original-conversation",
+      title: "测试 Codex 历史",
+      workspace: "C:\\test-project",
+      client: "codex",
+      model: "test-model",
+      profile_id: "fixture-profile",
+      profile_name: "测试配置",
+      updated_at: 1,
+    };
+    let finishStop!: () => void;
+    const stopping = new Promise<void>((resolve) => { finishStop = resolve; });
+    let launches = 0;
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "list_all_history") return [row];
+      if (command === "start_terminal") return { id: String(++launches), title: row.title, workspace: row.workspace };
+      if (command === "stop_terminal") return stopping;
+      return normalInvoke(command, args);
+    });
+    await openApp();
+    const restore = async () => {
+      fireEvent.click(screen.getByRole("button", { name: "恢复最近对话" }));
+      fireEvent.click(await screen.findByRole("button", { name: /测试 Codex 历史/ }));
+    };
+
+    await restore();
+    await screen.findByRole("tab", { selected: true });
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+    await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(2));
+    await restore();
+    expect(screen.getByRole("tab", { selected: true }).textContent).toContain("Codex");
+    expect(launches).toBe(2);
+
+    fireEvent.click(screen.getByTitle("停止并关闭此终端"));
+    await restore();
+    await restore();
+    expect(launches).toBe(2);
+    expect(screen.getByTitle("正在关闭…")).toBeTruthy();
+    await act(async () => finishStop());
+    await waitFor(() => {
+      expect(launches).toBe(3);
+      expect(screen.getAllByRole("tab")).toHaveLength(2);
+    });
+    expect(screen.getByRole("tab", { selected: true }).textContent).toContain("Codex");
+  });
+
   it("恢复选择器只请求当前项目并展示最近消息预览", async () => {
     const row = {
       id: "8123cb5e-1984-435a-9803-976796d3075c",

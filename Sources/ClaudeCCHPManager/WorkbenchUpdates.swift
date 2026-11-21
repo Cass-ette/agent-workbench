@@ -61,7 +61,7 @@ private struct UpdateFailure: LocalizedError {
 }
 
 private struct MacUpdateService: Sendable {
-    // Installer versions stay numeric; release status is carried separately in the channel.
+    // Numeric versions work with all three platform installers; 0.x denotes preview.
     static func version(_ value: String) -> [Int]? {
         let parts = value.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 3, parts.allSatisfy({ !$0.isEmpty && $0.utf8.allSatisfy { (48...57).contains($0) } }) else { return nil }
@@ -75,20 +75,20 @@ private struct MacUpdateService: Sendable {
         let file = try FileHandle(forReadingFrom: MacUpdateSource.manifest)
         defer { try? file.close() }
         let data = try file.read(upToCount: limit + 1) ?? Data()
-        let channel = MacUpdateSource.channel
+        return try parse(data, current: current, channel: MacUpdateSource.channel)
         #else
-        let releases = try JSONDecoder().decode([WorkbenchRelease].self, from: await readRemote(ReleaseFeed.url))
-        guard let source = ReleaseFeed.select(releases) else {
-            throw UpdateFailure("发布页暂时没有完整更新包，可以稍后重试或手动下载。")
+        return try await ReleaseFeed.load(read: readRemote) { data in
+            try parse(data, current: current)
         }
-        let data = try await readRemote(source.url)
-        let channel = source.channel
         #endif
-        guard data.count <= limit else { throw UpdateFailure("发布清单过大。") }
+    }
+
+    private static func parse(_ data: Data, current: String, channel: String? = nil) throws -> AvailableUpdate? {
+        guard data.count <= 512 * 1024 else { throw UpdateFailure("发布清单过大。") }
         let manifest = try JSONDecoder().decode(UpdateManifest.self, from: data)
         guard manifest.schema == 1, let installed = version(current) else { throw UpdateFailure("无法识别更新清单或当前版本。") }
         let packages = manifest.packages.filter {
-            $0.platform == "macos" && $0.channel == channel && $0.arch == MacUpdateSource.architecture
+            $0.platform == "macos" && (channel == nil || $0.channel == channel) && $0.arch == MacUpdateSource.architecture
         }
         guard packages.count == 1, let package = packages.first, package.valid,
               let latest = version(package.version) else { throw UpdateFailure("发布清单没有适用于这台 Mac 的安装包。") }
@@ -99,7 +99,11 @@ private struct MacUpdateService: Sendable {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
         request.setValue("Agent-Workbench", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200, response.url?.scheme == "https" else {
+        if let status = (response as? HTTPURLResponse)?.statusCode, status != 200 {
+            let hint = [403, 429].contains(status) ? "，请求受限，请稍后重试" : ""
+            throw UpdateFailure("无法读取更新（HTTP \(status)\(hint)）。")
+        }
+        guard response.url?.scheme == "https" else {
             throw UpdateFailure("暂时无法读取发布清单。可以重试或打开发布页。")
         }
         guard data.count <= 512 * 1024 else { throw UpdateFailure("发布清单过大。") }
@@ -305,7 +309,7 @@ final class WorkbenchUpdates: ObservableObject {
 
     var nextVersion: String? { installed ? nil : available?.package.version }
     var notes: String { available?.notes ?? "" }
-    var isPreview: Bool { available?.package.channel == "preview" }
+    var isPreview: Bool { available.map { ReleaseFeed.isPreview($0.package.version) } ?? false }
     func open() {
         show = true
         if available == nil && !installed { Task { await check(manual: true) } }
@@ -444,7 +448,7 @@ struct WorkbenchUpdateSheet: View {
             #if WORKBENCH_LOCAL_UPDATE_TEST
             Text("本机更新测试").foregroundStyle(.secondary)
             #endif
-            if updates.isPreview { Text("测试版 · 可下载安装，尚未确认为正式版").foregroundStyle(.orange) }
+            if updates.isPreview { Text("测试版 · 可下载安装").foregroundStyle(.orange) }
             Text("当前版本 \(updates.current)\(updates.nextVersion.map { " · 新版本 \($0)" } ?? "")")
                 .foregroundStyle(.secondary)
             if updates.nextVersion != nil {

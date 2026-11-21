@@ -16,8 +16,8 @@ H = B.history_module()
 class HistoryLaunchTests(unittest.TestCase):
     def test_selected_session_uses_original_home_and_only_changes_config_by_forking(self):
         for client in ("codex", "claude"):
-            for changed in (False, True):
-                with self.subTest(client=client, changed=changed), tempfile.TemporaryDirectory() as temporary:
+            for action in ("original", "fork-same-model", "fork-other-model"):
+                with self.subTest(client=client, action=action), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
                     workspace = root / "project"
                     workspace.mkdir()
@@ -60,13 +60,20 @@ class HistoryLaunchTests(unittest.TestCase):
                         popen.return_value.__enter__.return_value.wait.return_value = 0
                         codex, claude = B.history_roots()
                         (entry,) = H.scan_history(codex, claude)
-                        for _ in range(2 if not changed else 1):
+                        if action == "original":
+                            with patch.object(B, "read_profile_key", return_value="replacement-key"):
+                                with self.assertRaises(RuntimeError):
+                                    B.launch_history(entry["history_ref"], session_id, client, "", "", str(workspace), original=True)
+                            popen.assert_not_called()
+                            self.assertEqual(B.launch_history(entry["history_ref"], session_id, client,
+                                "different-selection", "model-b", str(workspace), original=True), 0)
+                        else:
                             self.assertEqual(B.launch_history(entry["history_ref"], session_id, client, "p-one",
-                                "model-b" if changed else "model-a", str(workspace)), 0)
+                                "model-b" if action == "fork-other-model" else "model-a", str(workspace), force_fork=True), 0)
                         command = popen.call_args.args[0]
                         env = popen.call_args.kwargs["env"]
                         launched_home = Path(env["CODEX_HOME"] if client == "codex" else env["CLAUDE_CONFIG_DIR"])
-                    if changed:
+                    if action != "original":
                         self.assertNotEqual(launched_home, home)
                         self.assertEqual(len(list(home.parent.glob("branch-*"))), 2)
                         self.assertIn("fork" if client == "codex" else "--fork-session", command)

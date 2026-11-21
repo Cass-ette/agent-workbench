@@ -12,7 +12,6 @@ import {
   ChevronDown,
   CircleHelp,
   FolderOpen,
-  Globe2,
   KeyRound,
   Maximize2,
   Minimize2,
@@ -30,6 +29,7 @@ import "@xterm/xterm/css/xterm.css";
 import "./App.css";
 import { UsageStatus } from "./UsagePanel";
 import { WorkbenchUpdate } from "./WorkbenchUpdate";
+import { SSHConnection } from "./SSHConnection";
 import type { UsageSnapshot } from "./UsagePanel";
 
 type ClientKind = "claude" | "codex";
@@ -74,6 +74,7 @@ interface LocalConversation {
   preview?: string;
   workspace: string;
   model: string;
+  configured_model?: string;
   profile_id: string;
   profile_name: string;
   updated_at: number;
@@ -120,6 +121,8 @@ function App() {
     window.localStorage.getItem("launchScope") === "system" ? "system" : "workbench",
   );
   const [history, setHistory] = useState<LocalConversation[]>([]);
+  const [showSSHConnection, setShowSSHConnection] = useState(false);
+  const [historyByDirectory, setHistoryByDirectory] = useState(false);
   const [historyScope, setHistoryScope] = useState<"workspace" | "global">("workspace");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -144,6 +147,10 @@ function App() {
     () => config.profiles.find((profile) => profile.id === config.selected_profile_id),
     [config.profiles, config.selected_profile_id],
   );
+
+  const matchingHistory = history.filter((entry) => [entry.title, entry.preview ?? "", entry.workspace, entry.client, entry.model, entry.profile_name].some(
+    (value) => value.toLocaleLowerCase().includes(historyQuery.trim().toLocaleLowerCase()),
+  ));
 
   const filteredModels = useMemo(() => {
     const query = modelQuery.trim().toLocaleLowerCase();
@@ -347,46 +354,56 @@ function App() {
     }
   }
 
-  async function startSession(mode: SessionMode = sessionMode) {
-    if (!canStart) return;
-    if (launchScope === "system") {
+  async function startSession(mode: SessionMode = sessionMode, original?: LocalConversation) {
+    if (isStarting) return;
+    if (!original && !canStart) return;
+    if (!original && launchScope === "system") {
       return startGlobalSession(config.client as ClientKind);
     }
-    if (!selectedProfile || !config.model || !config.workspace) return;
-    const source = mode === "resume" ? selectedHistory : null;
+    if (!original && (!selectedProfile || !config.model || !config.workspace)) return;
+    const source = original ?? (mode === "resume" ? selectedHistory : null);
     if (mode === "resume" && !source) return openHistory();
-    if (source && !window.confirm(`恢复「${source.title}」？\n调用配置：${selectedProfile.name}\n网关：${selectedProfile.gateway}\n模型：${config.model}\n相同配置续接原会话；更换配置、导入系统历史或来源不明时创建独立分支。\n历史上下文会发送给这个网关，可能产生费用。`)) return;
+    if (!original && source && !window.confirm(
+      "从「" + source.title + "」创建分支？\n调用配置：" + selectedProfile?.name +
+      "\n网关：" + selectedProfile?.gateway + "\n模型：" + config.model +
+      "\n历史上下文会发往该网关，原对话保留。"
+    )) return;
     const client = source?.client ?? config.client as ClientKind;
+    const model = original ? (original.configured_model || original.model) : config.model;
+    const profileName = original
+      ? (original.scope === "global" ? "系统 CLI" : config.profiles.find((profile) => profile.id === original.profile_id)?.name ?? original.profile_name)
+      : selectedProfile?.name ?? "";
     setError("");
     setNotice("");
     setIsStarting(true);
     try {
       const info = await invoke<TerminalInfo>("start_terminal", {
         request: {
-          profile_id: selectedProfile.id,
+          profile_id: original ? "" : selectedProfile?.id,
           client,
-          model: config.model,
-          workspace: config.workspace,
+          model: original ? "" : model,
+          workspace: original?.workspace ?? config.workspace,
           session_mode: mode,
           history_ref: source?.history_ref,
           history_id: source?.id,
-          confirmed_gateway: source ? selectedProfile.gateway : undefined,
+          confirmed_gateway: source && !original ? selectedProfile?.gateway : undefined,
+          history_action: original ? "original" : source ? "fork" : undefined,
         },
       });
       const session: Session = {
         ...info,
         client,
-        model: config.model,
-        profileName: selectedProfile.name,
+        model,
+        profileName,
         mode,
         exitCode: null,
       };
       setSessions((current) => [...current, session]);
       setSelectedSessionId(info.id);
       setNotice(source
-        ? `已启动「${source.title}」的恢复。同配置续接原会话；跨配置创建独立分支。`
+        ? original ? `已用原配置恢复「${source.title}」。` : `已从「${source.title}」创建分支。`
         : `${client === "codex" ? "Codex" : "Claude Code"} 已在独立终端中启动。`);
-      if (source) {
+      if (source && !original) {
         setSelectedHistory(null);
         setSessionMode("new");
       }
@@ -426,7 +443,10 @@ function App() {
   }
 
   async function openHistory(scope: "workspace" | "global" = "workspace") {
+    if (scope === "workspace" && !config.workspace.trim()) { setError("请先选择项目目录。"); return; }
     setHistoryScope(scope);
+    setHistoryByDirectory(false);
+    setHistoryQuery("");
     setHistoryOpen(true);
     setHistoryLoading(true);
     setHistoryError("");
@@ -442,12 +462,27 @@ function App() {
     }
   }
 
+  async function restoreRecentInProject() {
+    if (isStarting || !config.workspace.trim()) { setError("请先选择项目目录。"); return; }
+    try {
+      const rows = await invoke<LocalConversation[]>("list_history", { workspace: config.workspace });
+      const latest = rows.find((entry) => entry.client === config.client);
+      if (!latest) { setError("当前项目暂无该客户端的对话可恢复。"); return; }
+      await startSession("resume", latest);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  }
+
   function selectHistory(entry: LocalConversation) {
-    setLaunchScope("workbench");
+    setHistoryOpen(false);
+    if (historyScope === "global") {
+      void startSession("resume", entry);
+      return;
+    }
     setSelectedHistory(entry);
     setSessionMode("resume");
-    setConfig((current) => ({ ...current, client: entry.client, workspace: entry.workspace }));
-    setHistoryOpen(false);
+    setConfig((current) => ({ ...current, client: entry.client }));
   }
 
   function selectClient(client: ClientKind) {
@@ -543,7 +578,8 @@ function App() {
           </div>
 
           <div className="sidebar-bottom">
-            <button className="sidebar-link" onClick={() => void openHistory("global")}>对话历史</button>
+            <button className="sidebar-link" onClick={() => void openHistory("global")}>恢复最近对话</button>
+            <button className="sidebar-link" onClick={() => setShowSSHConnection(true)}>手机连接</button>
             <div className="security-note"><span className="security-dot" />密钥保存在 Windows 凭据管理器</div>
             <button className="sidebar-link" onClick={() => setShowProfileDialog(true)}>
               <Settings2 size={15} />管理调用配置
@@ -574,10 +610,10 @@ function App() {
               </div>
 
               <div className="field scope-field">
-                <label>运行范围</label>
-                <div className="segmented-control" role="group" aria-label="选择运行范围">
-                  <button aria-pressed={launchScope === "workbench"} onClick={() => setLaunchScope("workbench")}>工作台</button>
-                  <button aria-pressed={launchScope === "system"} onClick={() => setLaunchScope("system")}>系统</button>
+                <label>启动方式</label>
+                <div className="segmented-control" role="group" aria-label="选择启动方式">
+                  <button aria-pressed={launchScope === "workbench"} onClick={() => setLaunchScope("workbench")}>工作台配置</button>
+                  <button aria-pressed={launchScope === "system"} onClick={() => setLaunchScope("system")}>系统 CLI</button>
                 </div>
               </div>
 
@@ -634,11 +670,12 @@ function App() {
                     <select id="session-mode" value={sessionMode} onChange={(event) => {
                       const mode = event.currentTarget.value as SessionMode;
                       if (mode === "resume") void openHistory("workspace");
+                      else if (mode === "continue") void restoreRecentInProject();
                       else { setSelectedHistory(null); setSessionMode(mode); }
                     }}>
                       <option value="new">新会话</option>
-                      <option value="continue">继续最近会话</option>
-                      <option value="resume">{selectedHistory?.title ?? "选择历史会话"}</option>
+                      <option value="continue" title="使用原 Key、模型与项目目录续接">恢复最近对话</option>
+                      <option value="resume">{selectedHistory ? "分支 · " + selectedHistory.title : "从历史创建分支"}</option>
                     </select>
                     <ChevronDown size={14} className="select-chevron" />
                   </div>
@@ -647,7 +684,7 @@ function App() {
 
               <button className="launch-button" disabled={!canStart} onClick={() => startSession()}>
                 <Zap size={16} fill="currentColor" />
-                {isStarting ? "正在启动" : "启动"}
+                {isStarting ? "正在启动" : sessionMode === "resume" && launchScope === "workbench" ? "启动分支" : "启动"}
               </button>
             </div>
             <div className="setup-footnote">
@@ -727,15 +764,14 @@ function App() {
           <section className="profile-dialog history-dialog" role="dialog" aria-label="本地对话历史" aria-modal="true">
             <div className="history-heading-row">
               <div>
-                <h2>{historyScope === "global" ? "全部目录的对话历史" : "当前项目的对话历史"}</h2>
-                {historyScope === "workspace" && <small>{config.workspace || "请先选择项目目录"}</small>}
+                <h2>{historyScope === "global" ? "恢复最近对话" : "从当前项目的历史创建分支"}</h2>
+                <small>{historyScope === "workspace" ? config.workspace + " · 分支使用当前调用配置与模型" : "点击任意对话，用原配置恢复。"}</small>
               </div>
-              {historyScope === "global" && (
-                <button className="secondary-button" onClick={() => void openHistory("workspace")}>
-                  <Globe2 size={13} />当前项目
-                </button>
-              )}
             </div>
+            {historyScope === "global" && <div className="segmented-control history-view-switch" role="group" aria-label="浏览方式">
+              <button aria-pressed={!historyByDirectory} onClick={() => setHistoryByDirectory(false)}>最近</button>
+              <button aria-pressed={historyByDirectory} onClick={() => setHistoryByDirectory(true)}>按目录</button>
+            </div>}
             <label className="dialog-field">
               搜索对话
               <input autoFocus value={historyQuery} onChange={(event) => setHistoryQuery(event.currentTarget.value)}
@@ -743,22 +779,18 @@ function App() {
             </label>
             <div className="history-list">
               {historyLoading ? <p>正在读取本地会话…</p> : historyError ? <p role="alert">{historyError}</p>
-                : history.filter((entry) => [entry.title, entry.preview ?? "", entry.workspace, entry.client, entry.model].some(
-                  (value) => value.toLocaleLowerCase().includes(historyQuery.trim().toLocaleLowerCase()),
-                )).map((entry) => (
-                  <button key={entry.history_ref} onClick={() => selectHistory(entry)}>
-                    <strong>{entry.title}</strong>
-                    <small>{entry.client === "codex" ? "Codex" : "Claude"} · {entry.model || "模型未知"} · {entry.scope === "global" ? "系统全局 · 点击后导入" : (config.profiles.find((profile) => profile.id === entry.profile_id)?.name ?? (entry.profile_name || "来源配置未知"))} · {new Date(entry.updated_at * 1000).toLocaleString()}</small>
-                    {entry.preview && <small>{entry.preview}</small>}
-                    <small title={entry.workspace}>{entry.workspace || "项目目录未知"}</small>
-                  </button>
-                ))}
-              {!historyLoading && !historyError && !history.length && <p>暂无可恢复的本地对话。</p>}
+                : <HistoryOutline
+                    rows={matchingHistory.map((entry) => ({ entry, path: historyByDirectory ? historyPathParts(entry.workspace) : [] }))}
+                    profiles={config.profiles}
+                    onSelect={selectHistory}
+                  />}
+              {!historyLoading && !historyError && !matchingHistory.length && <p>暂无可恢复的本地对话。</p>}
             </div>
             <div className="dialog-actions"><button className="secondary-button" onClick={() => setHistoryOpen(false)}>关闭</button></div>
           </section>
         </div>
       )}
+      {showSSHConnection && <SSHConnection close={() => setShowSSHConnection(false)} />}
       {showProfileDialog && (
         <ProfileDialog
           onClose={() => setShowProfileDialog(false)}
@@ -781,6 +813,53 @@ function App() {
       )}
     </div>
   );
+}
+
+function historyPathParts(workspace: string): string[] {
+  // Keep the server and share together as the root for UNC paths.
+  const unc = workspace.startsWith("\\\\");
+  const parts = workspace.split(/[\\/]+/).filter(Boolean);
+  return unc && parts.length >= 2 ? ["\\\\" + parts[0] + "\\" + parts[1], ...parts.slice(2)] : parts;
+}
+
+function HistoryOutline({ rows, profiles, onSelect }: {
+  rows: { entry: LocalConversation; path: string[] }[];
+  profiles: KeyProfile[];
+  onSelect: (entry: LocalConversation) => void;
+}) {
+  const folders = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const folder = row.path[0];
+    if (!folder) continue;
+    const group = folders.get(folder) ?? [];
+    group.push(row);
+    folders.set(folder, group);
+  }
+  return <>
+    {[...folders].sort(([a], [b]) => a.localeCompare(b)).map(([folder, group]) => {
+      const parts = [folder];
+      for (const part of group[0].path.slice(1)) {
+        if (!group.every((row) => row.path[parts.length] === part)) break;
+        parts.push(part);
+      }
+      const label = parts.join("\\");
+      return <details key={label} className="history-directory">
+        <summary title={label}><FolderOpen size={16} /> <strong>{label}</strong></summary>
+        <div className="history-directory-children">
+          <HistoryOutline rows={group.map((row) => ({ ...row, path: row.path.slice(parts.length) }))}
+            profiles={profiles} onSelect={onSelect} />
+        </div>
+      </details>;
+    })}
+    {rows.filter((row) => !row.path.length).map(({ entry }) => (
+      <button key={entry.history_ref} onClick={() => onSelect(entry)}>
+        <strong>{entry.title}</strong>
+        <small>{entry.client === "codex" ? "Codex" : "Claude"} · {entry.model || "模型未知"} · {entry.scope === "global" ? "系统 CLI" : (profiles.find((profile) => profile.id === entry.profile_id)?.name ?? (entry.profile_name || "来源配置未知"))} · {new Date(entry.updated_at * 1000).toLocaleString()}</small>
+        {entry.preview && <small>{entry.preview}</small>}
+        <small title={entry.workspace}>{entry.workspace || "项目目录未知"}</small>
+      </button>
+    ))}
+  </>;
 }
 
 function TerminalPane({

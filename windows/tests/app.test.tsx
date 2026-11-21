@@ -52,8 +52,8 @@ describe("工作会话配置", () => {
     });
     await openApp();
 
-    fireEvent.click(screen.getByRole("button", { name: "对话历史" }));
-    await screen.findByRole("heading", { name: "全部目录的对话历史" });
+    fireEvent.click(screen.getByRole("button", { name: "恢复最近对话" }));
+    await screen.findByRole("heading", { name: "恢复最近对话" });
     expect(invoke).toHaveBeenCalledWith("list_all_history");
   });
 
@@ -102,7 +102,7 @@ describe("工作会话配置", () => {
     const launch = screen.getByRole<HTMLButtonElement>("button", { name: "启动" });
     expect(launch.disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Codex" }));
-    fireEvent.click(screen.getByRole("button", { name: "系统" }));
+    fireEvent.click(screen.getByRole("button", { name: "系统 CLI" }));
     expect(screen.queryByRole("combobox", { name: "选择模型" })).toBeNull();
 
     await waitFor(() => expect(launch.disabled).toBe(false));

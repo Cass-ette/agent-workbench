@@ -98,14 +98,15 @@ class ProfileStore(context: Context) {
         val rows = JSONArray(prefs.getString("ssh_targets", "[]"))
         (0 until rows.length()).mapNotNull { index -> runCatching {
             val row = rows.getJSONObject(index)
-            SshTargetPolicy.validate(row.getString("name"), row.getString("host"), row.optString("user"), row.optInt("port", 22).toString())
+            SshTargetPolicy.fromConnectionInfo(row, remember = true)
                 .copy(id = row.getString("id"))
         }.getOrNull() }
     } catch (_: Exception) { emptyList() }
 
     fun saveSshTargets(targets: List<SshTarget>) {
         val rows = JSONArray(targets.map { JSONObject().put("id", it.id).put("name", it.name)
-            .put("host", it.host).put("user", it.user).put("port", it.port) })
+            .put("host", it.host).put("user", it.user).put("port", it.port)
+            .put("platform", it.platform).put("host_key", it.hostKey).put("remember", it.remember) })
         check(prefs.edit().putString("ssh_targets", rows.toString()).commit()) { "无法保存电脑配置" }
     }
 

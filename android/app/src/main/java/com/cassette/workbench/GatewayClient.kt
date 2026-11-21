@@ -30,7 +30,12 @@ object GatewayClient {
             val status = connection.responseCode
             if (status !in 200..299) {
                 // Never display arbitrary upstream error bodies: they can echo credentials.
-                error(when (status) {
+                val localConflict = if (bridge && status == 409) runCatching {
+                    connection.errorStream.use { input ->
+                        JSONObject(String(input.readBytesBounded(4096), Charsets.UTF_8)).optString("error").take(180)
+                    }
+                }.getOrNull()?.takeIf(String::isNotBlank) else null
+                error(localConflict ?: when (status) {
                     401, 403 -> "凭据被拒绝（HTTP $status）"
                     404 -> "接口不存在（HTTP 404）"
                     in 300..399 -> "服务要求重定向，已阻止转发调用 Key"

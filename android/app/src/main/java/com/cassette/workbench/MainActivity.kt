@@ -169,6 +169,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
     var selectModel by remember { mutableStateOf(false) }
     var confirmResume by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
+    var allHistoryProjects by remember { mutableStateOf(false) }
     var confirmCompatibility by remember { mutableStateOf(false) }
     var newTerminalMenu by rememberSaveable { mutableStateOf(false) }
     var splitEnabled by rememberSaveable { mutableStateOf(false) }
@@ -188,9 +189,10 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                     Text(model.sshTarget?.destination ?: model.options.workspace, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (model.localExecution && model.runtimeEnvironment == "debian") TextButton(onClick = {
+                    allHistoryProjects = true
                     showHistory = true
-                    model.refreshHistory()
-                }) { Text("对话历史") }
+                    model.refreshHistory(allProjects = true)
+                }, enabled = model.connected && !model.busy) { Text("恢复最近对话") }
                 TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "收起配置" else "配置任务") }
             }
             if (expanded) Column(Modifier.fillMaxWidth().heightIn(max = 370.dp).verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
@@ -236,12 +238,27 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                 }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    ChoiceField("会话", if (model.runtimeEnvironment == "vm") modeName(model.options.mode) else model.selectedHistory?.title ?: modeName(model.options.mode), Modifier.weight(1f),
-                        listOf("new" to "新会话", "continue" to "继续最近会话", "resume" to if (model.runtimeEnvironment == "vm") "在 VM 中选择历史会话" else "选择历史会话"), {
-                            if (it == "resume" && model.runtimeEnvironment == "debian") { showHistory = true; model.refreshHistory() }
-                            else model.updateOptions(model.options.copy(mode = it))
+                    val inVm = model.runtimeEnvironment == "vm"
+                    val modes = if (inVm) listOf("new" to "新会话", "continue" to "恢复 VM 当前配置的最近对话",
+                        "resume" to "在 VM 终端选择对话") else
+                        listOf("new" to "新会话", "continue" to "恢复最近对话", "resume" to "从历史创建分支")
+                    ChoiceField("会话", modes.firstOrNull { it.first == model.options.mode }?.second ?: "新会话",
+                        Modifier.weight(1f), modes, { mode ->
+                            when {
+                                inVm || mode == "new" -> model.updateOptions(model.options.copy(mode = mode))
+                                mode == "continue" -> model.restoreRecentInProject()
+                                else -> {
+                                    allHistoryProjects = false
+                                    showHistory = true
+                                    model.refreshHistory()
+                                }
+                            }
                         })
-                    Button(onClick = { if (model.options.mode == "new") model.launch() else confirmResume = true }, enabled = model.connected && !model.busy && model.localAgentSupported, modifier = Modifier.height(56.dp)) { Text(if (model.busy) "处理中…" else "启动 Agent") }
+                    Button(onClick = { if (model.options.mode == "new") model.launch() else confirmResume = true },
+                        enabled = model.connected && !model.busy && model.localAgentSupported,
+                        modifier = Modifier.height(56.dp)) {
+                        Text(if (!inVm && model.options.mode == "resume") "启动分支" else "启动 Agent")
+                    }
                 }
                 Text(if (model.runtimeEnvironment == "vm") "Agent 在完整 Linux VM 中执行，模型请求发往所选网关；VM 内可运行 Docker 和系统级任务。首次启动可能需要等待虚拟机就绪。"
                     else "Agent 在手机 Debian 中执行，模型请求发往所选网关。首次启动可能需要选择主题并确认 API Key。",
@@ -361,46 +378,78 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
         }
     }
     if (selectModel) ModelPicker(model, onDismiss = { selectModel = false })
-    if (showHistory) HistoryPicker(model, onDismiss = { showHistory = false }, onSelect = {
-        model.chooseHistory(it)
-        expanded = true
+    if (showHistory) HistoryPicker(model, allHistoryProjects, onDismiss = { showHistory = false }, onSelect = {
         showHistory = false
+        if (allHistoryProjects) model.restoreOriginal(it)
+        else {
+            model.chooseHistory(it)
+            expanded = true
+        }
     })
     if (confirmCompatibility) AlertDialog(onDismissRequest = { confirmCompatibility = false },
         title = { Text("启用 Codex 命令兼容模式？") },
         text = { Text("部分安卓设备的 Debian/PRoot 无法运行 Codex Linux 沙箱，表现为能聊天但命令执行失败。启用后，Codex 将不使用这层文件与网络沙箱，并保留按需审批：是否请求确认由 Codex 决定，普通命令可以直接执行，并非逐条确认。它仍受 Android 的应用隔离限制，但可访问 Termux 及绑定给 Debian 的文件，范围不限于当前项目。仅用于你信任的任务。已运行终端保持原权限，之后新建 Codex 使用此选择，可随时关闭。") },
         confirmButton = { TextButton(onClick = { model.updateOptions(model.options.copy(codexCompatibility = true)); confirmCompatibility = false }) { Text("启用并记住") } },
         dismissButton = { TextButton(onClick = { confirmCompatibility = false }) { Text("保留沙箱") } })
-    if (confirmResume) AlertDialog(onDismissRequest = { confirmResume = false }, title = { Text("恢复历史会话？") },
-        text = { Text(if (model.runtimeEnvironment == "vm") {
-            "Linux VM 内的 Codex/Claude 将从虚拟机自己的历史目录中选择会话。手机 Debian 历史不会共享给 VM。历史上下文会发送到当前网关，可能产生费用。"
-        } else model.selectedHistory?.let {
-            "${it.title}\n配置：${model.profile?.name.orEmpty()}\n网关：${model.profile?.gateway.orEmpty()}\n模型：${model.options.model}\n\n相同配置续接原会话；更换配置或来源不明时创建独立分支。历史上下文会发送到这个网关，可能产生费用。"
-        } ?: "历史上下文会发送给当前调用 Key 和所选模型，可能产生费用。") },
-        confirmButton = { TextButton(onClick = { confirmResume = false; model.launch() }) { Text("恢复并启动") } },
-        dismissButton = { TextButton(onClick = { confirmResume = false }) { Text("取消") } })
+    if (confirmResume) {
+        val inVm = model.runtimeEnvironment == "vm"
+        AlertDialog(onDismissRequest = { confirmResume = false },
+            title = { Text(if (inVm) "从 Linux VM 历史恢复？" else "从历史创建分支？") },
+            text = { Text(if (inVm) {
+                "在 Linux VM 内查找当前项目和调用配置的会话。历史上下文会发往当前网关，可能产生费用。"
+            } else model.selectedHistory?.let {
+                "${it.title}\n调用配置：${model.profile?.name.orEmpty()}\n网关：${model.profile?.gateway.orEmpty()}\n模型：${model.options.model}\n\n新分支使用这套配置，保留原对话。"
+            }.orEmpty()) },
+            confirmButton = { TextButton(onClick = { confirmResume = false; model.launch() }) { Text(if (inVm) "打开 VM 终端" else "创建分支并启动") } },
+            dismissButton = { TextButton(onClick = { confirmResume = false }) { Text("取消") } })
+    }
 }
 
-@Composable private fun HistoryPicker(model: WorkbenchModel, onDismiss: () -> Unit, onSelect: (LocalConversation) -> Unit) {
+@Composable private fun HistoryPicker(model: WorkbenchModel, allProjects: Boolean, onDismiss: () -> Unit, onSelect: (LocalConversation) -> Unit) {
     var query by remember { mutableStateOf("") }
-    val rows = model.history.filter { row ->
+    var directory by remember { mutableStateOf<List<String>?>(null) }
+    fun parts(row: LocalConversation) = row.workspace.split('/').filter(String::isNotBlank)
+    val matches = model.history.filter { row ->
         listOf(row.title, row.preview, row.workspace, row.model, row.client)
             .any { it.contains(query.trim(), ignoreCase = true) }
     }
+    val prefix = directory
+    val rows = if (prefix == null) matches else matches.filter { parts(it) == prefix }
+    val folders = if (prefix == null) emptyList() else matches.mapNotNull { row ->
+        val path = parts(row)
+        if (path.take(prefix.size) == prefix) path.getOrNull(prefix.size) else null
+    }.distinct().sorted()
     AlertDialog(onDismissRequest = onDismiss, title = {
         Column {
-            Text("当前项目的对话历史")
-            Text(model.options.workspace, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            Text(if (allProjects) "恢复最近对话" else "从当前项目的历史创建分支")
+            Text(if (allProjects) "点击对话，用原配置恢复" else model.options.workspace,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }, text = {
         Column {
-            OutlinedTextField(query, { query = it }, label = { Text("搜索标题、模型或项目") }, singleLine = true)
+            if (allProjects) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = prefix == null, onClick = { directory = null }, label = { Text("最近") })
+                FilterChip(selected = prefix != null, onClick = { directory = emptyList() }, label = { Text("按目录") })
+            }
+            OutlinedTextField(query, { query = it; if (prefix != null) directory = emptyList() },
+                label = { Text("搜索标题、模型或项目") }, singleLine = true)
+            if (prefix != null && prefix.isNotEmpty()) {
+                TextButton(onClick = { directory = prefix.dropLast(1) }) { Text("‹ 上一级") }
+                Text(prefix.joinToString("/", prefix = "/"), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelSmall)
+            }
             when {
                 model.historyLoading -> LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 10.dp))
                 model.historyError.isNotEmpty() -> Text(model.historyError, Modifier.padding(top = 10.dp))
-                rows.isEmpty() -> Text("暂无匹配的本地对话", Modifier.padding(top = 10.dp))
+                rows.isEmpty() && folders.isEmpty() -> Text("暂无匹配的本地对话", Modifier.padding(top = 10.dp))
                 else -> LazyColumn(Modifier.heightIn(max = 300.dp)) {
+                    if (prefix != null) items(folders, key = { "folder:$it" }) { folder ->
+                        TextButton(onClick = { directory = prefix + folder }, modifier = Modifier.fillMaxWidth()) {
+                            Text(folder, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("›")
+                        }
+                    }
                     items(rows, key = { it.reference }) { row ->
                         val profile = model.profiles.firstOrNull { it.id == row.profileId }?.name ?: "来源配置未知"
                         Column(Modifier.fillMaxWidth().clickable { onSelect(row) }.padding(vertical = 10.dp)) {
@@ -549,6 +598,7 @@ termux-reload-settings
     val version = model.termux.version()
     val termuxApk = termuxApkUrl(Build.SUPPORTED_ABIS)
     var addingComputer by remember { mutableStateOf(false) }
+    var removingComputer by remember { mutableStateOf<SshTarget?>(null) }
     LaunchedEffect(model.connected) {
         if (model.connected && !model.runtimeEnvironmentsKnown && model.termux.permitted()) model.connect()
     }
@@ -632,46 +682,77 @@ termux-reload-settings
             Text("SSH 电脑", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             TextButton(onClick = { addingComputer = true }) { Text("添加电脑") }
         }
-        Text("通过 Termux 的 OpenSSH 连接 Mac、Windows 或服务器。支持 SSH 配置别名和 ProxyJump；密码、私钥与主机指纹由 Termux 管理。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("在电脑工作台打开「手机连接」，复制连接码到这里。手机可以连接局域网或可达的公网地址，也支持 Tailscale。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         model.sshTargets.forEach { target ->
             OutlinedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) {
                 Text(target.name, fontWeight = FontWeight.Medium)
                 Text(target.destination, style = MaterialTheme.typography.bodySmall)
                 Row {
-                    TextButton(onClick = { model.updateOptions(model.options.copy(executionId = target.id)); model.message("已选择 ${target.name}，可回工作区连接 SSH") }) { Text("选择") }
+                    TextButton(enabled = !model.busy, onClick = {
+                        model.updateOptions(model.options.copy(executionId = target.id))
+                        model.launch(onOpened = changeToWorkspace)
+                    }) { Text("连接") }
                     Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { model.removeSshTarget(target.id) }) { Text("删除配置") }
+                    TextButton(enabled = !model.busy, onClick = { removingComputer = target }) { Text("移除") }
                 }
             } }
         }
-        Text("首次连接请核对电脑上的 SSH 主机指纹。这里打开新的远程 Shell，不接管桌面已打开的标签页；网络断开后远程任务是否保留取决于电脑端的会话管理。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("每次连接会打开一个新的远程 Shell。需要在断网后继续运行的任务可在电脑上使用 tmux。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         HorizontalDivider()
         Text("环境选择建议", fontWeight = FontWeight.SemiBold)
         Text("Debian 启动快、耗电较低；Linux VM 提供独立内核、虚拟机内 root 和 Docker，但 QEMU 软件模拟更慢。SSH 可联网借用电脑或服务器。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text("Android ${BuildConfig.VERSION_NAME} · $refreshed", style = MaterialTheme.typography.labelSmall)
     }
     if (addingComputer) AddComputerDialog(model) { addingComputer = false }
+    removingComputer?.let { target ->
+        AlertDialog(
+            onDismissRequest = { removingComputer = null },
+            title = { Text("移除「${target.name}」？") },
+            text = { Text(if (target.platform.isNotEmpty()) "会清除本机的连接信息和配对密钥。若要在电脑上撤销授权，可删除 SSH 授权列表中标记为 AgentWorkbench-Android-${target.id} 的这一条。"
+                else "会移除本机保存的连接信息。") },
+            confirmButton = { TextButton(onClick = { removingComputer = null; model.removeSshTarget(target.id) }) { Text("移除") } },
+            dismissButton = { TextButton(onClick = { removingComputer = null }) { Text("取消") } },
+        )
+    }
 }
 
 @Composable private fun AddComputerDialog(model: WorkbenchModel, dismiss: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    var manual by remember { mutableStateOf(false) }
+    var connectionCode by remember { mutableStateOf("") }
+    var rememberPhone by remember { mutableStateOf(true) }
     var name by remember { mutableStateOf("") }
     var host by remember { mutableStateOf("") }
     var user by remember { mutableStateOf("") }
     var port by remember { mutableStateOf("22") }
     AlertDialog(onDismissRequest = dismiss, title = { Text("添加 SSH 电脑") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(name, { name = it }, label = { Text("电脑名称") }, singleLine = true)
-            OutlinedTextField(host, { host = it }, label = { Text("IP、域名或 SSH 别名") }, singleLine = true)
-            OutlinedTextField(user, { user = it }, label = { Text("用户名（可留空使用 SSH 配置）") }, singleLine = true)
-            OutlinedTextField(port, { port = it }, label = { Text("SSH 端口") }, singleLine = true)
-            Text("需先在电脑启用 SSH，并确保手机可达。SSH 别名、跳板、私钥请在 Termux 的 ~/.ssh/config 配置；不会复制电脑已有的凭据。", style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = !manual, onClick = { manual = false }, label = { Text("连接码") })
+                FilterChip(selected = manual, onClick = { manual = true }, label = { Text("手动填写") })
+            }
+            if (manual) {
+                OutlinedTextField(name, { name = it }, label = { Text("电脑名称") }, singleLine = true)
+                OutlinedTextField(host, { host = it }, label = { Text("IP、域名或 SSH 别名") }, singleLine = true)
+                OutlinedTextField(user, { user = it }, label = { Text("用户名（可留空使用 SSH 配置）") }, singleLine = true)
+                OutlinedTextField(port, { port = it }, label = { Text("SSH 端口") }, singleLine = true)
+            } else {
+                Text("在 Mac 或 Windows 工作台打开「手机连接」，复制连接码。首次连接时在终端输入电脑账号密码。")
+                TextButton(onClick = { clipboard.getText()?.text?.let { connectionCode = it } }) { Text("粘贴连接码") }
+                OutlinedTextField(connectionCode, { connectionCode = it }, label = { Text("电脑连接码") }, maxLines = 3)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = rememberPhone, onCheckedChange = { rememberPhone = it })
+                    Text("账号支持时记住此手机")
+                }
+            }
             if (model.error.isNotBlank()) Text(model.error, color = MaterialTheme.colorScheme.error)
         }
-    }, confirmButton = { TextButton(onClick = { model.saveSshTarget(name, host, user, port, dismiss) }) { Text("保存") } },
-        dismissButton = { TextButton(onClick = dismiss) { Text("取消") } })
+    }, confirmButton = { TextButton(onClick = {
+        if (manual) model.saveSshTarget(name, host, user, port, dismiss)
+        else model.importSshConnection(connectionCode, rememberPhone, dismiss)
+    }) { Text("添加") } }, dismissButton = { TextButton(onClick = dismiss) { Text("取消") } })
 }
 
-private fun modeName(value: String) = when (value) { "continue" -> "继续最近会话"; "resume" -> "选择历史会话"; else -> "新会话" }
 
 private fun usageNumber(value: Long?): String = value?.toString() ?: "未提供"
 private fun usageCompact(value: UsageSummary): String = if (value.inputTokens == null && value.outputTokens == null) "Token 未提供" else "Token ${usageNumber(value.inputTokens)} / ${usageNumber(value.outputTokens)}"

@@ -246,3 +246,9 @@ button { color: inherit; }
   .setup-footnote { padding-top: 7px; }
   .terminal-panel { margin-top: 9px; }
 }
+
+.history-view-switch { width: min(100%, 240px); }
+.history-directory > summary { padding: 8px; border-bottom: 1px solid #dfe3e6; cursor: pointer; overflow-wrap: anywhere; }
+.history-directory > summary svg { vertical-align: middle; margin-right: 4px; }
+.history-directory > summary strong { white-space: normal; }
+.history-directory-children { margin-left: 14px; border-left: 1px solid #dfe3e6; }

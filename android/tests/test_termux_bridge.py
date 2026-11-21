@@ -3,6 +3,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -65,6 +68,14 @@ class BridgeTests(unittest.TestCase):
                     self.assertNotIn("--fork-session", args[-1])
                     B.launch_spec(base, root)
                     self.assertEqual(list(source_home.parent.glob("branch-*")), [])
+                    _, original_env, _ = B.launch_spec({**base, "history_action": "original"}, root)
+                    home_var = "CODEX_HOME" if client == "codex" else "CLAUDE_CONFIG_DIR"
+                    self.assertEqual(Path(original_env[home_var]), source_home)
+                    with self.assertRaises(B.HistoryUnavailable):
+                        B.launch_spec({**base, "key": "replacement-key", "history_action": "original"}, root)
+                    self.assertEqual(list(source_home.parent.glob("branch-*")), [])
+                    _, branch_env, _ = B.launch_spec({**base, "history_action": "fork"}, root)
+                    self.assertNotEqual(Path(branch_env[home_var]), source_home)
 
                     changed_args, changed_env, _ = B.launch_spec({**base, "model": "model-b"}, root)
                 changed_home = Path(changed_env["CODEX_HOME"] if client == "codex" else changed_env["CLAUDE_CONFIG_DIR"])
@@ -230,6 +241,61 @@ class BridgeTests(unittest.TestCase):
             self.assertNotIn("do-not-forward", str(env))
             self.assertNotIn("phone-gateway-key", str(env))
             self.assertEqual(workspace, home)
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "OpenSSH needed for the pairing test")
+    def test_ssh_pairing_pins_host_and_remembers_only_after_key_authentication(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home)
+            host_identity = root / "host_identity"
+            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(host_identity)], check=True)
+            host_key = " ".join(host_identity.with_suffix(".pub").read_text().split()[:2])
+            session_id = "01a1ec86-bf14-70f2-8144-874b179beb72"
+            target = {"id": session_id, "platform": "macos", "host_key": host_key, "remember": True}
+            computer = root / "computer"
+            authorized = computer / ".ssh/authorized_keys"
+            authorized.parent.mkdir(parents=True)
+            authorized.write_text("existing line without newline")
+            authorized.chmod(0o640)
+            fake_ssh = root / "ssh"
+            fake_ssh.write_text("""#!/bin/sh
+for value do
+    last=$value
+    case "$value" in
+        BatchMode=yes) batch=yes ;;
+        PubkeyAuthentication=no) password=yes ;;
+    esac
+done
+if [ "$batch" = yes ]; then
+    grep -q AgentWorkbench-Android "$HOME/.ssh/authorized_keys" && [ "$REJECT_KEY" != yes ]
+elif [ "$password" = yes ]; then
+    printf 'PASSWORD'
+elif [ "$last" = laptop ]; then
+    printf 'INTERACTIVE'
+else
+    /bin/sh -c "$last"
+fi
+""")
+            fake_ssh.chmod(0o700)
+            env = {**os.environ, "HOME": str(computer)}
+            script = B.paired_ssh_arguments(str(fake_ssh), root, env, target, "laptop", "user", 2222)
+            pairing = root / ".local/share/agent-workbench/ssh" / session_id
+            self.assertEqual((pairing / "known_hosts").read_text(), f"[laptop]:2222 {host_key}\n")
+            self.assertEqual((pairing / "id_ed25519").stat().st_mode & 0o777, 0o600)
+            self.assertIn("StrictHostKeyChecking=yes", shlex.split(script))
+            rejected = subprocess.run(["/bin/sh", "-c", script], env={**env, "REJECT_KEY": "yes"},
+                                      input="\n", capture_output=True, text=True, check=True)
+            self.assertIn("PASSWORD", rejected.stdout)
+            self.assertFalse((pairing / "paired").exists())
+            installed = subprocess.run(["/bin/sh", "-c", script], env=env, capture_output=True, text=True, check=True)
+            self.assertIn("INTERACTIVE", installed.stdout)
+            self.assertTrue((pairing / "paired").exists())
+            lines = authorized.read_text().splitlines()
+            self.assertEqual(lines[0], "existing line without newline")
+            self.assertEqual(sum(line.endswith("AgentWorkbench-Android-" + session_id) for line in lines), 1)
+            self.assertEqual(authorized.stat().st_mode & 0o777, 0o640)
+            repeat = B.paired_ssh_arguments(str(fake_ssh), root, env, target, "laptop", "user", 2222)
+            self.assertNotIn("AuthorizedKeys", repeat)
+            self.assertNotIn("BatchMode=yes", repeat)
 
     def test_debian_shell_uses_same_user_and_workspace_mount_as_agent(self):
         with tempfile.TemporaryDirectory() as home, patch.object(B.shutil, "which", side_effect=lambda name, **kw: "/usr/bin/" + name):

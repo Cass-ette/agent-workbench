@@ -9,6 +9,7 @@ struct ManagerView: View {
     @State private var isTaskSetupVisible = true
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var isUsagePresented = false
+    @State private var showSSHConnection = false
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -60,20 +61,17 @@ struct ManagerView: View {
         .sheet(isPresented: $model.isBillingSettingsPresented) {
             BillingSettingsSheet(model: model)
         }
+        .sheet(isPresented: $showSSHConnection) { SSHConnectionSheet() }
         .sheet(isPresented: $model.isHistoryPresented) {
             HistoryPickerSheet(model: model)
         }
-        .confirmationDialog("恢复此会话？", isPresented: $model.isRestoreConfirmationPresented,
+        .confirmationDialog("从历史创建分支？", isPresented: $model.isRestoreConfirmationPresented,
                             titleVisibility: .visible) {
-            Button(model.selectedHistory == nil ? "继续最近会话" : "恢复所选对话") {
-                model.launchConfirmed()
-            }
+            Button("创建分支并启动") { model.launchConfirmed() }
             Button("取消", role: .cancel) {}
         } message: {
             if let history = model.selectedHistory {
-                Text("对话：\(history.title)\n配置：\(model.selectedProfile?.name ?? "")\n模型：\(model.selectedModel)\n网关：\(model.gateway)\n\n相同配置续接原会话；更换配置、导入系统历史或来源不明时创建独立分支。历史上下文会发送到这个网关，可能产生费用。")
-            } else {
-                Text("所选会话的历史内容会发送给当前调用 Key 和上游模型；可能产生费用。")
+                Text("对话：\(history.title)\n调用配置：\(model.selectedProfile?.name ?? "")\n模型：\(model.selectedModel)\n网关：\(model.gateway)\n\n新分支使用这套配置，保留原对话。历史上下文会发送到该网关，可能产生费用。")
             }
         }
     }
@@ -115,7 +113,14 @@ struct ManagerView: View {
                 isTaskSetupVisible = true
                 Task { await model.showGlobalHistory() }
             } label: {
-                Label("对话历史", systemImage: "clock.arrow.circlepath")
+                Label("恢复最近对话", systemImage: "clock.arrow.circlepath")
+            }
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 14)
+
+            Button { showSSHConnection = true } label: {
+                Label("手机连接", systemImage: "iphone")
             }
             .buttonStyle(.borderless)
             .padding(.horizontal, 16)
@@ -299,14 +304,15 @@ struct ManagerView: View {
             .frame(width: 130)
             .help("选择要启动的 Agent")
 
-            Picker("运行范围", selection: $model.launchScope) {
+            Picker("启动方式", selection: $model.launchScope) {
                 ForEach(LaunchScope.allCases) { scope in
                     Text(scope.title).tag(scope)
                 }
             }
-            .pickerStyle(.segmented)
-            .frame(width: 132)
-            .help("选择使用工作台 Key，或沿用所选客户端的系统配置")
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+            .help("工作台配置使用这里选的 Key 和模型。系统 CLI 沿用你在终端直接运行该命令时的配置。")
 
             if model.launchScope == .workbench {
                 Button {
@@ -326,7 +332,7 @@ struct ManagerView: View {
                 .frame(minWidth: 150, idealWidth: 205, maxWidth: 235)
                 .help("\(model.models.count) 个可用模型")
             } else {
-                Label("系统配置", systemImage: "globe")
+                Text("沿用终端配置")
                     .lineLimit(1)
                     .foregroundStyle(.secondary)
                     .frame(minWidth: 150, idealWidth: 205, maxWidth: 235, alignment: .leading)
@@ -361,18 +367,19 @@ struct ManagerView: View {
                         }
                     }
                 } label: {
-                    Label(model.selectedHistory?.title ?? model.sessionMode.compactTitle, systemImage: "clock.arrow.circlepath")
+                    Label(model.sessionMode.compactTitle, systemImage: "clock.arrow.circlepath")
                         .lineLimit(1)
                         .frame(maxWidth: 145)
                 }
                 .menuStyle(.borderlessButton)
-                .help(model.sessionMode == .new ? "选择新会话或恢复方式" : "恢复会话会转发历史内容，并可能产生费用")
+                .help(model.selectedHistory.map { "分支来源：\($0.title)" } ??
+                      "恢复最近对话沿用原配置。从历史创建分支使用当前选中的配置。")
             }
 
             Button {
                 model.requestLaunch()
             } label: {
-                Label("启动", systemImage: "play.fill")
+                Label(model.sessionMode == .resume && model.launchScope == .workbench ? "启动分支" : "启动", systemImage: "play.fill")
             }
             .buttonStyle(.borderedProminent)
             .disabled(!model.canLaunch)
@@ -429,6 +436,45 @@ struct ManagerView: View {
 
 }
 
+private struct HistoryNode: Identifiable {
+    let id: String
+    let title: String
+    var children: [HistoryNode]? = nil
+    var entry: LocalHistoryEntry? = nil
+
+    static func outline(_ entries: [LocalHistoryEntry]) -> [Self] {
+        build(entries.map { entry in
+            let parts = entry.workspace.isEmpty ? [] : URL(fileURLWithPath: entry.workspace).standardizedFileURL.pathComponents
+            return (parts, entry)
+        }, prefix: [])
+    }
+
+    private static func build(_ rows: [([String], LocalHistoryEntry)], prefix: [String]) -> [Self] {
+        var folders: [String: [([String], LocalHistoryEntry)]] = [:]
+        var conversations: [Self] = []
+        for (parts, entry) in rows {
+            if parts.count > prefix.count {
+                folders[parts[prefix.count], default: []].append((parts, entry))
+            } else {
+                conversations.append(Self(id: entry.id, title: entry.title, entry: entry))
+            }
+        }
+        let branches = folders.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.compactMap { folder -> Self? in
+            guard let group = folders[folder] else { return nil }
+            var path = prefix + [folder]
+            // Skip parent directories with neither conversations nor multiple children.
+            while let next = group.first?.0.dropFirst(path.count).first,
+                  group.allSatisfy({ $0.0.count > path.count && $0.0[path.count] == next }) {
+                path.append(next)
+            }
+            return Self(id: "folder:" + NSString.path(withComponents: path),
+                        title: NSString.path(withComponents: Array(path.dropFirst(prefix.count))),
+                        children: build(group, prefix: path))
+        }
+        return branches + conversations
+    }
+}
+
 private struct HistoryPickerSheet: View {
     @ObservedObject var model: ManagerModel
     @Environment(\.dismiss) private var dismiss
@@ -445,26 +491,33 @@ private struct HistoryPickerSheet: View {
         }
     }
 
+    @State private var byDirectory = false
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(model.historyScope == "global" ? "全部目录的对话历史" : "当前项目的对话历史").font(.headline)
+                    Text(model.historyScope == "global" ? "恢复最近对话" : "从当前项目的历史创建分支").font(.headline)
                     Text(model.historyScope == "global"
-                         ? "跨项目查找工作台与系统会话；系统会话会复制到工作台后继续。"
-                         : "只显示「\(URL(fileURLWithPath: model.workspace).lastPathComponent)」目录中的会话。")
+                         ? "从所有项目中选一条对话，点击即用原配置恢复。"
+                         : "只列出「\(URL(fileURLWithPath: model.workspace).lastPathComponent)」中的对话。分支使用当前选择的调用配置与模型。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                if model.historyScope == "global" {
-                    Button("当前项目历史") {
-                        Task { await model.showHistory() }
-                    }
-                }
                 Button("关闭") { dismiss() }
                     .keyboardShortcut(.cancelAction)
             }
             .padding(16)
+            if model.historyScope == "global" {
+                Picker("浏览方式", selection: $byDirectory) {
+                    Text("最近").tag(false)
+                    Text("按目录").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
+            }
             TextField("搜索标题、项目或配置", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal, 16)
@@ -479,42 +532,53 @@ private struct HistoryPickerSheet: View {
                                       description: Text("目前没有可供 Claude 或 Codex 恢复的本机会话。"))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(filtered) { entry in
-                    Button {
-                        model.chooseHistory(entry)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 5) {
-                            HStack(spacing: 7) {
-                                Image(systemName: entry.client == "codex" ? "terminal.fill" : "bubble.left.and.bubble.right.fill")
-                                    .foregroundStyle(.secondary)
-                                Text(entry.title.isEmpty ? "未命名会话" : entry.title)
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .lineLimit(1)
-                                Spacer()
-                                Text(entry.updatedDate, style: .relative)
-                                    .font(.caption2).foregroundStyle(.tertiary)
+                List {
+                    if byDirectory {
+                        OutlineGroup(HistoryNode.outline(filtered), children: \.children) { node in
+                            if let entry = node.entry {
+                                conversation(entry)
+                            } else {
+                                Label(node.title, systemImage: "folder").lineLimit(1).truncationMode(.middle)
                             }
-                            Text("\(entry.client == "codex" ? "Codex" : "Claude") · \(entry.model.isEmpty ? "模型未知" : entry.model) · \(entry.isGlobal ? "系统全局 · 点击后导入" : (entry.profile_name.isEmpty ? "来源配置未知" : entry.profile_name))")
-                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            if let preview = entry.preview, !preview.isEmpty {
-                                Text(preview)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
-                            Text(entry.workspace.isEmpty ? "项目目录未知" : entry.workspace)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
                         }
-                        .contentShape(Rectangle())
+                    } else {
+                        ForEach(filtered) { entry in conversation(entry) }
                     }
-                    .buttonStyle(.plain)
-                    .padding(.vertical, 4)
                 }
                 .listStyle(.inset)
             }
         }
         .frame(minWidth: 620, minHeight: 440)
+    }
+
+    private func conversation(_ entry: LocalHistoryEntry) -> some View {
+        Button {
+            model.chooseHistory(entry)
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 7) {
+                    Image(systemName: entry.client == "codex" ? "terminal.fill" : "bubble.left.and.bubble.right.fill")
+                        .foregroundStyle(.secondary)
+                    Text(entry.title.isEmpty ? "未命名会话" : entry.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    Spacer()
+                    Text(entry.updatedDate, style: .relative)
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+                Text("\(entry.client == "codex" ? "Codex" : "Claude") · \(entry.model.isEmpty ? "模型未知" : entry.model) · \(entry.isGlobal ? "系统 CLI" : (entry.profile_name.isEmpty ? "来源配置未知" : entry.profile_name))")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if let preview = entry.preview, !preview.isEmpty {
+                    Text(preview).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
+                Text(entry.workspace.isEmpty ? "项目目录未知" : entry.workspace)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, 4)
     }
 }
 

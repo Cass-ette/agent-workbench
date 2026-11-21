@@ -45,7 +45,7 @@ class TermuxConnection(private val context: Context, private val store: ProfileS
     fun supportsRuntime() = try {
         val health = request("/health")
         health.optString("version") == BuildConfig.VERSION_NAME && health.optInt("build") == BuildConfig.VERSION_CODE &&
-            health.optJSONArray("capabilities").strings().containsAll(listOf("debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "history"))
+            health.optJSONArray("capabilities").strings().containsAll(listOf("debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "history", "history-actions", "ssh-pairing"))
     } catch (_: Exception) { false }
 
     fun startHost(upgrade: Boolean = false) {

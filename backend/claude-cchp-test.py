@@ -511,31 +511,26 @@ def global_history_roots():
     return codex, claude
 
 
-def history_list(workspace=None):
+def history_list(workspace=None, client=None):
     session_history = history_module()
     codex_roots, claude_roots = history_roots()
     rows = session_history.mark_scope(
-        session_history.scan_history(codex_roots, claude_roots, workspace=workspace), "workbench")
+        session_history.scan_history(codex_roots, claude_roots, workspace=workspace, client=client), "workbench")
     print(json.dumps({"sessions": session_history.public_rows(rows)}, ensure_ascii=False))
 
 
-def global_history_list():
+def global_history_list(workspace=None, client=None):
     session_history = history_module()
     codex_roots, claude_roots = global_history_roots()
     workbench_codex, workbench_claude = history_roots()
     rows = session_history.scan_all_history(
-        workbench_codex, workbench_claude, codex_roots, claude_roots)
+        workbench_codex, workbench_claude, codex_roots, claude_roots, workspace=workspace, client=client)
     print(json.dumps({"sessions": session_history.public_rows(rows)}, ensure_ascii=False))
 
 
 def launch_history(history_ref, session_id, client, profile_id, model, workspace_value,
-                   gateway_value=None, include_global=False):
+                   gateway_value=None, include_global=False, *, original=False, force_fork=False):
     session_history = history_module()
-    profile = next((item for item in load_profiles() if item["id"] == profile_id), None)
-    if profile is None:
-        raise RuntimeError("找不到目标调用配置；请刷新配置列表。")
-    if not isinstance(model, str) or not model.strip() or len(model) > 250 or any(c in model for c in "\0\r\n"):
-        raise RuntimeError("目标模型无效。")
     codex_roots, claude_roots = history_roots()
     if include_global:
         global_codex, global_claude = global_history_roots()
@@ -552,17 +547,29 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
         raise RuntimeError("工作目录必须是文件夹。")
     if not row["workspace"] or workspace != Path(row["workspace"]).resolve():
         raise RuntimeError("恢复必须使用这条会话所属的项目目录；请从该目录的历史列表重新选择。")
+    if original:
+        profile_id = row["profile_id"]
+        model = row["_configured_model"]
+    profile = next((item for item in load_profiles() if item["id"] == profile_id), None)
+    if profile is None:
+        raise RuntimeError("原调用配置已移除或无法识别；可从当前项目的历史创建分支。" if original
+                           else "找不到目标调用配置；请刷新配置列表。")
+    if not isinstance(model, str) or not model.strip() or len(model) > 250 or any(c in model for c in "\0\r\n"):
+        raise RuntimeError("无法识别原模型；可从当前项目的历史创建分支。" if original else "目标模型无效。")
     gateway = profile["gateway"]
     if gateway_value and normalize_gateway(gateway_value) != gateway:
         raise RuntimeError("目标网关已变更；请刷新配置后重新确认。")
     key = read_profile_key(profile)
-    if model not in fetch_models(key, gateway):
+    if not original and model not in fetch_models(key, gateway):
         raise RuntimeError("目标调用配置不允许此模型；没有启动恢复会话。")
     executable = CODEX if client == "codex" else CLAUDE
     if not executable.is_file():
         raise RuntimeError("未找到对应客户端；没有恢复会话。")
     fingerprint = session_history.key_fingerprint(key)
-    same_config = session_history.can_resume_in_place(row, profile_id, model, gateway, fingerprint)
+    matches = session_history.can_resume_in_place(row, profile_id, model, gateway, fingerprint)
+    if original and not matches:
+        raise RuntimeError("无法确认原 Key 或网关仍可用；可从当前项目的历史创建分支。")
+    same_config = matches and not force_fork
     if same_config:
         home, seed = Path(row["_home"]), Path(row["_path"])
     else:
@@ -1020,7 +1027,7 @@ def main():
         "menu", "setup", "status", "models", "plan", "chat", "smoke", "usage",
         "profile-account", "profile-billing", "billing-settings", "save-billing-stdin", "remove-billing",
         "profile-pricing", "save-pricing-source-stdin",
-        "gui-state", "history-list", "history-list-global", "history-launch", "history-import-launch",
+        "gui-state", "history-list", "history-list-global", "history-launch", "history-import-launch", "history-resume-original",
         "profile-models", "add-profile-stdin", "set-gateway-stdin",
         "set-profile-gateway-stdin", "launch", "codex-launch",
     ])
@@ -1033,6 +1040,7 @@ def main():
     parser.add_argument("--session-id")
     parser.add_argument("--client", choices=["codex", "claude"])
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--fork-history", action="store_true")
     arguments = parser.parse_args()
     if arguments.action == "menu": return menu()
     if arguments.action == "setup": setup_key(); return 0
@@ -1052,8 +1060,13 @@ def main():
         billing_actions[arguments.action](arguments.profile_id); return 0
     if arguments.action == "plan": plan(arguments.model); return 0
     if arguments.action == "gui-state": gui_state(); return 0
-    if arguments.action == "history-list": history_list(arguments.workspace); return 0
-    if arguments.action == "history-list-global": global_history_list(); return 0
+    if arguments.action == "history-list": history_list(arguments.workspace, arguments.client); return 0
+    if arguments.action == "history-list-global": global_history_list(arguments.workspace, arguments.client); return 0
+    if arguments.action == "history-resume-original":
+        if not all((arguments.history_ref, arguments.session_id, arguments.client, arguments.workspace)):
+            raise RuntimeError("恢复会话缺少历史来源或工作目录。")
+        return launch_history(arguments.history_ref, arguments.session_id, arguments.client,
+                              None, None, arguments.workspace, original=True)
     if arguments.action in {"history-launch", "history-import-launch"}:
         if not all((arguments.history_ref, arguments.session_id, arguments.client,
                     arguments.profile_id, arguments.workspace)):
@@ -1061,7 +1074,8 @@ def main():
         return launch_history(arguments.history_ref, arguments.session_id, arguments.client,
                               arguments.profile_id, arguments.model, arguments.workspace,
                               arguments.gateway_url,
-                              include_global=arguments.action == "history-import-launch")
+                              include_global=arguments.action == "history-import-launch",
+                              force_fork=arguments.fork_history)
     if arguments.action == "profile-models":
         if not arguments.profile_id: raise RuntimeError("缺少 profile-id。")
         profile_models(arguments.profile_id, arguments.gateway_url); return 0

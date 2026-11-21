@@ -214,6 +214,7 @@ def scan_history(
     claude_roots: Iterable[tuple[Path, str, str]],
     limit: int = MAX_SESSION_ROWS,
     workspace: str | Path | None = None,
+    client: str | None = None,
 ) -> list[dict]:
     """Return newest local conversations across the supplied isolated client homes.
 
@@ -221,8 +222,10 @@ def scan_history(
     except the short local title preview needed by the history browser.
     """
     rows = []
-    for _, client, path, home, profile_id, profile_name in _candidates(codex_roots, claude_roots):
-        row = _read(client, path, home, profile_id, profile_name)
+    for _, kind, path, home, profile_id, profile_name in _candidates(codex_roots, claude_roots):
+        if client is not None and kind != client:
+            continue
+        row = _read(kind, path, home, profile_id, profile_name)
         if row and (workspace is None or _same_workspace(row["workspace"], workspace)):
             rows.append(row)
         if len(rows) >= min(limit, MAX_SESSION_ROWS):
@@ -252,9 +255,11 @@ def scan_all_history(
     global_codex_roots: Iterable[tuple[Path, str, str]],
     global_claude_roots: Iterable[tuple[Path, str, str]],
     limit: int = MAX_SESSION_ROWS,
+    workspace: str | Path | None = None,
+    client: str | None = None,
 ) -> list[dict]:
-    local = mark_scope(scan_history(codex_roots, claude_roots, limit), "workbench")
-    global_rows = mark_scope(scan_history(global_codex_roots, global_claude_roots, limit), "global")
+    local = mark_scope(scan_history(codex_roots, claude_roots, limit, workspace, client), "workbench")
+    global_rows = mark_scope(scan_history(global_codex_roots, global_claude_roots, limit, workspace, client), "global")
     rows = sorted(local + global_rows, key=lambda row: row["updated_at"], reverse=True)
     return rows[:min(limit, MAX_SESSION_ROWS)]
 
@@ -309,7 +314,11 @@ def resolve_history(
 
 
 def public_rows(rows: Iterable[dict]) -> list[dict]:
-    return [{key: value for key, value in row.items() if not key.startswith("_")} for row in rows]
+    return [
+        {**{key: value for key, value in row.items() if not key.startswith("_")},
+         "configured_model": row.get("_configured_model") or row.get("model", "")}
+        for row in rows
+    ]
 
 
 def key_fingerprint(key: str) -> str:

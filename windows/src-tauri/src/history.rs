@@ -303,7 +303,7 @@ fn user_home() -> Option<PathBuf> {
 }
 
 /// Scan system-level Claude/Codex homes only for the explicit import action.
-pub fn scan_global() -> Vec<Conversation> {
+fn scan_global_matching(workspace: Option<&Path>) -> Vec<Conversation> {
     let Some(home) = user_home() else { return Vec::new() };
     let mut found = Vec::new();
     for (client, client_home, folder, depth) in [
@@ -323,7 +323,11 @@ pub fn scan_global() -> Vec<Conversation> {
         }
     }
     found.sort_unstable_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.source.cmp(&b.source)));
-    found.into_iter().take(1000).collect()
+    found.into_iter().filter(|row| workspace.is_none_or(|target| same_workspace(Path::new(&row.workspace), target))).take(1000).collect()
+}
+
+pub fn scan_global() -> Vec<Conversation> {
+    scan_global_matching(None)
 }
 
 pub fn scan_all(root: &Path) -> Vec<Conversation> {
@@ -331,6 +335,13 @@ pub fn scan_all(root: &Path) -> Vec<Conversation> {
     rows.extend(scan_global());
     rows.sort_unstable_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.source.cmp(&b.source)));
     rows.into_iter().take(1000).collect()
+}
+
+pub fn scan_project(root: &Path, workspace: &Path) -> Vec<Conversation> {
+    let mut rows = scan_workspace(root, workspace);
+    rows.extend(scan_global_matching(Some(workspace)));
+    rows.sort_unstable_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.source.cmp(&b.source)));
+    rows
 }
 
 pub fn scan_workspace(root: &Path, workspace: &Path) -> Vec<Conversation> {

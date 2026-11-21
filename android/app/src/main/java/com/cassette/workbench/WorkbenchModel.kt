@@ -20,6 +20,8 @@ data class LocalConversation(
     val id: String, val reference: String, val client: String, val title: String,
     val workspace: String, val model: String, val profileId: String, val updatedAt: Long,
     val preview: String = "",
+    val configuredModel: String = model,
+    val gateway: String = "",
 )
 data class UsageSummary(
     val inputTokens: Long? = null,
@@ -159,9 +161,8 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     fun environmentChanged() { environmentRevision++ }
     fun updateOptions(value: TaskOptions) {
         val workspaceChanged = value.workspace != options.workspace
-        val selectedWorkspaceMismatch = selectedHistory?.workspace?.let { it != value.workspace } ?: false
         val next = if (value.mode == "resume" && (value.executionId != "local"
-                || value.client != selectedHistory?.client || selectedWorkspaceMismatch))
+                || (runtimeEnvironment != "vm" && (value.client != selectedHistory?.client || workspaceChanged))))
             value.copy(mode = "new") else value
         if (next.mode != "resume") selectedHistory = null
         if (workspaceChanged) history = emptyList()
@@ -169,64 +170,112 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         store.saveOptions(if (next.mode == "resume") next.copy(mode = "new") else next)
     }
 
-    fun refreshHistory() {
+    private fun readHistory(directory: String?, client: String? = null): List<LocalConversation> {
+        val query = if (directory == null) "scope=all" else
+            "workspace=" + java.net.URLEncoder.encode(directory, Charsets.UTF_8.name())
+        val rows = termux.request("/history?$query" + (client?.let { "&client=$it" } ?: ""), timeout = 15000)
+            .getJSONArray("sessions")
+        return (0 until rows.length()).map { index ->
+            val row = rows.getJSONObject(index)
+            LocalConversation(row.getString("id"), row.getString("history_ref"), row.getString("client"),
+                row.getString("title"), row.getString("workspace"), row.getString("model"),
+                row.getString("profile_id"), row.getLong("updated_at"), row.optString("preview"),
+                row.optString("configured_model", row.getString("model")), row.optString("gateway"))
+        }
+    }
+
+    fun refreshHistory(allProjects: Boolean = false) {
         if (historyLoading) return
         historyLoading = true
+        history = emptyList()
         historyError = ""
-        val requestedWorkspace = options.workspace
+        val directory = if (allProjects) null else options.workspace
         worker.execute {
-            val result = runCatching {
-                val encodedWorkspace = java.net.URLEncoder.encode(requestedWorkspace, Charsets.UTF_8.name())
-                val rows = termux.request("/history?workspace=$encodedWorkspace", timeout = 15000).getJSONArray("sessions")
-                (0 until rows.length()).map { index ->
-                    val row = rows.getJSONObject(index)
-                    LocalConversation(row.getString("id"), row.getString("history_ref"), row.getString("client"),
-                        row.getString("title"), row.getString("workspace"), row.getString("model"),
-                        row.getString("profile_id"), row.getLong("updated_at"), row.optString("preview"))
-                }
-            }
+            val result = runCatching { readHistory(directory) }
             main.post {
-                result.onSuccess { rows ->
-                    if (options.workspace == requestedWorkspace) {
-                        history = rows.filter { row ->
-                            fun canonical(value: String): String {
-                                val userHome = System.getProperty("user.home").orEmpty()
-                                val expanded = if (value == "~") userHome
-                                    else if (value.startsWith("~/")) userHome + value.substring(1)
-                                    else value
-                                return java.io.File(expanded).canonicalPath
-                            }
-                            runCatching { canonical(row.workspace) == canonical(requestedWorkspace) }
-                                .getOrDefault(false)
-                        }
-                    }
-                }.onFailure {
-                    historyError = "无法读取本地历史，请在运行环境页重新连接 Termux"
-                }
+                result.onSuccess { rows -> if (directory == null || options.workspace == directory) history = rows }
+                    .onFailure { historyError = "无法读取本地历史，请在运行环境页重新连接 Termux" }
                 historyLoading = false
             }
         }
     }
 
+    fun restoreRecentInProject() {
+        if (!connected || busy || !localExecution || runtimeEnvironment != "debian") return
+        val snapshot = options
+        if (snapshot.workspace.isBlank()) { error = "请先选择项目目录"; return }
+        busy = true
+        worker.execute {
+            val result = runCatching { readHistory(snapshot.workspace, snapshot.client).firstOrNull() }
+            main.post {
+                busy = false
+                if (!localExecution || runtimeEnvironment != "debian" || options.workspace != snapshot.workspace || options.client != snapshot.client) return@post
+                result.onSuccess { entry ->
+                    if (entry == null) error = "当前项目暂无该客户端的对话可恢复"
+                    else restoreOriginal(entry)
+                }.onFailure { error = safeError(it as? Exception ?: Exception()) }
+            }
+        }
+    }
+
+    fun restoreOriginal(entry: LocalConversation) {
+        launch(original = entry)
+    }
+
     fun chooseHistory(entry: LocalConversation) {
         selectedHistory = entry
-        updateOptions(options.copy(executionId = "local", client = entry.client, workspace = entry.workspace, mode = "resume"))
+        updateOptions(options.copy(executionId = "local", client = entry.client, mode = "resume"))
     }
     fun saveSshTarget(name: String, host: String, user: String, port: String, done: () -> Unit) {
-        runCatching {
-            val target = SshTargetPolicy.validate(name, host, user, port)
-            val next = sshTargets + target
-            store.saveSshTargets(next); sshTargets = next
-            updateOptions(options.copy(executionId = target.id))
-            message("电脑配置已保存；首次连接请核对 SSH 主机指纹")
-            done()
-        }.onFailure { error = it.message?.take(180) ?: "电脑配置保存失败" }
+        runCatching { saveComputer(SshTargetPolicy.validate(name, host, user, port), done) }
+            .onFailure { error = it.message ?: "无法保存电脑" }
+    }
+
+    fun importSshConnection(code: String, remember: Boolean, done: () -> Unit) {
+        runCatching { saveComputer(SshTargetPolicy.connectionCode(code, remember), done) }
+            .onFailure { error = it.message ?: "无法读取连接码" }
+    }
+
+    private fun saveComputer(info: SshTarget, done: () -> Unit) {
+        val existing = sshTargets.firstOrNull { info.platform.isNotEmpty() && it.host == info.host &&
+            it.user == info.user && it.port == info.port && it.hostKey == info.hostKey }
+        val target = if (existing == null) info else info.copy(id = existing.id)
+        val next = sshTargets.filterNot { it.id == target.id } + target
+        store.saveSshTargets(next)
+        sshTargets = next
+        updateOptions(options.copy(executionId = target.id))
+        message(if (target.platform.isEmpty()) "电脑已保存，首次连接请核对主机指纹" else "电脑已添加，可回工作区连接")
+        done()
     }
     fun removeSshTarget(id: String) {
+        val target = sshTargets.firstOrNull { it.id == id } ?: return
+        if (busy) return
+        if (target.platform.isNotEmpty()) {
+            busy = true
+            error = ""
+            worker.execute {
+                try {
+                    if (!termux.supportsRuntime()) {
+                        main.post { busy = false; connectInternal(false) { removeSshTarget(id) } }
+                        return@execute
+                    }
+                    termux.request("/ssh-pairing/$id", "DELETE")
+                    main.post { busy = false; removeComputer(id) }
+                } catch (failure: Exception) {
+                    main.post { busy = false; error = failure.message ?: "无法删除手机配对" }
+                }
+            }
+        } else {
+            removeComputer(id)
+        }
+    }
+
+    private fun removeComputer(id: String) {
         runCatching {
             val next = sshTargets.filterNot { it.id == id }
             store.saveSshTargets(next); sshTargets = next
             if (options.executionId == id) updateOptions(options.copy(executionId = "local"))
+            message("电脑已移除")
         }.onFailure { error = "电脑配置删除失败" }
     }
     fun chooseProfile(id: String) {
@@ -332,7 +381,10 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
             error = "此设备的 Termux 架构暂不支持完整 Linux VM；可使用 Debian Shell 或 SSH 电脑"
             return
         }
-        runtimeEnvironment = value
+        if (runtimeEnvironment != value) {
+            runtimeEnvironment = value
+            updateOptions(options.copy(mode = "new"))
+        }
         store.saveRuntimeEnvironment(value)
     }
 
@@ -437,13 +489,21 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun launch(shell: Boolean = false, shellKind: String = "termux", onOpened: () -> Unit = {}) {
+    fun launch(shell: Boolean = false, shellKind: String = "termux", original: LocalConversation? = null, onOpened: () -> Unit = {}) {
         if (!connected || busy) { error = "请先在环境页连接 Termux"; return }
-        val snapshot = options
+        if (original != null && (!localExecution || runtimeEnvironment != "debian")) return
+        val snapshot = if (original == null) options else options.copy(
+            mode = "resume", workspace = original.workspace, model = original.configuredModel,
+        )
         val selectedEnvironment = runtimeEnvironment
         val vmEnvironment = localExecution && !shell && selectedEnvironment == "vm"
-        val source = selectedHistory.takeIf { !shell && snapshot.mode == "resume" && localExecution && !vmEnvironment }
-        val selected = profile
+        val source = original ?: selectedHistory.takeIf { !shell && snapshot.mode == "resume" && localExecution && !vmEnvironment }
+        val selected = if (original == null) profile else profiles.firstOrNull { it.id == original.profileId }
+        if (original != null && (selected == null || original.configuredModel.isBlank()
+                    || original.gateway != selected.gateway)) {
+            error = "原调用配置、Key 或网关不可用，可从当前项目的历史创建分支"
+            return
+        }
         val vmShell = shell && shellKind == "vm"
         val remote = sshTarget.takeUnless { vmShell }
         if (!localExecution && !vmShell && remote == null) { error = "请先选择 SSH 电脑"; return }
@@ -458,7 +518,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                 // Upgrade only the endpoint for new tasks. Existing terminals
                 // retain their original bridge port and credential.
                 if (!termux.supportsRuntime()) {
-                    main.post { busy = false; connectInternal(false) { launch(shell, shellKind, onOpened) } }
+                    main.post { busy = false; connectInternal(false) { launch(shell, shellKind, original, onOpened) } }
                     return@execute
                 }
                 val client = if (remote != null) "ssh" else if (shell) {
@@ -469,7 +529,10 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                     .put("codex_compatibility", snapshot.codexCompatibility)
                     .put("environment", if (remote == null && !shell) selectedEnvironment else "debian")
                 if (source != null) body.put("history_ref", source.reference).put("history_id", source.id)
-                if (remote != null) body.put("ssh", JSONObject().put("host", remote.host).put("user", remote.user).put("port", remote.port))
+                    .put("history_action", if (original == null) "fork" else "original")
+                if (remote != null) body.put("ssh", JSONObject().put("host", remote.host).put("user", remote.user)
+                    .put("port", remote.port).put("id", remote.id).put("platform", remote.platform)
+                    .put("host_key", remote.hostKey).put("remember", remote.remember))
                 else if (!shell && selected != null) body.put("profile_id", selected.id).put("model", snapshot.model)
                     .put("gateway", selected.gateway).put("key", store.secret(selected.id))
                 val result = termux.request("/sessions", "POST", body, if (source != null) 15000 else 4000)
@@ -481,11 +544,13 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                 }
                 val terminal = TerminalSession(result.getString("id"), title, remote?.destination ?: snapshot.workspace, client, bridgePort = termux.currentPort)
                 main.post {
-                    if (source != null && selectedHistory == source) updateOptions(options.copy(mode = "new"))
+                    if (original == null && source != null && selectedHistory == source) updateOptions(options.copy(mode = "new"))
                     sessions = sessions + terminal; selectedSession = terminal.id; saveSessions(); busy = false
                     notice = when {
-                        remote != null -> "正在打开 SSH；请在终端核对主机指纹并登录"
-                        source != null -> "已启动「${source.title}」的恢复。同配置续接原会话；跨配置创建独立分支。"
+                        remote?.platform?.isNotEmpty() == true -> "正在打开 SSH。首次连接时请在终端登录电脑账号"
+                        remote != null -> "正在打开 SSH，请在终端核对主机指纹并登录"
+                        original != null -> "已用原配置恢复「${original.title}」"
+                        source != null -> "已从「${source.title}」创建分支"
                         else -> "已创建独立终端；Ctrl+C 保留当前 Shell"
                     }
                     onOpened()

@@ -82,6 +82,7 @@ struct StartTerminalRequest {
     history_ref: Option<String>,
     history_id: Option<String>,
     confirmed_gateway: Option<String>,
+    history_action: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -464,10 +465,50 @@ fn quote_powershell(value: &str) -> String {
 }
 
 #[tauri::command]
+async fn ssh_connection_info() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let program_data = std::env::var_os("ProgramData").ok_or("此功能需要 Windows OpenSSH 服务器。")?;
+        let key = fs::read_to_string(PathBuf::from(program_data).join("ssh").join("ssh_host_ed25519_key.pub"))
+            .map_err(|_| "读不到 SSH 主机密钥，请先安装并启动 OpenSSH 服务器。")?;
+        let key = key.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+        if !key.starts_with("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI") {
+            return Err("电脑的 SSH 主机密钥无效。".into());
+        }
+        let script = r#"
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new()
+$addresses = @(Get-NetIPAddress -AddressFamily IPv4 -AddressState Preferred -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+    Sort-Object InterfaceIndex | Select-Object -ExpandProperty IPAddress -Unique)
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+[PSCustomObject]@{
+    name = $env:COMPUTERNAME
+    user = $identity.Name
+    addresses = $addresses
+    remember = !($identity.Groups.Value -contains 'S-1-5-32-544')
+} | ConvertTo-Json -Compress
+"#;
+        let mut command = std::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let output = command.output().map_err(|_| "无法读取这台电脑的 SSH 设置。")?;
+        if !output.status.success() {
+            return Err("无法读取这台电脑的 SSH 设置。".into());
+        }
+        let mut data: Value = serde_json::from_slice(&output.stdout).map_err(|_| "无法读取电脑地址。")?;
+        data["host_key"] = Value::String(key);
+        Ok(data)
+    }).await.map_err(|_| "无法读取这台电脑的 SSH 设置。".to_string())?
+}
+
+#[tauri::command]
 async fn list_history(app: tauri::AppHandle, workspace: String) -> Result<Vec<history::Conversation>, String> {
     let root = app.path().app_config_dir().map_err(|error| error.to_string())?;
     let workspace = PathBuf::from(workspace);
-    tauri::async_runtime::spawn_blocking(move || history::scan_workspace(&root, &workspace))
+    tauri::async_runtime::spawn_blocking(move || history::scan_project(&root, &workspace))
         .await
         .map_err(|_| "读取本地对话历史失败".into())
 }
@@ -482,7 +523,7 @@ async fn list_all_history(app: tauri::AppHandle) -> Result<Vec<history::Conversa
 
 #[tauri::command]
 fn start_terminal(
-    request: StartTerminalRequest,
+    mut request: StartTerminalRequest,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TerminalInfo, String> {
@@ -491,43 +532,47 @@ fn start_terminal(
     if !matches!(request.client.as_str(), "claude" | "codex") {
         return Err("暂不支持所选客户端".into());
     }
-    if request.model.trim().is_empty() {
-        return Err("请选择模型".into());
-    }
     if !matches!(request.session_mode.as_str(), "new" | "continue" | "resume") {
         return Err("会话模式无效".into());
     }
-    let profile = {
-        let config = state.config.lock().map_err(|_| "配置锁异常")?;
-        config
-            .profiles
-            .iter()
-            .find(|profile| profile.id == request.profile_id)
-            .cloned()
-            .ok_or("找不到所选 Key 配置")?
-    };
     let workspace = PathBuf::from(request.workspace.trim());
     if !workspace.is_absolute() || !workspace.is_dir() {
         return Err("请选择一个存在的项目目录".into());
     }
-    let key = key_entry(&profile.id)?
-        .get_password()
-        .map_err(|_| "Windows 凭据管理器中没有这把 Key".to_string())?;
-    let id = Uuid::new_v4().to_string();
-    let config_root = app
-        .path()
-        .app_config_dir()
-        .map_err(|error| error.to_string())?;
+    let config_root = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    let original = request.history_action.as_deref() == Some("original");
+    let force_fork = request.history_action.as_deref() == Some("fork");
     let source = match (&request.history_ref, &request.history_id) {
-        (None, None) => None,
+        (None, None) if !original && !force_fork => None,
         (Some(reference), Some(id)) if request.session_mode == "resume" => {
-            Some(history::scan_all(&config_root).into_iter().find(|entry| {
+            Some(history::scan_project(&config_root, &workspace).into_iter().find(|entry| {
                 entry.history_ref == *reference && entry.id == *id && entry.client == request.client
-            }).ok_or("找不到这条本地会话，请刷新对话历史")?)
+            }).ok_or("在原项目目录找不到这条会话，请刷新对话历史")?)
         }
         _ => return Err("历史会话标识无效".into()),
     };
-    if source.is_some() && request.confirmed_gateway.as_deref() != Some(profile.gateway.as_str()) {
+    if original {
+        let entry = source.as_ref().ok_or("缺少原对话")?;
+        if entry.scope == "global" {
+            // The system launcher acquires the update guard itself.
+            drop(closing);
+            return launch_system_terminal(request.client, request.workspace, Some(&entry.id), app, state);
+        }
+        request.profile_id.clone_from(&entry.profile_id);
+        request.model.clone_from(&entry.configured_model);
+    }
+    if request.model.trim().is_empty() {
+        return Err(if original { "无法识别原模型，可从当前项目的历史创建分支" } else { "请选择模型" }.into());
+    }
+    let profile = {
+        let config = state.config.lock().map_err(|_| "配置锁异常")?;
+        config.profiles.iter().find(|profile| profile.id == request.profile_id).cloned()
+            .ok_or(if original { "原调用配置已移除或无法识别，可从当前项目的历史创建分支" } else { "找不到所选 Key 配置" })?
+    };
+    let key = key_entry(&profile.id)?.get_password()
+        .map_err(|_| "Windows 凭据管理器中没有这把 Key".to_string())?;
+    let id = Uuid::new_v4().to_string();
+    if source.is_some() && !original && request.confirmed_gateway.as_deref() != Some(profile.gateway.as_str()) {
         return Err("目标网关已变更，请刷新后重新确认".into());
     }
     if let Some(entry) = source.as_ref() {
@@ -539,9 +584,13 @@ fn start_terminal(
     }
     use sha2::{Digest, Sha256};
     let fingerprint = format!("{:x}", Sha256::digest(key.as_bytes()));
-    let needs_fork = source.as_ref().is_some_and(|entry| {
-        !history::can_resume_in_place(entry, &profile.id, &request.model, &profile.gateway, &fingerprint)
+    let matches_original = source.as_ref().is_some_and(|entry| {
+        history::can_resume_in_place(entry, &profile.id, &request.model, &profile.gateway, &fingerprint)
     });
+    if original && !matches_original {
+        return Err("无法确认原 Key 或网关仍可用，可从当前项目的历史创建分支。".into());
+    }
+    let needs_fork = source.is_some() && (force_fork || !matches_original);
     let branch = source.as_ref().filter(|_| needs_fork).map(|entry| {
         history::stage_branch(entry, &config_root, &profile.id, &profile.name, &request.model, &profile.gateway, &fingerprint)
     }).transpose()?;
@@ -741,6 +790,16 @@ fn start_global_terminal(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TerminalInfo, String> {
+    launch_system_terminal(client, workspace, None, app, state)
+}
+
+fn launch_system_terminal(
+    client: String,
+    workspace: String,
+    history_id: Option<&str>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TerminalInfo, String> {
     let closing = state.closing_for_update.lock().map_err(|_| "终端状态不可用。")?;
     if *closing { return Err("正在安装更新。".into()); }
     if !matches!(client.as_str(), "claude" | "codex") {
@@ -751,14 +810,19 @@ fn start_global_terminal(
         return Err("请选择一个存在的项目目录".into());
     }
     let id = Uuid::new_v4().to_string();
-    let executable = client.clone();
+    let mut command = format!("& {}", quote_powershell(&client));
+    if let Some(history_id) = history_id {
+        Uuid::parse_str(history_id).map_err(|_| "历史会话标识无效")?;
+        let flag = if client == "codex" { "resume" } else { "--resume" };
+        command.push_str(&format!(" {flag} {}", quote_powershell(history_id)));
+    }
     let mut shell = portable_pty::CommandBuilder::new("powershell.exe");
     shell.args(["-NoLogo", "-NoExit"]);
     shell.arg("-Command");
     shell.arg(format!(
-        "chcp 65001 > $null; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $env:TERM = 'xterm-256color'; $env:COLORTERM = 'truecolor'; Set-Location -LiteralPath {}; & '{}'",
+        "chcp 65001 > $null; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $env:TERM = 'xterm-256color'; $env:COLORTERM = 'truecolor'; Set-Location -LiteralPath {} -ErrorAction Stop; {}",
         quote_powershell(&workspace.to_string_lossy()),
-        quote_powershell(&executable),
+        command,
     ));
     shell.cwd(&workspace);
     let system = native_pty_system();
@@ -916,6 +980,7 @@ pub fn run() {
             remove_profile,
             start_terminal,
             start_global_terminal,
+            ssh_connection_info,
             list_history,
             list_all_history,
             write_terminal,

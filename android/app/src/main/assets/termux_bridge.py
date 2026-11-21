@@ -14,6 +14,7 @@ import shlex
 import shutil
 import signal
 import struct
+import subprocess
 import sys
 import tempfile
 import termios
@@ -177,6 +178,83 @@ def history_context(home):
     return session_history, homes("codex"), homes("claude")
 
 
+def paired_ssh_arguments(executable, home, env, target, host, user, port):
+    """Use an app-owned identity only for computers added via a connection code."""
+    from contextlib import suppress
+    target_id = str(uuid.UUID(str(target.get("id"))))
+    if target.get("platform") not in ("macos", "windows") or not user:
+        raise ValueError("配对信息无效")
+    directory = home / ".local/share/agent-workbench/ssh" / target_id
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    known_hosts = directory / "known_hosts"
+    host_key = target.get("host_key", "")
+    if not re.fullmatch(r"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}", host_key):
+        raise ValueError("电脑主机密钥格式无效")
+    address = host if port == 22 else f"[{host}]:{port}"
+    private_write(known_hosts, address + " " + host_key + "\n")
+    args = [executable, "-F", "/dev/null", "-tt", "-o", "HostKeyAlgorithms=ssh-ed25519",
+            "-o", "StrictHostKeyChecking=yes", "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", "UserKnownHostsFile=" + str(known_hosts), "-o", "UpdateHostKeys=no", "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3", "-p", str(port), "-l", user]
+    password_args = args + ["-o", "PubkeyAuthentication=no", host]
+    if target.get("remember") is not True:
+        return shlex.join(password_args)
+    identity = directory / "id_ed25519"
+    if not identity.is_file():
+        keygen = shutil.which("ssh-keygen", path=env["PATH"])
+        if not keygen:
+            raise ValueError("请先安装 Termux OpenSSH")
+        try:
+            subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-C", "AgentWorkbench-Android", "-f", str(identity)],
+                           check=True, timeout=10, stdin=subprocess.DEVNULL, capture_output=True)
+        except (subprocess.SubprocessError, OSError):
+            with suppress(OSError):
+                identity.unlink()
+            raise HistoryUnavailable("无法生成手机的配对密钥，请检查 Termux OpenSSH") from None
+    public_key = identity.with_suffix(".pub").read_text(encoding="ascii").split()
+    if len(public_key) < 2 or not re.fullmatch(r"AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}", public_key[1]):
+        raise ValueError("手机配对密钥格式无效")
+    args += ["-i", str(identity), "-o", "IdentitiesOnly=yes", host]
+    setup = directory / "paired"
+    if setup.exists():
+        return shlex.join(args)
+    key = "ssh-ed25519 " + public_key[1] + " AgentWorkbench-Android-" + target_id
+    if target["platform"] == "macos":
+        command = """umask 077
+dir="$HOME/.ssh"
+keys="$dir/authorized_keys"
+mkdir -p "$dir" || exit 1
+key='@KEY@'
+if [ ! -f "$keys" ] || ! grep -Fqx -- "$key" "$keys"; then
+    printf '\\n%s\\n' "$key" >> "$keys" || exit 1
+fi
+""".replace("@KEY@", key)
+    else:
+        powershell = """$ErrorActionPreference = 'Stop'
+$key = '@KEY@'
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+if ($identity.Groups.Value -contains 'S-1-5-32-544') {
+    Write-Error 'Use a standard Windows user to remember this phone.'
+    exit 1
+}
+$file = Join-Path $env:USERPROFILE '.ssh/authorized_keys'
+[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($file))
+if (!(Test-Path -LiteralPath $file)) { [void](New-Item -Path $file -ItemType File) }
+if (!(Select-String -LiteralPath $file -SimpleMatch -Pattern $key -Quiet)) {
+    [IO.File]::AppendAllText($file, [Environment]::NewLine + $key + [Environment]::NewLine, [Text.Encoding]::ASCII)
+}
+""".replace("@KEY@", key)
+        command = "powershell.exe -NoProfile -EncodedCommand " + base64.b64encode(powershell.encode("utf-16le")).decode()
+    # A local-only probe verifies the key works before the pairing is remembered.
+    # Force a fresh auth exchange so a successful password login cannot mask a bad key.
+    setup_command = shlex.join(args + [command])
+    probe_args = [arg for arg in args[:-1] if arg != "-tt"] + ["-T", "-o", "BatchMode=yes", "-o", "PreferredAuthentications=publickey", args[-1], "exit 0"]
+    return ("if " + setup_command + " && " + shlex.join(probe_args) + " && touch " + shlex.quote(str(setup))
+            + "; then " + shlex.join(args)
+            + "; else printf '\\r\\n[未能记住此手机。按回车用密码连接，或按 Ctrl+C 取消。]\\r\\n'; "
+            + "read -r reply && " + shlex.join(password_args) + "; fi")
+
+
 def launch_spec(payload, home=None, bundle=None):
     home = Path(home or Path.home())
     client = payload.get("client", "shell")
@@ -186,6 +264,10 @@ def launch_spec(payload, home=None, bundle=None):
     if mode not in ("new", "continue", "resume"):
         raise ValueError("会话方式无效")
     source = None
+    history_action = payload.get("history_action")
+    if history_action is not None and (history_action not in ("original", "fork") or "history_ref" not in payload
+            or payload.get("environment", "debian") != "debian"):
+        raise ValueError("历史操作只适用于 Debian 中选定的历史会话")
     if "history_ref" in payload or "history_id" in payload:
         if mode != "resume" or client not in ("codex", "claude"):
             raise ValueError("历史会话标识无效")
@@ -257,7 +339,8 @@ def launch_spec(payload, home=None, bundle=None):
                 "-o", "ServerAliveCountMax=3", "-p", str(port)]
         if user: args += ["-l", user]
         args += [host]
-        script = shlex.join(args) + "; result=$?; printf '\\r\\n[SSH 已退出：%s；保留手机 Shell]\\r\\n' \"$result\"; exec " + shlex.quote(bash) + " -l"
+        ssh_command = paired_ssh_arguments(executable, home, env, target, host, user, port) if target.get("platform") else shlex.join(args)
+        script = ssh_command + "; result=$?; printf '\\r\\n[SSH 已退出：%s；保留手机 Shell]\\r\\n' \"$result\"; exec " + shlex.quote(bash) + " -l"
         return [bash, "--noprofile", "--norc", "-c", script], env, str(workspace)
     model = str(payload.get("model") or "").strip()
     key = str(payload.get("key") or "")
@@ -302,8 +385,11 @@ def launch_spec(payload, home=None, bundle=None):
         raise ValueError("未找到 " + client + "；请在 Debian 或 Termux 完成安装")
     parent = home / ".local/share/agent-workbench" / client
     seed = None
-    same_config = bool(source and history.can_resume_in_place(
+    matches_original = bool(source and history.can_resume_in_place(
         source, str(payload.get("profile_id") or ""), model, gateway, fingerprint))
+    if history_action == "original" and not matches_original:
+        raise HistoryUnavailable("无法确认原 Key 或网关仍可用，可从当前项目的历史创建分支")
+    same_config = matches_original and history_action != "fork"
     if source and not same_config:
         try:
             config, seed = history.stage_branch(source, parent, payload.get("profile_id"), "", model, gateway, fingerprint)
@@ -324,7 +410,8 @@ def launch_spec(payload, home=None, bundle=None):
         }))
     command = [executable] if executable else [client]
     if client == "codex":
-        private_write(config / "config.toml", "model = " + json.dumps(model) + '\nmodel_provider = "workbench_gateway"\nsandbox_mode = "workspace-write"\n\n[model_providers.workbench_gateway]\nname = "Workbench gateway"\nwire_api = "responses"\nenv_key = "WORKBENCH_GATEWAY_KEY"\nbase_url = ' + json.dumps(gateway + "/v1") + "\n")
+        if not same_config or not (config / "config.toml").is_file():
+            private_write(config / "config.toml", "model = " + json.dumps(model) + '\nmodel_provider = "workbench_gateway"\nsandbox_mode = "workspace-write"\n\n[model_providers.workbench_gateway]\nname = "Workbench gateway"\nwire_api = "responses"\nenv_key = "WORKBENCH_GATEWAY_KEY"\nbase_url = ' + json.dumps(gateway + "/v1") + "\n")
         env["WORKBENCH_GATEWAY_KEY"] = key
         env["CODEX_HOME"] = str(config)
         args = command
@@ -491,14 +578,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.command == "GET" and uri.path == "/health":
                 return self.reply(200, {"service": "agent-workbench-termux", "version": self.server.version,
-                                        "build": self.server.build, "capabilities": ["pty", "ssh", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history"]})
+                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions"]})
             if self.command == "GET" and uri.path == "/usage":
                 return self.reply(200, usage_snapshot())
             if self.command == "GET" and uri.path == "/history":
                 history, codex_homes, claude_homes = history_context(Path.home())
-                selected_workspace = parse_qs(uri.query).get("workspace", [""])[0]
+                query = parse_qs(uri.query)
+                selected_workspace = None if query.get("scope") == ["all"] else query.get("workspace", [""])[0]
+                selected_client = query.get("client", [None])[0]
                 rows = history.scan_history(codex_homes, claude_homes, limit=500,
-                                            workspace=selected_workspace)
+                                            workspace=selected_workspace, client=selected_client)
                 return self.reply(200, {"sessions": history.public_rows(
                     history.mark_scope(rows, "workbench"))})
             payload = {}
@@ -525,6 +614,16 @@ class Handler(BaseHTTPRequestHandler):
                     session = Session(payload, bundle=self.server.bundle)
                     self.server.sessions[session.id] = session
                 return self.reply(201, {"id": session.id})
+            pairing = re.fullmatch(r"/ssh-pairing/([0-9a-f-]{36})", uri.path)
+            if self.command == "DELETE" and pairing:
+                pairing_id = str(uuid.UUID(pairing.group(1)))
+                directory = Path.home() / ".local/share/agent-workbench/ssh" / pairing_id
+                with self.server.guard:
+                    for file in ("id_ed25519", "id_ed25519.pub", "known_hosts", "paired"):
+                        (directory / file).unlink(missing_ok=True)
+                    if directory.is_dir() and not any(directory.iterdir()):
+                        directory.rmdir()
+                return self.reply(200, {"ok": True})
             match = re.fullmatch(r"/sessions/([0-9a-f]{32})(/input|/resize)?", uri.path)
             if not match: return self.reply(404, {"error": "接口不存在"})
             session = self.server.sessions.get(match.group(1))

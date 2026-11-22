@@ -87,6 +87,42 @@ struct StartTerminalRequest {
     history_id: Option<String>,
     confirmed_gateway: Option<String>,
     history_action: Option<String>,
+    #[serde(default)]
+    permission_mode: AgentPermission,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum AgentPermission {
+    #[default]
+    Restricted,
+    Standard,
+    Full,
+}
+
+impl AgentPermission {
+    fn args(self, client: &str) -> Vec<String> {
+        if client == "claude" {
+            return vec!["--permission-mode".into(), if matches!(self, Self::Full) { "bypassPermissions" } else { "default" }.into()];
+        }
+        vec![
+            "--sandbox".into(), if matches!(self, Self::Full) { "danger-full-access" } else { "workspace-write" }.into(),
+            "--ask-for-approval".into(), "on-request".into(),
+            "-c".into(), format!("sandbox_workspace_write.network_access={}", !matches!(self, Self::Restricted)),
+        ]
+    }
+}
+
+fn local_network_bypass(upper: Option<&str>, lower: Option<&str>) -> String {
+    let mut entries = vec!["127.0.0.1", "localhost", "::1"];
+    for value in upper.into_iter().chain(lower) {
+        for entry in value.split(',').map(str::trim).filter(|entry| !entry.is_empty()) {
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
+        }
+    }
+    entries.join(",")
 }
 
 #[derive(Clone, Serialize)]
@@ -665,6 +701,7 @@ fn start_terminal(
                 "--no-daemon".into(),
             ];
         }
+        args.extend(request.permission_mode.args("codex"));
         shell.env("CODEX_HOME", codex_home);
         shell.env("CCH_API_KEY", &key);
         let command_args = args
@@ -686,6 +723,7 @@ fn start_terminal(
             "--add-dir".into(),
             workspace.display().to_string(),
         ];
+        args.extend(request.permission_mode.args("claude"));
         if source.is_some() {
             for name in ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
                 "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"] {
@@ -741,6 +779,12 @@ fn start_terminal(
     } else {
         command_text
     };
+    // Preserve inherited proxy settings, while the user's own bypass rules and
+    // local gateway continue to work for both clients.
+    let bypass = local_network_bypass(std::env::var("NO_PROXY").ok().as_deref(),
+                                      std::env::var("no_proxy").ok().as_deref());
+    shell.env("NO_PROXY", &bypass);
+    shell.env("no_proxy", &bypass);
     shell.cwd(&workspace);
     if request.client == "codex" {
         shell.env_remove("OPENAI_API_KEY");
@@ -1050,6 +1094,31 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::normalize_gateway;
+
+    #[test]
+    fn proxy_bypass_keeps_user_rules_and_local_gateway() {
+        assert_eq!(super::local_network_bypass(Some("build.test,localhost"), Some("build.test,.internal.test")),
+                   "127.0.0.1,localhost,::1,build.test,.internal.test");
+    }
+
+    #[test]
+    fn permission_modes_keep_codex_approvals_and_claude_requires_explicit_bypass() {
+        use super::AgentPermission;
+        for (mode, sandbox, network) in [
+            (AgentPermission::Restricted, "workspace-write", "false"),
+            (AgentPermission::Standard, "workspace-write", "true"),
+            (AgentPermission::Full, "danger-full-access", "true"),
+        ] {
+            let args = mode.args("codex");
+            assert_eq!(args[args.iter().position(|a| a == "--sandbox").unwrap() + 1], sandbox);
+            assert_eq!(args[args.iter().position(|a| a == "--ask-for-approval").unwrap() + 1], "on-request");
+            assert!(args.contains(&format!("sandbox_workspace_write.network_access={network}")));
+            assert!(!args.iter().any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
+        }
+        assert_eq!(AgentPermission::Standard.args("claude"), ["--permission-mode", "default"]);
+        assert_eq!(AgentPermission::Full.args("claude"), ["--permission-mode", "bypassPermissions"]);
+        assert!(serde_json::from_str::<AgentPermission>(r#""unknown""#).is_err());
+    }
 
     #[cfg(windows)]
     #[test]

@@ -147,7 +147,8 @@ else:
     if not executable:
         raise SystemExit("VM 中未安装 Claude，请到运行环境安装 / 检查 Linux VM")
     args = [executable, "--bare", "--add-dir", str(workspace), "--model", model,
-            "--settings", str(settings), "--append-system-prompt", "全程使用简体中文。"]
+            "--settings", str(settings), "--append-system-prompt", "全程使用简体中文。",
+            "--permission-mode", "bypassPermissions" if data.get("permission_mode") == "full" else "default"]
     if mode == "continue":
         args += ["--continue"]
     elif mode == "resume":
@@ -537,13 +538,16 @@ class LinuxVM:
         key = str(payload.get("key") or "")
         gateway = str(payload.get("gateway") or "").rstrip("/")
         mode = payload.get("mode", "new")
+        if payload.get("permission_mode", "standard") not in {"restricted", "standard", "full"}:
+            raise ValueError("权限模式无效，请重新设置")
         if not model or not key or mode not in ("new", "continue", "resume"):
             raise ValueError("VM Agent 启动参数无效")
         scope = hashlib.sha256(json.dumps([payload.get("profile_id"), gateway,
                                            str(guest_workspace)], ensure_ascii=False).encode()).hexdigest()[:24]
         data = {"client": client, "model": model, "key": key, "gateway": gateway,
                 "workspace": str(guest_workspace), "scope": scope, "mode": mode,
-                "codex_compatibility": payload.get("codex_compatibility") is True}
+                "codex_compatibility": payload.get("codex_compatibility") is True,
+                "permission_mode": payload.get("permission_mode", "standard")}
         self.start()
         self.wait_ready()
         shared_workspace = self.ssh("test -d " + shlex.quote(str(guest_workspace)) +

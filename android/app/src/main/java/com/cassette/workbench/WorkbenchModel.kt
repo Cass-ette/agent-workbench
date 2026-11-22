@@ -66,6 +66,14 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     var profiles by mutableStateOf(store.profiles()); private set
     var sshTargets by mutableStateOf(store.sshTargets()); private set
     var options by mutableStateOf(store.options()); private set
+    var showAgentPermissions by mutableStateOf(!options.permissionsReviewed)
+
+    fun saveAgentPermissions(codex: String, claude: String) {
+        require(codex in listOf("restricted", "standard", "full") && claude in listOf("standard", "full"))
+        updateOptions(options.copy(codexPermission = codex, claudePermission = claude, permissionsReviewed = true))
+        showAgentPermissions = false
+        notice = "已保存权限设置；之后新建、恢复和分支的本地会话使用此设置"
+    }
     var history by mutableStateOf(emptyList<LocalConversation>()); private set
     var historyLoading by mutableStateOf(false); private set
     var historyError by mutableStateOf(""); private set
@@ -490,6 +498,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun launch(shell: Boolean = false, shellKind: String = "termux", original: LocalConversation? = null, onOpened: () -> Unit = {}) {
+        if (localExecution && !shell && !options.permissionsReviewed) { showAgentPermissions = true; return }
         if (!connected || busy) { error = "请先在环境页连接 Termux"; return }
         if (original != null && (!localExecution || runtimeEnvironment != "debian")) return
         val snapshot = if (original == null) options else options.copy(
@@ -527,6 +536,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                 val body = JSONObject().put("client", client)
                     .put("mode", if (remote == null) snapshot.mode else "new").put("workspace", snapshot.workspace)
                     .put("codex_compatibility", snapshot.codexCompatibility)
+                    .put("permission_mode", if (client == "codex") snapshot.codexPermission else snapshot.claudePermission)
                     .put("environment", if (remote == null && !shell) selectedEnvironment else "debian")
                 if (source != null) body.put("history_ref", source.reference).put("history_id", source.id)
                     .put("history_action", if (original == null) "fork" else "original")
@@ -540,7 +550,14 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                     "debian-shell" -> "Debian Shell"
                     "vm-shell" -> "Linux VM Shell"
                     "shell" -> "Termux Shell"
-                    else -> "${if (client == "codex") "Codex" else "Claude"} · ${snapshot.model}" + if (vmEnvironment) " · Linux VM" else ""
+                    else -> "${if (client == "codex") "Codex" else "Claude"} · ${snapshot.model}" +
+                        " · " + when {
+                            client == "claude" -> if (snapshot.claudePermission == "full") "跳过工具确认" else "标准审批"
+                            vmEnvironment -> "VM 内完整访问"
+                            snapshot.codexCompatibility || snapshot.codexPermission == "full" -> "完整访问 · 按需审批"
+                            snapshot.codexPermission == "standard" -> "项目内写入 · 允许联网"
+                            else -> "项目内写入 · 限制联网"
+                        }
                 }
                 val terminal = TerminalSession(result.getString("id"), title, remote?.destination ?: snapshot.workspace, client, bridgePort = termux.currentPort)
                 main.post {

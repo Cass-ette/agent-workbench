@@ -67,6 +67,9 @@ struct ManagerView: View {
         .sheet(isPresented: $model.isHistoryPresented) {
             HistoryPickerSheet(model: model)
         }
+        .sheet(isPresented: $model.isAgentPermissionsPresented) {
+            AgentPermissionsSheet(model: model)
+        }
         .confirmationDialog("从历史创建分支？", isPresented: $model.isRestoreConfirmationPresented,
                             titleVisibility: .visible) {
             Button("创建分支并启动") { model.launchConfirmed() }
@@ -231,6 +234,15 @@ struct ManagerView: View {
                 .disabled(model.launchScope == .system)
             }
 
+            Button {
+                model.isAgentPermissionsPresented = true
+            } label: {
+                Label("权限设置", systemImage: "hand.raised")
+            }
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
             Spacer(minLength: 12)
             Divider().opacity(0.35)
             HStack(spacing: 8) {
@@ -306,6 +318,9 @@ struct ManagerView: View {
                     .font(.system(size: 11, design: .monospaced))
                     .lineLimit(1)
                     .truncationMode(.middle)
+                Text(model.selectedTerminal?.permissions ?? "")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
             }
             Spacer()
             Button {

@@ -66,13 +66,17 @@ class HistoryLaunchTests(unittest.TestCase):
                                     B.launch_history(entry["history_ref"], session_id, client, "", "", str(workspace), original=True)
                             popen.assert_not_called()
                             self.assertEqual(B.launch_history(entry["history_ref"], session_id, client,
-                                "different-selection", "model-b", str(workspace), original=True), 0)
+                                "different-selection", "model-b", str(workspace), original=True, permission_mode="standard"), 0)
                         else:
                             self.assertEqual(B.launch_history(entry["history_ref"], session_id, client, "p-one",
-                                "model-b" if action == "fork-other-model" else "model-a", str(workspace), force_fork=True), 0)
+                                "model-b" if action == "fork-other-model" else "model-a", str(workspace), force_fork=True, permission_mode="standard"), 0)
                         command = popen.call_args.args[0]
                         env = popen.call_args.kwargs["env"]
                         launched_home = Path(env["CODEX_HOME"] if client == "codex" else env["CLAUDE_CONFIG_DIR"])
+                        if client == "codex":
+                            self.assertIn("sandbox_workspace_write.network_access=true", command)
+                        else:
+                            self.assertEqual(command[command.index("--permission-mode") + 1], "default")
                     if action != "original":
                         self.assertNotEqual(launched_home, home)
                         self.assertEqual(len(list(home.parent.glob("branch-*"))), 2)

@@ -1,5 +1,7 @@
 # Windows 快速上手
 
+首次打开会提示 Codex / Claude 权限设置。推荐 Codex「项目内写入，允许联网」和 Claude「标准审批」，以后从侧栏「权限设置」更改。高权限选项须明确确认；本次设置不授予 Windows 管理员权限，系统 CLI 沿用原配置。详见[权限与工具能力](../docs/agent-permissions.zh-CN.md)。
+
 Agent 工作台把 Claude Code / Codex CLI 放在同一窗口的独立终端标签页中，让每个任务记住模型、网关和项目。这里的模型仍通过 API 调用，工作台本身不提供免费模型额度。
 
 有可用的网关地址和调用 Key，就不需要在 Windows 上安装 Docker、CCHP 或本地模型。安装包约 2.5 MB；WebView2 和所选 CLI 的磁盘占用另计。

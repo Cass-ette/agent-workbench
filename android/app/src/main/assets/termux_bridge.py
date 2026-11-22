@@ -25,6 +25,8 @@ import uuid
 
 MAX_OUTPUT = 1024 * 1024
 MAX_REQUEST = 64 * 1024
+NETWORK_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
+               "NO_PROXY", "no_proxy")
 SENSITIVE_ENV = ("WORKBENCH_GATEWAY_KEY", "CCH_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
                  "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
                  "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -255,6 +257,23 @@ if (!(Select-String -LiteralPath $file -SimpleMatch -Pattern $key -Quiet)) {
             + "read -r reply && " + shlex.join(password_args) + "; fi")
 
 
+def agent_permission_args(client, mode):
+    if mode not in {"restricted", "standard", "full"}:
+        raise ValueError("权限模式无效，请重新设置")
+    if client == "claude":
+        return ["--permission-mode", "bypassPermissions" if mode == "full" else "default"]
+    return ["--sandbox", "danger-full-access" if mode == "full" else "workspace-write",
+            "--ask-for-approval", "on-request", "-c",
+            "sandbox_workspace_write.network_access=" + ("false" if mode == "restricted" else "true")]
+
+
+def local_network_bypass(environment):
+    entries = ["127.0.0.1", "localhost", "::1"]
+    for name in ("NO_PROXY", "no_proxy"):
+        entries.extend(value.strip() for value in environment.get(name, "").split(",") if value.strip())
+    return ",".join(dict.fromkeys(entries))
+
+
 def launch_spec(payload, home=None, bundle=None):
     home = Path(home or Path.home())
     client = payload.get("client", "shell")
@@ -409,21 +428,25 @@ def launch_spec(payload, home=None, bundle=None):
             "key_fingerprint": fingerprint,
         }))
     command = [executable] if executable else [client]
+    bypass = local_network_bypass(env)
+    env.update(NO_PROXY=bypass, no_proxy=bypass)
     if client == "codex":
         if not same_config or not (config / "config.toml").is_file():
             private_write(config / "config.toml", "model = " + json.dumps(model) + '\nmodel_provider = "workbench_gateway"\nsandbox_mode = "workspace-write"\n\n[model_providers.workbench_gateway]\nname = "Workbench gateway"\nwire_api = "responses"\nenv_key = "WORKBENCH_GATEWAY_KEY"\nbase_url = ' + json.dumps(gateway + "/v1") + "\n")
         env["WORKBENCH_GATEWAY_KEY"] = key
         env["CODEX_HOME"] = str(config)
         args = command
+        permission_mode = payload.get("permission_mode", "restricted")
         if in_debian and payload.get("codex_compatibility") is True:
             # Explicit user choice in the app. PRoot cannot run Codex's Linux
             # sandbox on tested Android kernels. Keep command approvals active.
-            args += ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]
+            permission_mode = "full"
         if source:
             args += ["resume" if same_config else "fork", source["id"]]
         elif mode != "new":
             args += ["resume"] + (["--last"] if mode == "continue" else [])
         args += ["--model", model, "--cd", str(workspace), "--no-alt-screen"]
+        args += agent_permission_args("codex", permission_mode)
     else:
         if not (config / "settings.json").exists():
             private_write(config / "settings.json", "{}\n")
@@ -439,7 +462,8 @@ def launch_spec(payload, home=None, bundle=None):
         # authentication. Explicit --add-dir still supplies project CLAUDE.md.
         args = command + ["--bare", "--add-dir", str(workspace), "--model", model,
                           "--settings", str(config / "settings.json"),
-                          "--append-system-prompt", "全程使用简体中文。"]
+                          "--append-system-prompt", "全程使用简体中文。",
+                          *agent_permission_args("claude", payload.get("permission_mode", "standard"))]
         if mode == "continue": args += ["--continue"]
         if mode == "resume":
             args += ["--resume"]
@@ -453,7 +477,7 @@ def launch_spec(payload, home=None, bundle=None):
         launch_file = config / ("launch-" + uuid.uuid4().hex + ".json")
         private_write(launch_file, json.dumps({"args": args, "workspace": str(workspace),
             "history_seed": str(seed) if seed else None,
-            "environment": {k: v for k, v in env.items() if k in SENSITIVE_ENV}}, ensure_ascii=False))
+            "environment": {k: v for k, v in env.items() if k in SENSITIVE_ENV or k in NETWORK_ENV}}, ensure_ascii=False))
         env = {k: v for k, v in env.items() if k not in SENSITIVE_ENV}
         args = [proot, "login", "debian", "--user", "workbench", "--bind", str(home) + ":" + str(home),
                 "--work-dir", str(workspace), "--", "/usr/bin/python3", str(runtime / "debian_runner.py"), str(launch_file)]

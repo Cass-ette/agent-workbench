@@ -30,6 +30,9 @@ data class TaskOptions(
     val workspace: String = "~/projects", val mode: String = "new",
     val executionId: String = "local",
     val codexCompatibility: Boolean = false,
+    val codexPermission: String = "restricted",
+    val claudePermission: String = "standard",
+    val permissionsReviewed: Boolean = false,
 )
 
 class ProfileStore(context: Context) {
@@ -85,13 +88,18 @@ class ProfileStore(context: Context) {
         val data = try { JSONObject(prefs.getString("options", "{}") ?: "{}") } catch (_: Exception) { JSONObject() }
         return TaskOptions(data.optString("profile"), data.optString("client", "codex"), data.optString("model"),
             data.optString("workspace", "~/projects"), data.optString("mode", "new"), data.optString("execution", "local"),
-            data.optBoolean("codex_compatibility", false))
+            data.optBoolean("codex_compatibility", false),
+            data.optString("codex_permission", "restricted").takeIf { it in listOf("restricted", "standard", "full") } ?: "restricted",
+            data.optString("claude_permission", "standard").takeIf { it in listOf("standard", "full") } ?: "standard",
+            data.optBoolean("permissions_reviewed", false))
     }
 
     fun saveOptions(options: TaskOptions) {
         prefs.edit().putString("options", JSONObject().put("profile", options.profileId).put("client", options.client)
             .put("model", options.model).put("workspace", options.workspace).put("mode", options.mode)
-            .put("execution", options.executionId).put("codex_compatibility", options.codexCompatibility).toString()).apply()
+            .put("execution", options.executionId).put("codex_compatibility", options.codexCompatibility)
+            .put("codex_permission", options.codexPermission).put("claude_permission", options.claudePermission)
+            .put("permissions_reviewed", options.permissionsReviewed).toString()).apply()
     }
 
     fun sshTargets(): List<SshTarget> = try {

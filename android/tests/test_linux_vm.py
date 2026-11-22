@@ -173,6 +173,7 @@ class VMTests(unittest.TestCase):
                 self.assertIn("on-request", codex["args"])
                 self.assertNotIn("private-test-key", (Path(codex["env"]["CODEX_HOME"]) / "config.toml").read_text())
                 claude = run("claude")
+                self.assertIn("default", claude["args"])
                 settings = Path(claude["env"]["CLAUDE_CONFIG_DIR"]) / "settings.json"
                 self.assertEqual(json.loads(settings.read_text()), {})
                 self.assertEqual(settings.read_text(), "{}\n")

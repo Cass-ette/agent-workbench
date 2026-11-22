@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import App from "../src/App";
+import { permissionStorageKey } from "../src/AgentPermissions";
 
 const { invoke, onDragDropEvent } = vi.hoisted(() => ({ invoke: vi.fn(), onDragDropEvent: vi.fn() }));
 
@@ -24,6 +25,7 @@ const models = Array.from({ length: 430 }, (_, index) => `test-model-${String(in
 
 beforeEach(() => {
   window.localStorage.clear();
+  window.localStorage.setItem(permissionStorageKey, JSON.stringify({ codex: "standard", claude: "standard" }));
   onDragDropEvent.mockReset().mockResolvedValue(() => undefined);
   invoke.mockReset();
   invoke.mockImplementation(async (command: string) => {
@@ -57,6 +59,31 @@ async function openApp() {
 }
 
 describe("工作会话配置", () => {
+  it("首次设置可以取消，局部启动仍需明确选择权限", async () => {
+    window.localStorage.removeItem(permissionStorageKey);
+    await openApp();
+    expect(await screen.findByRole("dialog", { name: "Agent 权限设置" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+    expect(await screen.findByRole("dialog", { name: "Agent 权限设置" })).toBeTruthy();
+    expect(invoke.mock.calls.some(([command]) => command === "start_terminal")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "保存权限设置" }));
+    expect(JSON.parse(window.localStorage.getItem(permissionStorageKey)!)).toEqual({ codex: "standard", claude: "standard" });
+  });
+
+  it("提高两客户端权限需要确认，取消不会保存", async () => {
+    await openApp();
+    fireEvent.click(screen.getByRole("button", { name: "权限设置" }));
+    fireEvent.change(screen.getByLabelText("Codex 权限"), { target: { value: "full" } });
+    const save = screen.getByRole<HTMLButtonElement>("button", { name: "保存权限设置" });
+    expect(save.disabled).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(save.disabled).toBe(false);
+    fireEvent.change(screen.getByLabelText("Claude 权限"), { target: { value: "full" } });
+    expect(save.disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(JSON.parse(window.localStorage.getItem(permissionStorageKey)!)).toEqual({ codex: "standard", claude: "standard" });
+  });
   it("切回较早的对话时已注册的拖放回调立即使用新选中的终端", async () => {
     vi.stubGlobal("__TAURI_INTERNALS__", {});
     vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
@@ -132,6 +159,7 @@ describe("工作会话配置", () => {
 
     await restore();
     await screen.findByRole("tab", { selected: true });
+    expect(invoke.mock.calls.find(([command]) => command === "start_terminal")?.[1].request.permission_mode).toBe("standard");
     fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
     await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(2));
     await restore();

@@ -167,7 +167,10 @@ class BridgeTests(unittest.TestCase):
             self.assertNotIn("--last", commands[2])
 
     def test_missing_host_cli_uses_debian_without_putting_key_in_argv(self):
-        with tempfile.TemporaryDirectory() as home:
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {
+            "HTTPS_PROXY": "http://127.0.0.1:7890", "NO_PROXY": "build.test",
+            "no_proxy": "build.test,.internal.test",
+        }):
             runtime = Path(home) / ".local/share/agent-workbench/runtime"
             runtime.mkdir(parents=True)
             (runtime / "debian_runner.py").touch()
@@ -190,6 +193,9 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(secret.stat().st_mode & 0o777, 0o600)
             launch = json.loads(secret.read_text())
             self.assertEqual(launch["environment"]["ANTHROPIC_API_KEY"], payload["key"])
+            self.assertEqual(launch["environment"]["HTTPS_PROXY"], "http://127.0.0.1:7890")
+            self.assertEqual(launch["environment"]["NO_PROXY"], "127.0.0.1,localhost,::1,build.test,.internal.test")
+            self.assertEqual(launch["environment"]["NO_PROXY"], launch["environment"]["no_proxy"])
             self.assertEqual(launch["workspace"], str(Path(home) / "project"))
             self.assertIn(str(Path(home)), args[-1])
             self.assertNotIn("ANTHROPIC_AUTH_TOKEN", launch["environment"])
@@ -226,6 +232,24 @@ class BridgeTests(unittest.TestCase):
             self.assertIn("danger-full-access", command)
             self.assertEqual(command[command.index("--ask-for-approval") + 1], "on-request")
             self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
+
+    def test_permissions_apply_to_both_clients_without_putting_secrets_in_args(self):
+        for client in ("codex", "claude"):
+            for mode in ("restricted", "standard", "full"):
+                with self.subTest(client=client, mode=mode), tempfile.TemporaryDirectory() as home, \
+                        patch.object(B.shutil, "which", side_effect=lambda name, **kw: "/bin/" + name):
+                    args, _, _ = B.launch_spec(dict(client=client, model="test", key="private-key",
+                        gateway="https://gateway.test", permission_mode=mode), home)
+                    script = args[-1]
+                    self.assertNotIn("private-key", script)
+                    if client == "codex":
+                        self.assertIn("--ask-for-approval on-request", script)
+                        self.assertIn("--sandbox " + ("danger-full-access" if mode == "full" else "workspace-write"), script)
+                        self.assertIn("sandbox_workspace_write.network_access=" + ("false" if mode == "restricted" else "true"), script)
+                    else:
+                        self.assertIn("--permission-mode " + ("bypassPermissions" if mode == "full" else "default"), script)
+        with self.assertRaises(ValueError):
+            B.agent_permission_args("codex", "invalid")
 
     def test_ssh_uses_argv_and_never_receives_gateway_credentials(self):
         with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home, "WORKBENCH_GATEWAY_KEY": "do-not-forward"}), \

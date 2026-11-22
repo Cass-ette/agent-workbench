@@ -30,6 +30,8 @@ import "./App.css";
 import { UsageStatus } from "./UsagePanel";
 import { WorkbenchUpdate } from "./WorkbenchUpdate";
 import { SSHConnection } from "./SSHConnection";
+import { AgentPermissionDialog, permissionLabel, permissionStorageKey, readAgentPermissions } from "./AgentPermissions";
+import type { AgentPermissions } from "./AgentPermissions";
 import type { UsageSnapshot } from "./UsagePanel";
 
 type ClientKind = "claude" | "codex";
@@ -88,6 +90,7 @@ interface Session extends TerminalInfo {
   mode: SessionMode;
   exitCode: number | null;
   originalHistoryRef?: string;
+  permissions?: string;
 }
 
 interface TerminalOutput {
@@ -109,6 +112,8 @@ const emptyConfig: AppConfig = {
 };
 
 function App() {
+  const [agentPermissions, setAgentPermissions] = useState(readAgentPermissions);
+  const [showPermissions, setShowPermissions] = useState(() => readAgentPermissions() === null);
   const [config, setConfig] = useState<AppConfig>(emptyConfig);
   const [configPath, setConfigPath] = useState("");
   const [loaded, setLoaded] = useState(false);
@@ -403,6 +408,10 @@ function App() {
       }
       if (!await closingSession || starting.current) return;
     }
+    if (original?.scope !== "global" && !agentPermissions) {
+      setShowPermissions(true);
+      return;
+    }
     setError("");
     setNotice("");
     starting.current = true;
@@ -419,6 +428,7 @@ function App() {
           history_id: source?.id,
           confirmed_gateway: source && !original ? selectedProfile?.gateway : undefined,
           history_action: original ? "original" : source ? "fork" : undefined,
+          permission_mode: agentPermissions?.[client] ?? "restricted",
         },
       });
       const session: Session = {
@@ -429,6 +439,7 @@ function App() {
         mode,
         exitCode: pendingExits.current.get(info.id) ?? null,
         originalHistoryRef: original?.history_ref,
+        permissions: original?.scope === "global" ? "系统 CLI 权限" : permissionLabel(client, agentPermissions![client]),
       };
       setSessions((current) => [...current, session]);
       selectSession(info.id);
@@ -466,6 +477,7 @@ function App() {
         profileName: "系统全局",
         mode: "new",
         exitCode: pendingExits.current.get(info.id) ?? null,
+        permissions: "系统 CLI 权限",
       };
       setSessions((current) => [...current, session]);
       selectSession(info.id);
@@ -628,6 +640,7 @@ function App() {
           </div>
 
           <div className="sidebar-bottom">
+            <button className="sidebar-link" onClick={() => setShowPermissions(true)}>权限设置</button>
             <button className="sidebar-link" onClick={() => void openHistory("global")}>恢复最近对话</button>
             <button className="sidebar-link" onClick={() => setShowSSHConnection(true)}>手机连接</button>
             <div className="security-note"><span className="security-dot" />密钥保存在 Windows 凭据管理器</div>
@@ -749,6 +762,7 @@ function App() {
                 <TerminalSquare size={16} />
                 <strong>终端工作区</strong>
                 <span className="session-count">{sessions.length}</span>
+                {activeSession?.permissions && <small>{activeSession.permissions}</small>}
               </div>
               <div className="terminal-toolbar-actions">
                 {activeSession && activeSession.exitCode === null && (
@@ -809,6 +823,14 @@ function App() {
         </main>
       </div>
 
+      {loaded && showPermissions && <AgentPermissionDialog settings={agentPermissions} close={() => setShowPermissions(false)} save={(settings: AgentPermissions) => {
+        try {
+          window.localStorage.setItem(permissionStorageKey, JSON.stringify(settings));
+          setAgentPermissions(settings);
+          setShowPermissions(false);
+          setNotice("已保存权限设置；之后新建、恢复和分支的工作台会话使用此设置。");
+        } catch { setError("无法保存权限设置，请重试。"); }
+      }} />}
       {historyOpen && (
         <div className="dialog-backdrop" onKeyDown={(event) => { if (event.key === "Escape") setHistoryOpen(false); }}>
           <section className="profile-dialog history-dialog" role="dialog" aria-label="本地对话历史" aria-modal="true">
@@ -978,6 +1000,7 @@ function TerminalPane({
     });
     terminal.writeln(`\x1b[2m${session.title}  ·  ${session.workspace}\x1b[0m`);
     terminal.writeln("");
+    if (session.permissions) terminal.writeln("权限：" + session.permissions);
     resize();
     return () => {
       observer.disconnect();

@@ -142,6 +142,10 @@ button { color: inherit; }
 .tab-label small { display: block; overflow: hidden; margin-top: 1px; color: #89919a; font-family: var(--mono); font-size: 8px; text-overflow: ellipsis; }
 .tab-close { width: 24px; height: 25px; display: grid; place-items: center; margin-right: 3px; color: #818994; border: 0; border-radius: 3px; background: transparent; cursor: pointer; }
 .tab-close:hover { color: #fff; background: #454a52; }
+.permission-dialog { max-height: 85vh; overflow-y: auto; }
+.permission-dialog p { font-size: 13px; line-height: 1.6; color: #545e68; }
+.permission-dialog select { margin-top: 7px; padding: 8px; color: inherit; background: #fff; border: 1px solid #d7dce0; border-radius: 6px; }
+.permission-confirm { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.6; color: #934b12; }
 .terminal-stage { min-height: 0; position: relative; flex: 1; background: #17191c; }
 .terminal-pane { position: absolute; inset: 0; padding: 10px 12px; overflow: hidden; }
 .terminal-pane.hidden { visibility: hidden; }

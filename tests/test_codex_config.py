@@ -2,6 +2,7 @@ import importlib.util
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 try:
@@ -17,6 +18,39 @@ SPEC.loader.exec_module(BACKEND)
 
 
 class CodexConfigTests(unittest.TestCase):
+    def test_claude_keeps_network_proxy_without_inheriting_other_model_auth(self):
+        with patch.dict(BACKEND.os.environ, {
+            "HTTPS_PROXY": "http://127.0.0.1:7890",
+            "no_proxy": ".internal.test",
+            "NO_PROXY": ".internal.test,build.test",
+            "CLAUDE_CODE_OAUTH_TOKEN": "external-login",
+        }):
+            _, environment = BACKEND.build_launch("private-key", "test", workspace=Path("/tmp/project"))
+            self.assertEqual(environment["HTTPS_PROXY"], "http://127.0.0.1:7890")
+            self.assertEqual(environment["NO_PROXY"], "127.0.0.1,localhost,::1,.internal.test,build.test")
+            self.assertEqual(environment["NO_PROXY"], environment["no_proxy"])
+            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", environment)
+
+    def test_permission_modes_cover_new_resume_and_fork_without_disabling_approvals(self):
+        for mode in ("restricted", "standard", "full"):
+            for session_mode, history_id in (("new", None), ("continue", None), ("resume", None), ("resume", "test-history")):
+                with self.subTest(mode=mode, session_mode=session_mode, history_id=history_id):
+                    args = BACKEND.build_codex_command("test", Path("/tmp/project"), session_mode, history_id,
+                                                       permission_mode=mode)
+                    self.assertEqual(args[args.index("--ask-for-approval") + 1], "on-request")
+                    self.assertEqual(args[args.index("--sandbox") + 1], "danger-full-access" if mode == "full" else "workspace-write")
+                    self.assertIn("sandbox_workspace_write.network_access=" + ("false" if mode == "restricted" else "true"), args)
+                    self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", args)
+        with self.assertRaises(RuntimeError):
+            BACKEND.agent_permission_args("codex", "invalid")
+
+    def test_claude_requires_explicit_full_mode_to_skip_tool_confirmation(self):
+        for mode in ("restricted", "standard", "full"):
+            command, _ = BACKEND.build_launch("test", "test", workspace=Path("/tmp/project"), permission_mode=mode)
+            self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions" if mode == "full" else "default")
+        command, _ = BACKEND.build_launch("test", "test", smoke=True, permission_mode="full")
+        self.assertNotIn("bypassPermissions", command)
+
     def test_session_modes_only_resume_when_requested(self):
         BACKEND.CODEX = Path("/fake/codex")
         workspace = Path("/tmp/project")

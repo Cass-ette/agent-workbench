@@ -250,6 +250,7 @@ final class TerminalSession: ObservableObject, Identifiable {
     let gateway: String
     let isGlobal: Bool
     let sourceHistoryRef: String?
+    let permissions: String
     let launchSpec: TerminalLaunchSpec
     let control = EmbeddedTerminalControl()
     @Published private(set) var isRunning = true
@@ -257,7 +258,7 @@ final class TerminalSession: ObservableObject, Identifiable {
 
     init(client: ClientKind, profile: KeyProfile?, model: String, workspace: String,
          sessionMode: SessionMode, gateway: String, launchSpec: TerminalLaunchSpec,
-         isGlobal: Bool = false, sourceHistoryRef: String? = nil) {
+         isGlobal: Bool = false, sourceHistoryRef: String? = nil, permissions: String = "系统 CLI 权限") {
         id = launchSpec.id
         self.client = client
         profileID = profile?.id ?? "global"
@@ -268,6 +269,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         self.gateway = gateway
         self.isGlobal = isGlobal
         self.sourceHistoryRef = sourceHistoryRef
+        self.permissions = permissions
         self.launchSpec = launchSpec
     }
 
@@ -355,6 +357,25 @@ private struct BackendClient: Sendable {
 
 @MainActor
 final class ManagerModel: ObservableObject {
+    @Published private(set) var agentPermissions = AgentPermissions.load()
+    @Published var isAgentPermissionsPresented = AgentPermissions.load() == nil
+
+    func saveAgentPermissions(_ settings: AgentPermissions) {
+        guard let data = try? JSONEncoder().encode(settings) else { return }
+        UserDefaults.standard.set(data, forKey: AgentPermissions.storageKey)
+        agentPermissions = settings
+        isAgentPermissionsPresented = false
+        statusMessage = "已保存权限设置；之后新建、恢复和分支的工作台会话使用此设置。"
+        isStatusError = false
+    }
+
+    private func ensureAgentPermissions() -> Bool {
+        guard agentPermissions != nil else {
+            isAgentPermissionsPresented = true
+            return false
+        }
+        return true
+    }
     @Published var activeClient: ClientKind = .claude {
         didSet {
             if let history = selectedHistory, history.clientKind != activeClient {
@@ -882,6 +903,7 @@ final class ManagerModel: ObservableObject {
             launchGlobal(client: activeClient)
             return
         }
+        guard ensureAgentPermissions() else { return }
         if sessionMode == .continue {
             restoreRecentInProject()
             return
@@ -995,6 +1017,7 @@ final class ManagerModel: ObservableObject {
             launchGlobal(client: entry.clientKind, history: entry)
             return
         }
+        guard ensureAgentPermissions() else { return }
         let originalProfile = profiles.first { $0.id == entry.profile_id }
         guard let originalProfile else {
             setError("原调用配置已移除或无法识别。可在原项目从历史创建分支。")
@@ -1007,6 +1030,7 @@ final class ManagerModel: ObservableObject {
 
     func launchConfirmed() {
         guard !installingApplicationUpdate, let selectedProfile else { return }
+        guard ensureAgentPermissions() else { return }
         let mode = pendingSessionMode
         let history = mode == .resume ? selectedHistory : nil
         guard mode != .resume || history != nil else { return }
@@ -1021,7 +1045,7 @@ final class ManagerModel: ObservableObject {
     private func launchWorkbench(client: ClientKind, profile: KeyProfile, model: String, directory: String,
                                  targetGateway: String, mode: SessionMode, history: LocalHistoryEntry?,
                                  original: Bool = false) {
-        guard let backend else { return }
+        guard let backend, let agentPermissions else { return }
         let action: String
         if original { action = "history-resume-original" }
         else if let history { action = history.isGlobal ? "history-import-launch" : "history-launch" }
@@ -1029,7 +1053,9 @@ final class ManagerModel: ObservableObject {
         let shellPath = ProcessInfo.processInfo.environment["SHELL"].flatMap {
             FileManager.default.isExecutableFile(atPath: $0) ? $0 : nil
         } ?? "/bin/zsh"
-        var backendArguments = [backend.scriptURL.path, action, "--workspace", directory]
+        let permissions = agentPermissions.mode(for: client)
+        var backendArguments = [backend.scriptURL.path, action, "--workspace", directory,
+                                "--permission-mode", permissions.rawValue]
         if !original {
             backendArguments += ["--profile-id", profile.id, "--model", model,
                                  "--session-mode", mode.rawValue, "--gateway-url", targetGateway]
@@ -1045,7 +1071,7 @@ final class ManagerModel: ObservableObject {
         let backendStatus = "backend_status=$?; if [ \"$backend_status\" -ne 0 ]; then exit \"$backend_status\"; fi"
         let launch = TerminalLaunchSpec(
             executable: shellPath,
-            arguments: ["-l", "-i", "-c", "trap ':' INT; \(backendCommand); \(backendStatus); exec \(shellQuote(shellPath)) -l -i"],
+            arguments: ["-l", "-i", "-c", "trap ':' INT; printf '%s\\n' \(shellQuote("权限：" + permissions.label(for: client))); \(backendCommand); \(backendStatus); exec \(shellQuote(shellPath)) -l -i"],
             workspace: directory,
             environment: [
                 "HOME=\(NSHomeDirectory())",
@@ -1054,13 +1080,12 @@ final class ManagerModel: ObservableObject {
                 "TERM=xterm-256color",
                 "COLORTERM=truecolor",
                 "LANG=en_US.UTF-8",
-                "NO_PROXY=127.0.0.1,localhost,::1",
-                "no_proxy=127.0.0.1,localhost,::1",
-            ]
+            ] + agentNetworkEnvironment(ProcessInfo.processInfo.environment)
         )
         let session = TerminalSession(client: client, profile: profile, model: model,
                                       workspace: directory, sessionMode: mode, gateway: targetGateway,
-                                      launchSpec: launch, sourceHistoryRef: original ? history?.history_ref : nil)
+                                      launchSpec: launch, sourceHistoryRef: original ? history?.history_ref : nil,
+                                      permissions: permissions.label(for: client))
         terminalSessions.append(session)
         selectTerminal(session.id)
         if let history {

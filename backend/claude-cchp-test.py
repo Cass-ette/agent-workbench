@@ -430,7 +430,7 @@ def set_profile_gateway_from_stdin(profile_id):
     print(json.dumps({"profile_id": profile_id, "gateway": gateway, "model_count": len(models)}, ensure_ascii=False))
 
 
-def launch_profile(profile_id, model, workspace_value, session_mode, gateway_value=None):
+def launch_profile(profile_id, model, workspace_value, session_mode, gateway_value=None, permission_mode="restricted"):
     profile = next((item for item in load_profiles() if item["id"] == profile_id), None)
     if profile is None:
         raise RuntimeError("找不到所选调用 Key；请刷新列表。")
@@ -461,7 +461,8 @@ def launch_profile(profile_id, model, workspace_value, session_mode, gateway_val
         "gateway": gateway, "key_fingerprint": fingerprint,
     }, ensure_ascii=False))
     return launch(model, selected_key=key, selected_name=profile["name"],
-                  workspace=workspace, session_mode=session_mode, gateway=gateway, config_dir=home)
+                  workspace=workspace, session_mode=session_mode, gateway=gateway, config_dir=home,
+                  permission_mode=permission_mode)
 
 
 def codex_config(profile_id, model, gateway=None, workspace=None, branch_home=None, fingerprint=""):
@@ -494,15 +495,35 @@ def codex_config(profile_id, model, gateway=None, workspace=None, branch_home=No
     return home
 
 
-def build_codex_command(model, workspace, session_mode, history_id=None, fork_history=True):
-    command = [str(CODEX), "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
+def agent_permission_args(client, mode="restricted"):
+    if mode not in {"restricted", "standard", "full"}:
+        raise RuntimeError("权限模式无效；请重新设置。")
+    if client == "claude":
+        return ["--permission-mode", "bypassPermissions" if mode == "full" else "default"]
+    if client != "codex":
+        raise RuntimeError("未知客户端权限。")
+    return ["--sandbox", "danger-full-access" if mode == "full" else "workspace-write",
+            "--ask-for-approval", "on-request",
+            "-c", "sandbox_workspace_write.network_access=" + ("false" if mode == "restricted" else "true")]
+
+def local_network_bypass(environment):
+    entries = ["127.0.0.1", "localhost", "::1"]
+    for name in ("NO_PROXY", "no_proxy"):
+        entries.extend(value.strip() for value in environment.get(name, "").split(",") if value.strip())
+    return ",".join(dict.fromkeys(entries))
+
+
+def build_codex_command(model, workspace, session_mode, history_id=None, fork_history=True, permission_mode="restricted"):
+    options = ["--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon",
+               *agent_permission_args("codex", permission_mode)]
+    command = [str(CODEX), *options]
     if history_id:
         action = "fork" if fork_history else "resume"
         return [str(CODEX), action, history_id, *command[1:]]
     if session_mode == "continue":
-        return [str(CODEX), "resume", "--last", "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
+        return [str(CODEX), "resume", "--last", *options]
     if session_mode == "resume":
-        return [str(CODEX), "resume", "--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon"]
+        return [str(CODEX), "resume", *options]
     if session_mode != "new":
         raise RuntimeError("会话方式无效。")
     return command
@@ -568,7 +589,7 @@ def global_history_list(workspace=None, client=None):
 
 
 def launch_history(history_ref, session_id, client, profile_id, model, workspace_value,
-                   gateway_value=None, include_global=False, *, original=False, force_fork=False):
+                   gateway_value=None, include_global=False, *, original=False, force_fork=False, permission_mode="restricted"):
     session_history = history_module()
     codex_roots, claude_roots = history_roots()
     if include_global:
@@ -622,14 +643,16 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
             environment = dict(os.environ)
             for name in ("OPENAI_API_KEY", "CODEX_SQLITE_HOME", "OPENAI_BASE_URL"):
                 environment.pop(name, None)
+            bypass = local_network_bypass(environment)
             environment.update(CODEX_HOME=str(home), CCH_API_KEY=key,
-                               NO_PROXY="127.0.0.1,localhost,::1", no_proxy="127.0.0.1,localhost,::1")
-            command = build_codex_command(model, workspace, "resume", session_id, fork_history=not same_config)
+                               NO_PROXY=bypass, no_proxy=bypass)
+            command = build_codex_command(model, workspace, "resume", session_id, fork_history=not same_config,
+                                          permission_mode=permission_mode)
         else:
             if not (home / "settings.json").exists():
                 private_write(home / "settings.json", "{}\n")
             command, environment = build_launch(key, model, workspace=workspace, gateway=gateway,
-                                               config_dir=home, isolated_branch=True)
+                                               config_dir=home, isolated_branch=True, permission_mode=permission_mode)
             command += ["--resume", session_id]
             if not same_config:
                 command += ["--fork-session"]
@@ -646,7 +669,7 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
             seed.unlink(missing_ok=True)
 
 
-def launch_codex_profile(profile_id, model, workspace_value, session_mode, gateway_value=None):
+def launch_codex_profile(profile_id, model, workspace_value, session_mode, gateway_value=None, permission_mode="restricted"):
     profile = next((item for item in load_profiles() if item["id"] == profile_id), None)
     if profile is None:
         raise RuntimeError("找不到所选调用 Key；请刷新列表。")
@@ -672,13 +695,14 @@ def launch_codex_profile(profile_id, model, workspace_value, session_mode, gatew
     environment = dict(os.environ)
     for name in ("OPENAI_API_KEY", "CODEX_HOME", "CCH_API_KEY"):
         environment.pop(name, None)
+    bypass = local_network_bypass(environment)
     environment.update({
         "CODEX_HOME": str(codex_home),
         "CCH_API_KEY": key,
-        "NO_PROXY": "127.0.0.1,localhost,::1",
-        "no_proxy": "127.0.0.1,localhost,::1",
+        "NO_PROXY": bypass,
+        "no_proxy": bypass,
     })
-    command = build_codex_command(model, workspace, session_mode)
+    command = build_codex_command(model, workspace, session_mode, permission_mode=permission_mode)
     os.chdir(workspace)
     os.execve(CODEX, command, environment)
 
@@ -916,16 +940,16 @@ def setup_key():
 
 
 def build_launch(key, model, smoke=False, workspace=None, session_mode="new", gateway=None, config_dir=None,
-                 isolated_branch=False):
+                 isolated_branch=False, permission_mode="restricted"):
     gateway = normalize_gateway(gateway) if gateway else gateway_url()
     environment = dict(os.environ)
     for name in list(environment):
         if name.startswith("ANTHROPIC_") or name in {
             "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
             "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "DEBUG",
-            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
         }:
             environment.pop(name, None)
+    bypass = local_network_bypass(environment)
     environment.update({
         "CLAUDE_CONFIG_DIR": str(config_dir or CONFIG_DIR),
         "ANTHROPIC_BASE_URL": gateway,
@@ -939,8 +963,8 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new", ga
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
         "DISABLE_AUTOUPDATER": "1",
-        "NO_PROXY": "127.0.0.1,localhost,::1",
-        "no_proxy": "127.0.0.1,localhost,::1",
+        "NO_PROXY": bypass,
+        "no_proxy": bypass,
         "MAX_THINKING_TOKENS": "0",
     })
     settings = config_dir / "settings.json" if isolated_branch else SETTINGS
@@ -953,7 +977,7 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new", ga
         command += ["--print", "--no-session-persistence", "--tools", "", "--",
                     "只回复：本机网关已连通。不要调用工具，不要读取文件，不要执行命令。"]
     else:
-        command += ["--add-dir", str(workspace or WORKSPACE)]
+        command += ["--add-dir", str(workspace or WORKSPACE), *agent_permission_args("claude", permission_mode)]
         if session_mode == "continue":
             command.append("--continue")
         elif session_mode == "resume":
@@ -964,7 +988,7 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new", ga
 
 
 def launch(model, smoke=False, selected_key=None, selected_name=None, workspace=None, session_mode="new", gateway=None,
-           config_dir=None):
+           config_dir=None, permission_mode="restricted"):
     if not CLAUDE.is_file():
         raise RuntimeError("未找到原有 Claude 可执行文件；没有修改原入口。")
     key = selected_key if selected_key is not None else read_key()
@@ -974,7 +998,8 @@ def launch(model, smoke=False, selected_key=None, selected_name=None, workspace=
     prepare_isolated_config()
     cwd = workspace or WORKSPACE
     command, environment = build_launch(key, model, smoke, cwd, session_mode, gateway,
-                                        config_dir=config_dir, isolated_branch=config_dir is not None)
+                                        config_dir=config_dir, isolated_branch=config_dir is not None,
+                                        permission_mode=permission_mode)
     if selected_name:
         print("本机调用 Key：" + selected_name, flush=True)
     print("网关：" + gateway + "；模型：" + model, flush=True)
@@ -1080,6 +1105,7 @@ def main():
     parser.add_argument("--client", choices=["codex", "claude"])
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--fork-history", action="store_true")
+    parser.add_argument("--permission-mode", choices=["restricted", "standard", "full"], default="restricted")
     arguments = parser.parse_args()
     if arguments.action == "menu": return menu()
     if arguments.action == "setup": setup_key(); return 0
@@ -1105,7 +1131,7 @@ def main():
         if not all((arguments.history_ref, arguments.session_id, arguments.client, arguments.workspace)):
             raise RuntimeError("恢复会话缺少历史来源或工作目录。")
         return launch_history(arguments.history_ref, arguments.session_id, arguments.client,
-                              None, None, arguments.workspace, original=True)
+                              None, None, arguments.workspace, original=True, permission_mode=arguments.permission_mode)
     if arguments.action in {"history-launch", "history-import-launch"}:
         if not all((arguments.history_ref, arguments.session_id, arguments.client,
                     arguments.profile_id, arguments.workspace)):
@@ -1114,7 +1140,7 @@ def main():
                               arguments.profile_id, arguments.model, arguments.workspace,
                               arguments.gateway_url,
                               include_global=arguments.action == "history-import-launch",
-                              force_fork=arguments.fork_history)
+                              force_fork=arguments.fork_history, permission_mode=arguments.permission_mode)
     if arguments.action == "profile-models":
         if not arguments.profile_id: raise RuntimeError("缺少 profile-id。")
         profile_models(arguments.profile_id, arguments.gateway_url); return 0
@@ -1129,11 +1155,13 @@ def main():
     if arguments.action == "launch":
         if not arguments.profile_id or not arguments.workspace:
             raise RuntimeError("启动 Claude 时必须指定 profile-id 和工作目录。")
-        return launch_profile(arguments.profile_id, arguments.model, arguments.workspace, arguments.session_mode, arguments.gateway_url)
+        return launch_profile(arguments.profile_id, arguments.model, arguments.workspace, arguments.session_mode, arguments.gateway_url,
+                              permission_mode=arguments.permission_mode)
     if arguments.action == "codex-launch":
         if not arguments.profile_id or not arguments.workspace:
             raise RuntimeError("启动 Codex 时必须指定 profile-id 和工作目录。")
-        return launch_codex_profile(arguments.profile_id, arguments.model, arguments.workspace, arguments.session_mode, arguments.gateway_url)
+        return launch_codex_profile(arguments.profile_id, arguments.model, arguments.workspace, arguments.session_mode, arguments.gateway_url,
+                                    permission_mode=arguments.permission_mode)
     if arguments.action == "models": print("\n".join(fetch_models(read_key()))); return 0
     return launch(arguments.model, arguments.action == "smoke")
 

@@ -11,9 +11,7 @@ class TermuxBootstrapResult : BroadcastReceiver() {
         if (intent.action != "com.cassette.workbench.BOOTSTRAP.${store.bootstrapOperation()}") return
         val result = intent.getBundleExtra("result") ?: return
         if (result.getInt("exitCode", -1) != 0 || result.getInt("err", -1) != -1) {
-            val detail = listOf(result.getString("errmsg"), result.getString("stderr"), result.getString("stdout"))
-                .filterNotNull().joinToString("\n").takeLast(900)
-            store.saveBootstrapError("Termux 准备未完成：$detail")
+            store.saveBootstrapError(bootstrapErrorMessage(result.getString("stderr"), result.getString("errmsg")))
         }
     }
 }

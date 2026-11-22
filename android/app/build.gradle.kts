@@ -5,7 +5,7 @@ plugins {
 
 val historyAssetsDirectory = layout.buildDirectory.dir("generated/historyAssets")
 val historyAssets = tasks.register<Sync>("prepareHistoryAssets") {
-    from(rootProject.file("../backend/session_history.py"))
+    from(rootProject.file("../backend/session_history.py"), rootProject.file("../backend/tool_bridge.py"))
     into(historyAssetsDirectory)
 }
 tasks.named("preBuild") { dependsOn(historyAssets) }

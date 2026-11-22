@@ -4,6 +4,7 @@ mod pricing;
 mod terminal_job;
 mod usage;
 mod updates;
+pub mod tools;
 use keyring::Entry;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use reqwest::{Client, Url};
@@ -702,6 +703,7 @@ fn start_terminal(
             ];
         }
         args.extend(request.permission_mode.args("codex"));
+        args.extend(tools::apply(&config_root.join("tools/codex"), &selected_home, "codex")?);
         shell.env("CODEX_HOME", codex_home);
         shell.env("CCH_API_KEY", &key);
         let command_args = args
@@ -735,14 +737,17 @@ fn start_terminal(
                 "ANTHROPIC_SMALL_FAST_MODEL"] {
                 shell.env(name, &request.model);
             }
-            let empty_mcp = selected_home.join("empty-mcp.json");
-            fs::write(&empty_mcp, r#"{"mcpServers":{}}"#)
-                .map_err(|error| format!("写入隔离 Claude MCP 设置失败：{error}"))?;
-            args.extend(["--bare".into(), "--strict-mcp-config".into(),
-                "--mcp-config".into(), empty_mcp.to_string_lossy().into_owned()]);
+            args.push("--bare".into());
+            if !config_root.join("tools/claude/tools.json").exists() {
+                let empty_mcp = selected_home.join("empty-mcp.json");
+                fs::write(&empty_mcp, r#"{"mcpServers":{}}"#)
+                    .map_err(|error| format!("写入隔离 Claude MCP 设置失败：{error}"))?;
+                args.extend(["--strict-mcp-config".into(), "--mcp-config".into(), empty_mcp.to_string_lossy().into_owned()]);
+            }
         } else {
             shell.env("ANTHROPIC_AUTH_TOKEN", &key);
         }
+        args.extend(tools::apply(&config_root.join("tools/claude"), &selected_home, "claude")?);
         match request.session_mode.as_str() {
             "new" => {}
             "continue" => args.push("--continue".into()),
@@ -1082,6 +1087,9 @@ pub fn run() {
             write_terminal,
             resize_terminal,
             stop_terminal,
+            tools::tools_get,
+            tools::tools_save,
+            tools::tools_import,
             updates::check_workbench_update,
             updates::download_workbench_update,
             updates::cancel_workbench_update,

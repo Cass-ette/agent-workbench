@@ -1,6 +1,6 @@
 # Claude & Codex Agent 工作台
 
-首次启动可设置 Codex 和 Claude 的权限。推荐 Codex「项目内写入，允许联网」与 Claude「标准审批」。两者的高权限选项需要明确确认。Skills、MCP、浏览器等工具的接入方案另行跟踪，当前没有图形工具管理器。详见[权限与工具能力](docs/agent-permissions.zh-CN.md)。
+首次启动可设置 Codex 和 Claude 的权限。推荐 Codex「项目内写入，允许联网」与 Claude「标准审批」。两者的高权限选项需要明确确认。「工具与插件」可分别接入私有 MCP、Skills 和 Claude 本地插件，桌面端可启用主屏幕读取。详见[权限与工具能力](docs/agent-permissions.zh-CN.md)和[工具接入说明](docs/tool-bridge.zh-CN.md)。
 
 ## 下载与上手
 

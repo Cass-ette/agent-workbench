@@ -45,7 +45,7 @@ class TermuxConnection(private val context: Context, private val store: ProfileS
     fun supportsRuntime() = try {
         val health = request("/health")
         health.optString("version") == BuildConfig.VERSION_NAME && health.optInt("build") == BuildConfig.VERSION_CODE &&
-            health.optJSONArray("capabilities").strings().containsAll(listOf("debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "history", "history-actions", "ssh-pairing"))
+            health.optJSONArray("capabilities").strings().containsAll(listOf("debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "history", "history-actions", "ssh-pairing", "tool-bridge"))
     } catch (_: Exception) { false }
 
     fun startHost(upgrade: Boolean = false) {
@@ -62,7 +62,7 @@ class TermuxConnection(private val context: Context, private val store: ProfileS
             store.saveSecret("bridge:$port", token)
             store.saveBridgePort(port)
         }
-        val files = listOf("termux_bridge.py", "debian_runner.py", "runtime_setup.sh", "workbench_runtime.py", "linux_vm.py", "session_history.py")
+        val files = listOf("termux_bridge.py", "debian_runner.py", "runtime_setup.sh", "workbench_runtime.py", "linux_vm.py", "session_history.py", "tool_bridge.py")
         val assets = files.associateWith { name -> context.assets.open(name).use { it.readBytes() } }
         val digest = MessageDigest.getInstance("SHA-256")
         assets.forEach { (name, bytes) -> digest.update(name.toByteArray(Charsets.UTF_8)); digest.update(bytes) }

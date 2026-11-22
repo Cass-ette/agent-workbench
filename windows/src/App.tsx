@@ -31,6 +31,7 @@ import { UsageStatus } from "./UsagePanel";
 import { WorkbenchUpdate } from "./WorkbenchUpdate";
 import { SSHConnection } from "./SSHConnection";
 import { AgentPermissionDialog, permissionLabel, permissionStorageKey, readAgentPermissions } from "./AgentPermissions";
+import { ToolBridge } from "./ToolBridge";
 import type { AgentPermissions } from "./AgentPermissions";
 import type { UsageSnapshot } from "./UsagePanel";
 
@@ -112,6 +113,7 @@ const emptyConfig: AppConfig = {
 };
 
 function App() {
+  const [showTools, setShowTools] = useState(false);
   const [agentPermissions, setAgentPermissions] = useState(readAgentPermissions);
   const [showPermissions, setShowPermissions] = useState(() => readAgentPermissions() === null);
   const [config, setConfig] = useState<AppConfig>(emptyConfig);
@@ -641,6 +643,7 @@ function App() {
 
           <div className="sidebar-bottom">
             <button className="sidebar-link" onClick={() => setShowPermissions(true)}>权限设置</button>
+            <button className="sidebar-link" onClick={() => setShowTools(true)}>工具与插件</button>
             <button className="sidebar-link" onClick={() => void openHistory("global")}>恢复最近对话</button>
             <button className="sidebar-link" onClick={() => setShowSSHConnection(true)}>手机连接</button>
             <div className="security-note"><span className="security-dot" />密钥保存在 Windows 凭据管理器</div>
@@ -823,6 +826,7 @@ function App() {
         </main>
       </div>
 
+      {showTools && <ToolBridge close={() => setShowTools(false)} />}
       {loaded && showPermissions && <AgentPermissionDialog settings={agentPermissions} close={() => setShowPermissions(false)} save={(settings: AgentPermissions) => {
         try {
           window.localStorage.setItem(permissionStorageKey, JSON.stringify(settings));

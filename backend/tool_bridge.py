@@ -96,19 +96,13 @@ def native_servers(servers, client):
             if "env_vars" in item:
                 env = item.setdefault("env", {})
                 for key in item.pop("env_vars"):
-                    if key not in os.environ:
-                        raise ValueError("MCP 所需环境变量未设置：" + key)
-                    env[key] = os.environ[key]
+                    env[key] = environment_reference(key)
             headers = item.setdefault("headers", {}) if item.get("url") else {}
             if item.get("bearer_token_env_var"):
                 variable = item.pop("bearer_token_env_var")
-                if variable not in os.environ:
-                    raise ValueError("MCP 认证环境变量未设置：" + variable)
-                headers["Authorization"] = "Bearer " + os.environ[variable]
+                headers["Authorization"] = "Bearer " + environment_reference(variable)
             for key, variable in item.pop("env_http_headers", {}).items():
-                if variable not in os.environ:
-                    raise ValueError("MCP 请求头环境变量未设置：" + variable)
-                headers[key] = os.environ[variable]
+                headers[key] = environment_reference(variable)
             if item.pop("cwd", None):
                 raise ValueError("Claude MCP 不支持服务级 cwd；请改用绝对程序路径")
             item.pop("startup_timeout_sec", None)
@@ -119,6 +113,29 @@ def native_servers(servers, client):
     return result
 
 
+def environment_reference(name):
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise ValueError("MCP 环境变量名格式错误")
+    # Claude expands these in its actual launch environment. Never snapshot tokens.
+    return "${" + name + "}"
+
+
+def publish_directory(destination, build):
+    destination = Path(destination)
+    if destination.exists():
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(prefix=".workbench-stage-", dir=destination.parent) as stage:
+        content = Path(stage) / "content"
+        build(content)
+        content.rename(destination)
+
+
+def copy_component(source, destination):
+    publish_directory(destination, lambda stage: shutil.copytree(
+        source, stage, ignore=shutil.ignore_patterns(".git", ".DS_Store")))
+
+
 def settings(root):
     path = Path(root) / "tools.json"
     if not path.exists():
@@ -126,13 +143,22 @@ def settings(root):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def save_settings(root, payload):
+def save_settings(root, payload, client=None):
     value = settings(root)
     value["mcpServers"] = normalize_servers(json.loads(payload.get("config", "{}")))
     value["screen"] = payload.get("screen") is True
     disabled = payload.get("disabled", [])
     for item in value["items"]:
         item["enabled"] = item["id"] not in disabled
+    if value["screen"] and value["mcpServers"].get("screen", {}).get("enabled", True) and "screen" in value["mcpServers"]:
+        raise ValueError("screen 名称已被自定义 MCP 使用；请重命名或停用内置屏幕读取")
+    if client:
+        native_servers(value["mcpServers"], client)
+        for item in value["items"]:
+            if item["enabled"] and item["kind"] == "plugin":
+                if client != "claude":
+                    raise ValueError("完整 Claude 插件仅能用于 Claude")
+                native_servers(plugin_mcp(Path(root) / "components" / item["id"]), client)
     private_write(Path(root) / "tools.json", json.dumps(value, ensure_ascii=False, indent=2))
     return public_settings(root)
 
@@ -165,21 +191,32 @@ def import_directory(root, source, kind):
             raise ValueError("组件超过 100 MB 或一万文件；请选择单个技能/插件")
     digest = hashlib.sha256()
     for path in sorted(files):
-        digest.update(str(path.relative_to(source)).encode())
-        digest.update(path.read_bytes())
+        for field in (str(path.relative_to(source)).encode(), path.read_bytes()):
+            digest.update(len(field).to_bytes(8, "big"))
+            digest.update(field)
     identity = kind + "-" + digest.hexdigest()[:16]
     destination = Path(root) / "components" / identity
-    if not destination.exists():
-        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        shutil.copytree(source, destination, ignore=shutil.ignore_patterns(".git", ".DS_Store"))
+    copy_component(source, destination)
     value = settings(root)
     if not any(item["id"] == identity for item in value["items"]):
         slug = re.sub(r"[^a-z0-9-]+", "-", source.name.lower()).strip("-")[:50] or "skill"
-        command = "workbench-" + slug + "-" + identity[-6:] + ":" + slug if kind == "skill" else ""
+        name = skill_name(source / "SKILL.md", slug) if kind == "skill" else ""
+        command = "workbench-" + slug + "-" + identity[-6:] + ":" + name if kind == "skill" else ""
         value["items"].append({"id": identity, "name": source.name, "kind": kind, "enabled": False,
                                "slug": slug, "command": command})
         private_write(Path(root) / "tools.json", json.dumps(value, ensure_ascii=False, indent=2))
     return public_settings(root)
+
+
+def skill_name(path, fallback):
+    text = path.read_text(encoding="utf-8")
+    if text.startswith("---"):
+        frontmatter = text.split("---", 2)
+        if len(frontmatter) == 3:
+            match = re.search(r"(?m)^name:\s*['\"]?([a-z0-9-]+)['\"]?\s*$", frontmatter[1])
+            if match:
+                return match[1]
+    return fallback
 
 
 def plugin_mcp(component):
@@ -229,8 +266,7 @@ def apply_tools(root, home, client, screen_command=None):
             if item["kind"] != "skill":
                 raise ValueError("Codex 暂只接入 MCP 和 Skills；完整 Claude 插件请切换客户端")
             target = skill_root / ("workbench-" + item["id"])
-            if not target.exists():
-                shutil.copytree(root / "components" / item["id"], target)
+            copy_component(root / "components" / item["id"], target)
         selected = {"workbench-" + item["id"] for item in enabled}
         skill_config = [{"path": str(path / "SKILL.md"), "enabled": path.name in selected}
                         for path in sorted(skill_root.glob("workbench-skill-*"))]
@@ -252,10 +288,11 @@ def apply_tools(root, home, client, screen_command=None):
         else:
             # A synthetic, immutable Claude plugin registers only this skill.
             wrapper = root / "skill-plugins" / item["id"]
-            if not wrapper.exists():
+            def build_wrapper(stage):
                 namespace = item.get("command", "workbench-" + item["id"]).split(":")[0]
-                private_write(wrapper / ".claude-plugin/plugin.json", json.dumps({"name": namespace, "version": "1.0.0"}))
-                shutil.copytree(component, wrapper / "skills" / item.get("slug", item["id"]))
+                private_write(stage / ".claude-plugin/plugin.json", json.dumps({"name": namespace, "version": "1.0.0"}))
+                shutil.copytree(component, stage / "skills" / item.get("slug", item["id"]))
+            publish_directory(wrapper, build_wrapper)
             plugins += ["--plugin-dir", str(wrapper)]
     content = json.dumps({"mcpServers": servers}, ensure_ascii=False)
     mcp = home / ("workbench-mcp-" + hashlib.sha256(content.encode()).hexdigest()[:16] + ".json")

@@ -1136,8 +1136,7 @@ def main():
         else:
             payload = json.load(sys.stdin)
             if arguments.action == "tools-save":
-                module.native_servers(module.normalize_servers(json.loads(payload.get("config", "{}"))), arguments.client)
-                result = module.save_settings(root, payload)
+                result = module.save_settings(root, payload, arguments.client)
             else:
                 if payload.get("kind") == "plugin" and arguments.client != "claude":
                     raise RuntimeError("完整 Claude 插件仅能导入 Claude；Codex 可分别接入其 MCP 和 Skills")

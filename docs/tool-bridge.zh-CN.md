@@ -25,7 +25,7 @@ macOS、Windows 侧栏的「工具与插件」和 Android 顶部「工具」用�
 
 核对程序、参数、地址和组件后勾选确认并保存。保存不执行程序；之后新建、恢复和分支的工作台会话才加载配置。服务实际注册名加 `workbench_` 前缀。服务中设置 `enabled: false` 可停用；删除其 JSON 条目后保存可取消登记。运行中的会话保持已加载的工具，需要关闭对应会话才能停止已运行的服务。
 
-支持 stdio 和 Streamable HTTP；旧 SSE 仅能用于 Claude，Codex 会说明不兼容。`headers` / `http_headers` 会按客户端转换。可使用 `env_vars`、`bearer_token_env_var` 或 `env_http_headers` 引用启动环境已有变量；变量必须在实际终端/来宾环境可见，图形应用不会自动取得别的应用的 token。Claude 不支持这里的服务级 `cwd`，请使用绝对程序路径。账号 OAuth 登录的图形管理仍未实现，可改用服务支持的独立凭据或原生登录流程。
+支持 stdio 和 Streamable HTTP；旧 SSE 仅能用于 Claude，Codex 会说明不兼容。`headers` / `http_headers` 会按客户端转换。可使用 `env_vars`、`bearer_token_env_var` 或 `env_http_headers` 引用启动环境已有变量；变量必须在实际终端/来宾环境可见，图形应用不会自动取得别的应用的 token。Claude 的生成配置保留 `${变量名}` 引用，由 CLI 在启动时读取，不把环境变量中的 token 展开后存入历史配置文件；保存时不要求 GUI 已经取得该变量。Claude 不支持这里的服务级 `cwd`，请使用绝对程序路径。账号 OAuth 登录的图形管理仍未实现，可改用服务支持的独立凭据或原生登录流程。
 
 配置在用户私有目录保存；本地编辑器会显示用户主动填入或导入的配置内容。不要把配置、认证头或截图贴入公开问题、日志或发布包。工具依赖需要在运行环境安装，注册成功不等于服务连接、系统授权或模型能力已验证。
 
@@ -37,7 +37,7 @@ Codex 使用私有 `CODEX_HOME/skills` 和原生技能开关。Claude 将独立�
 
 启用的 Claude 插件若包含 `.mcp.json` 或 manifest 的 `mcpServers` 配置，会登记其中兼容的服务到显式 MCP 配置，并将 `${CLAUDE_PLUGIN_ROOT}` 指向工作台副本；配置文件路径必须在插件副本内部。这样无需放开外部项目或系统 MCP 的自动加载。
 
-只复制单个组件，不复制外部配置根目录、账号 token 或整个插件缓存。拒绝包含符号链接的组件，避免带入别的目录；单个组件上限 100 MB / 一万文件。更新时重新导入新副本、停用旧副本。批量扫描、依赖安装、OAuth 管理及一键更新/删除组件仍在 [#12](https://github.com/Cass-ette/claude-cchp-manager/issues/12) 跟进。
+只复制单个组件，不复制外部配置根目录、账号 token 或整个插件缓存。拒绝包含符号链接的组件，避免带入别的目录；单个组件上限 100 MB / 一万文件。组件先完整复制再发布到目标目录，复制失败可重新导入；Windows 保存配置先写临时文件，成功后才替换旧文件。更新时重新导入新副本、停用旧副本。批量扫描、依赖安装、OAuth 管理及一键更新/删除组件仍在 [#12](https://github.com/Cass-ette/claude-cchp-manager/issues/12) 跟进。
 
 ## 屏幕读取
 

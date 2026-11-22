@@ -47,6 +47,7 @@ class ToolBridgeTests(unittest.TestCase):
             (source / "script.sh").write_text("exit 99")
             value = T.import_directory(root, source, "skill")
             self.assertFalse(value["items"][0]["enabled"])
+            self.assertTrue(value["items"][0]["command"].endswith(":sample"))
             T.save_settings(root, {"config": "{}"})
             codex = Path(temporary) / "codex"
             args = T.apply_tools(root, codex, "codex")
@@ -77,7 +78,35 @@ class ToolBridgeTests(unittest.TestCase):
         with self.assertRaises(ValueError): T.native_servers({"demo": {"url": "https://remote.test", "type": "sse"}}, "codex")
         with patch.dict(os.environ, {"WB_DEMO_TOKEN": "test-auth"}):
             server = T.native_servers({"demo": {"url": "https://remote.test", "bearer_token_env_var": "WB_DEMO_TOKEN"}}, "claude")
-        self.assertEqual(server["workbench_demo"]["headers"]["Authorization"], "Bearer test-auth")
+        self.assertEqual(server["workbench_demo"]["headers"]["Authorization"], "Bearer ${WB_DEMO_TOKEN}")
+
+    def test_environment_secrets_are_never_materialized_and_save_needs_no_token(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, home = Path(temporary) / "tools", Path(temporary) / "claude"
+            config = {"demo": {"url": "https://remote.test", "bearer_token_env_var": "WB_ONLY_AT_LAUNCH"}}
+            with patch.dict(os.environ, {}, clear=True):
+                T.save_settings(root, {"config": json.dumps(config)}, "claude")
+            with patch.dict(os.environ, {"WB_ONLY_AT_LAUNCH": "secret-must-not-persist"}):
+                args = T.apply_tools(root, home, "claude")
+            text = Path(args[args.index("--mcp-config") + 1]).read_text()
+            self.assertIn("${WB_ONLY_AT_LAUNCH}", text)
+            self.assertNotIn("secret-must-not-persist", text)
+
+    def test_failed_component_copy_leaves_no_published_directory_and_retry_works(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, target = Path(temporary) / "source", Path(temporary) / "target"
+            source.mkdir()
+            (source / "SKILL.md").write_text("complete")
+            def fail(_source, stage, **_kwargs):
+                stage.mkdir()
+                (stage / "SKILL.md").write_text("partial")
+                raise OSError("simulated disk failure")
+            with patch.object(T.shutil, "copytree", side_effect=fail):
+                with self.assertRaises(OSError): T.copy_component(source, target)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(Path(temporary).glob(".workbench-stage-*")), [])
+            T.copy_component(source, target)
+            self.assertEqual((target / "SKILL.md").read_text(), "complete")
 
     def test_enabled_claude_plugin_mcp_uses_private_component_paths(self):
         with tempfile.TemporaryDirectory() as temporary:

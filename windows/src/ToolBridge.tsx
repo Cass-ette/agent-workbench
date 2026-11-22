@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -6,6 +6,12 @@ interface Item { id: string; name: string; kind: string; enabled: boolean; comma
 interface Settings { config: string; screen: boolean; items: Item[] }
 
 export function ToolBridge({ close }: { close: () => void }) {
+  const dialog = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    dialog.current?.focus();
+    return () => { previous?.focus(); };
+  }, []);
   const [client, setClient] = useState("codex");
   const [config, setConfig] = useState('{"mcpServers": {}}');
   const [screen, setScreen] = useState(false);
@@ -26,10 +32,10 @@ export function ToolBridge({ close }: { close: () => void }) {
     return () => { active = false; };
   }, [client]);
   async function importDirectory(kind: string) {
-    const path = await open({ directory: true, multiple: false, title: kind === "skill" ? "选择包含 SKILL.md 的目录" : "选择包含 .claude-plugin/plugin.json 的目录" });
-    if (typeof path !== "string") return;
     setBusy(true);
     try {
+      const path = await open({ directory: true, multiple: false, title: kind === "skill" ? "选择包含 SKILL.md 的目录" : "选择包含 .claude-plugin/plugin.json 的目录" });
+      if (typeof path !== "string") return;
       const value = await invoke<Settings>("tools_import", { client, path, kind });
       const added = value.items.filter(item => !items.some(known => known.id === item.id)).map(item => item.id);
       setItems(value.items); setDisabled(previous => [...previous, ...added]); setConfirmed(false);
@@ -37,7 +43,15 @@ export function ToolBridge({ close }: { close: () => void }) {
     }
     catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   }
-  return <div className="dialog-backdrop"><section className="profile-dialog permission-dialog" role="dialog" aria-modal="true" aria-label="工具与插件">
+  return <div className="dialog-backdrop"><section ref={dialog} tabIndex={-1} className="profile-dialog permission-dialog" role="dialog" aria-modal="true" aria-label="工具与插件" onKeyDown={event => {
+    if (event.key === "Escape" && !busy) { event.preventDefault(); close(); }
+    if (event.key !== "Tab") return;
+    const fields = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("button, select, textarea, input")).filter(field => !field.matches(":disabled"));
+    const first = fields[0], last = fields.at(-1);
+    if (!first) { event.preventDefault(); event.currentTarget.focus(); }
+    else if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && (document.activeElement === last || document.activeElement === event.currentTarget)) { event.preventDefault(); first.focus(); }
+  }}>
     <h2>工具与插件</h2>
     <p>仅配置工作台会话。外部客户端的模型、认证、历史和工具设置保持原样。</p>
     <fieldset disabled={busy} style={{ border: 0, padding: 0 }}>

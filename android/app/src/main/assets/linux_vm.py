@@ -600,9 +600,7 @@ class LinuxVM:
         self.sync_tool_bridge()
         code = "import sys,json; from pathlib import Path; sys.path.insert(0,'/usr/local/lib'); import wb_tool_bridge as t; "
         code += "p=json.load(sys.stdin); r=Path.home()/'.local/share/agent-workbench/tools'/" + repr(client) + "; "
-        if action == "save":
-            code += "t.native_servers(t.normalize_servers(json.loads(p.get('config','{}')))," + repr(client) + "); "
-        expression = {"get": "t.public_settings(r)", "save": "t.save_settings(r,p)",
+        expression = {"get": "t.public_settings(r)", "save": "t.save_settings(r,p," + repr(client) + ")",
                       "import": "t.import_directory(r,p['path'],p['kind'])"}[action]
         code += "print(json.dumps(" + expression + ",ensure_ascii=False))"
         result = self.ssh("python3 -c " + shlex.quote(code), input=json.dumps(payload).encode(), capture_output=True, timeout=60)

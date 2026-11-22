@@ -221,7 +221,7 @@ struct TerminalPanel: View {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.borderless)
-                .disabled(model.selectedProfile == nil || model.selectedModel.isEmpty || model.workspace.isEmpty || model.isLoadingModels)
+                .disabled(!model.canLaunch)
                 .help("按上方当前配置新建一个独立终端会话")
                 Button {
                     model.showTerminalAppearance()

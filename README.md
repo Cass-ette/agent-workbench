@@ -4,6 +4,8 @@
 
 Mac / Windows 终端支持粘贴微信等截图工具复制的图片，保存为工作台私有 PNG 后交给当前对话，不自动提交。Mac 使用 ⌘V / Ctrl+V，Windows 使用 Ctrl+V；需要支持图片的模型和网关。详见[截图粘贴](docs/tool-bridge.zh-CN.md#微信等截图工具粘贴)。
 
+Mac 模型列表读取失败时，会保留同一调用配置和网关上次的模型选择；点模型旁的刷新按钮可重试，点模型选择可查看具体错误。首次读取失败且没有历史选择时，请检查该网关，或选择其他可用的调用配置。已有终端继续使用启动时的配置。
+
 ## 下载与上手
 
 从 [GitHub Releases](https://github.com/Cass-ette/claude-cchp-manager/releases) 下载客户端。Windows、macOS 和 Android 的默认安装包都不带 CCHP 服务端、Docker 或本地模型。

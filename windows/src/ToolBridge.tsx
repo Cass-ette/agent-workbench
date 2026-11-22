@@ -47,7 +47,7 @@ export function ToolBridge({ close }: { close: () => void }) {
     if (event.key === "Escape" && !busy) { event.preventDefault(); close(); }
     if (event.key !== "Tab") return;
     const fields = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("button, select, textarea, input")).filter(field => !field.matches(":disabled"));
-    const first = fields[0], last = fields.at(-1);
+    const first = fields[0], last = fields[fields.length - 1];
     if (!first) { event.preventDefault(); event.currentTarget.focus(); }
     else if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) { event.preventDefault(); last?.focus(); }
     else if (!event.shiftKey && (document.activeElement === last || document.activeElement === event.currentTarget)) { event.preventDefault(); first.focus(); }

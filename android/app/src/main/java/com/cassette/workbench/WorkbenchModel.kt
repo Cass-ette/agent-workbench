@@ -75,18 +75,21 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         if (!connected || toolsBusy) { toolsMessage = "请先连接 Termux，或等待当前工具操作完成"; return }
         toolsBusy = true
         toolsMessage = "正在读取所选环境；虚拟机未运行时需要启动"
-        worker.execute {
+        val requestPayload = payload?.let { JSONObject(it.toString()).put("client", client).put("environment", environment) }
+        fun performRequest(allowRecovery: Boolean) { worker.execute {
             try {
                 if (!termux.supportsRuntime()) {
-                    main.post { toolsBusy = false; connectInternal(false) { manageTools(client, environment, payload, completed) } }
+                    check(allowRecovery) { "桥接升级后仍不兼容，请重新连接 Termux" }
+                    main.post { connectInternal(false, onFailed = { reason -> toolsBusy = false; toolsMessage = reason }) { performRequest(false) } }
                     return@execute
                 }
-                val body = payload?.put("client", client)?.put("environment", environment)
+                val body = requestPayload
                 val path = if (body == null) "/tools?client=$client&environment=$environment" else "/tools"
                 val result = termux.request(path, if (body == null) "GET" else "POST", body, 60000)
                 main.post { toolsBusy = false; toolsMessage = if (body == null) "配置已载入；连接和模型能力尚未验证" else "已保存到私有目录；只影响后续会话"; completed(result) }
             } catch (failure: Exception) { main.post { toolsBusy = false; toolsMessage = failure.message ?: "工具操作失败" } }
-        }
+        } }
+        performRequest(true)
     }
 
     fun saveAgentPermissions(codex: String, claude: String) {
@@ -471,8 +474,8 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun connectInternal(install: Boolean, onConnected: (() -> Unit)? = null) {
-        if (busy) return
+    private fun connectInternal(install: Boolean, onFailed: ((String) -> Unit)? = null, onConnected: (() -> Unit)? = null) {
+        if (busy) { onFailed?.invoke("正在执行其他连接操作，请完成后重试工具设置"); return }
         val selectedEnvironment = runtimeEnvironment
         connectionGeneration++
         busy = true; error = ""; notice = "正在连接 Termux 本地桥接…"
@@ -484,7 +487,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                     val data = termux.request("/runtime", if (install) "POST" else "GET",
                         if (install) JSONObject().put("clients", JSONArray(listOf("codex", "claude"))).put("environment", selectedEnvironment) else null, 5000)
                     main.post { applyRuntime(data); bridgeRecovered(); busy = false; notice = "本地桥接已连接"; onConnected?.invoke() }
-                } catch (cause: Exception) { main.post { busy = false; error = safeError(cause) } }
+                } catch (cause: Exception) { main.post { busy = false; error = safeError(cause); onFailed?.invoke(error) } }
                 return@execute
             }
             main.post {
@@ -510,10 +513,11 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                             if (ready) bridgeRecovered() else bridgeUnavailable()
                             if (data != null) applyRuntime(data)
                             if (!ready) error = failure.ifBlank { "准备仍未完成；请检查 Termux 网络与外部命令开关，再点重试。已有文件与任务已保留。" }
-                            if (ready) onConnected?.invoke()
+                            if (ready && data != null) onConnected?.invoke()
+                            else onFailed?.invoke(error.ifBlank { "桥接未就绪，请重新连接后重试工具设置" })
                         }
                     }
-                } catch (cause: Exception) { busy = false; error = safeError(cause) }
+                } catch (cause: Exception) { busy = false; error = safeError(cause); onFailed?.invoke(error) }
             }
         }
     }

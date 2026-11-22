@@ -37,9 +37,13 @@ fun ToolBridgeDialog(model: WorkbenchModel) {
     }
     LaunchedEffect(client, environment) {
         loaded = false
-        model.manageTools(client, environment, null) { accept(it) }
+        val requestedClient = client
+        val requestedEnvironment = environment
+        model.manageTools(client, environment, null) {
+            if (client == requestedClient && environment == requestedEnvironment) accept(it)
+        }
     }
-    AlertDialog(onDismissRequest = { model.showTools = false }, title = { Text("工具与插件") }, text = {
+    AlertDialog(onDismissRequest = { if (!model.toolsBusy) model.showTools = false }, title = { Text("工具与插件") }, text = {
         Column(Modifier.heightIn(max = 540.dp).verticalScroll(rememberScrollState())) {
             Text("只写工作台私有配置，不改外部客户端。工具运行在所选环境中，程序路径和依赖也必须在该环境可用。")
             Row { listOf("codex", "claude").forEach { value -> TextButton(onClick = { client = value }, enabled = !model.toolsBusy) { Text((if (client == value) "● " else "○ ") + value) } } }
@@ -66,5 +70,5 @@ fun ToolBridgeDialog(model: WorkbenchModel) {
             val payload = JSONObject().put("action", "save").put("config", config).put("screen", false).put("disabled", org.json.JSONArray(disabled))
             model.manageTools(client, environment, payload) { accept(it) }
         }) { Text("保存工具设置") }
-    }, dismissButton = { TextButton(onClick = { model.showTools = false }) { Text("关闭") } })
+    }, dismissButton = { TextButton(enabled = !model.toolsBusy, onClick = { model.showTools = false }) { Text("关闭") } })
 }

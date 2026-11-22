@@ -649,9 +649,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, LinuxVM().manage_tools(action, client, payload))
                 import tool_bridge
                 root = Path.home() / ".local/share/agent-workbench/tools/debian" / client
-                if action == "save":
-                    tool_bridge.native_servers(tool_bridge.normalize_servers(json.loads(payload.get("config", "{}"))), client)
-                value = tool_bridge.save_settings(root, payload) if action == "save" else tool_bridge.import_directory(root, payload.get("path", ""), payload.get("kind"))
+                value = tool_bridge.save_settings(root, payload, client) if action == "save" else tool_bridge.import_directory(root, payload.get("path", ""), payload.get("kind"))
                 return self.reply(200, value)
             if uri.path == "/runtime" and self.server.runtime:
                 if self.command == "GET": return self.reply(200, self.server.runtime.status())

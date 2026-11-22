@@ -1,6 +1,7 @@
 use std::{
     io::Write,
     process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 #[test]
@@ -13,6 +14,15 @@ fn bundled_executable_serves_mcp_over_pipes_without_opening_gui() {
         .spawn()
         .unwrap();
     child.stdin.take().unwrap().write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\"}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("MCP executable did not exit within 10 seconds");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
     let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),

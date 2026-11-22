@@ -49,12 +49,31 @@ fn load(root: &Path) -> Result<Settings, String> {
         .map_err(|_| "工具配置损坏，未覆盖".into())
 }
 fn save(root: &Path, settings: &Settings) -> Result<(), String> {
-    fs::create_dir_all(root).map_err(|e| e.to_string())?;
-    fs::write(
-        root.join("tools.json"),
-        serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?,
+    atomic_write(
+        &root.join("tools.json"),
+        &serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?,
     )
-    .map_err(|e| e.to_string())
+}
+fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
+    let parent = path.parent().ok_or("配置路径无效")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let temporary = parent.join(format!(".workbench-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
+        file.write_all(data).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
+        fs::rename(&temporary, path).map_err(|e| e.to_string())
+    })();
+    let _ = fs::remove_file(temporary);
+    result
 }
 fn public(settings: Settings) -> Value {
     let config = serde_json::to_string_pretty(&json!({"mcpServers": settings.servers})).unwrap();
@@ -160,6 +179,14 @@ fn parse_servers(config: &str) -> Result<BTreeMap<String, Value>, String> {
         if server.get("enabled").is_some_and(|v| !v.is_boolean()) {
             return Err("enabled 须为布尔值".into());
         }
+        for key in ["startup_timeout_sec", "tool_timeout_sec"] {
+            if server.get(key).is_some_and(|v| {
+                v.as_f64()
+                    .is_none_or(|n| !n.is_finite() || n <= 0.0 || n > 600.0)
+            }) {
+                return Err("MCP 超时须为大于 0 且不超过 600 的数字".into());
+            }
+        }
     }
     Ok(servers
         .iter()
@@ -187,8 +214,21 @@ pub fn tools_save(
         native_server(server, &client)?;
     }
     value.screen = screen;
+    if screen
+        && value
+            .servers
+            .get("screen")
+            .is_some_and(|s| s.get("enabled") != Some(&json!(false)))
+    {
+        return Err("screen 名称已被自定义 MCP 使用；请重命名或停用内置屏幕读取".into());
+    }
     for item in &mut value.items {
         item.enabled = !disabled.contains(&item.id);
+        if item.enabled && item.kind == "plugin" {
+            for server in plugin_mcp(&root.join("components").join(&item.id))?.values() {
+                native_server(server, &client)?;
+            }
+        }
     }
     save(&root, &value)?;
     Ok(public(value))
@@ -224,16 +264,33 @@ fn collect_files(
     }
     Ok(())
 }
+fn publish_directory(
+    destination: &Path,
+    build: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if destination.exists() {
+        return Ok(());
+    }
+    let parent = destination.parent().ok_or("组件路径无效")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let stage = parent.join(format!(".workbench-stage-{}", uuid::Uuid::new_v4()));
+    let result =
+        build(&stage).and_then(|_| fs::rename(&stage, destination).map_err(|e| e.to_string()));
+    let _ = fs::remove_dir_all(stage);
+    result
+}
 fn copy_component(source: &Path, destination: &Path) -> Result<(), String> {
     let mut files = vec![];
     collect_files(source, source, &mut files, &mut 0)?;
-    fs::create_dir_all(destination).map_err(|e| e.to_string())?;
-    for relative in files {
-        let target = destination.join(&relative);
-        fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
-        fs::copy(source.join(relative), target).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    publish_directory(destination, |stage| {
+        fs::create_dir_all(stage).map_err(|e| e.to_string())?;
+        for relative in files {
+            let target = stage.join(&relative);
+            fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
+            fs::copy(source.join(relative), target).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
 }
 #[tauri::command]
 pub fn tools_import(
@@ -259,8 +316,12 @@ pub fn tools_import(
     files.sort();
     let mut hash = Sha256::new();
     for file in files {
-        hash.update(file.to_string_lossy().as_bytes());
-        hash.update(fs::read(source.join(file)).map_err(|e| e.to_string())?);
+        let name = file.to_string_lossy();
+        let content = fs::read(source.join(&file)).map_err(|e| e.to_string())?;
+        for field in [name.as_bytes(), content.as_slice()] {
+            hash.update((field.len() as u64).to_be_bytes());
+            hash.update(field);
+        }
     }
     let id = format!("{kind}-{}", &format!("{:x}", hash.finalize())[..16]);
     let destination = root.join("components").join(&id);
@@ -295,7 +356,24 @@ pub fn tools_import(
             slug
         };
         let command = if kind == "skill" {
-            format!("workbench-{}-{}:{}", slug, &id[id.len() - 6..], slug)
+            let text = fs::read_to_string(source.join("SKILL.md")).map_err(|e| e.to_string())?;
+            let skill = text
+                .strip_prefix("---")
+                .and_then(|s| s.split_once("---"))
+                .and_then(|(front, _)| {
+                    front.lines().find_map(|line| {
+                        line.strip_prefix("name:")
+                            .map(|v| v.trim().trim_matches(['\'', '"']))
+                            .filter(|v| {
+                                !v.is_empty()
+                                    && v.bytes().all(|c| {
+                                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'
+                                    })
+                            })
+                    })
+                })
+                .unwrap_or(&slug);
+            format!("workbench-{}-{}:{}", slug, &id[id.len() - 6..], skill)
         } else {
             String::new()
         };
@@ -338,25 +416,18 @@ fn native_server(server: &Value, client: &str) -> Result<Value, String> {
                 .ok_or("env 格式错误")?;
             for key in vars.as_array().ok_or("env_vars 格式错误")? {
                 let key = key.as_str().ok_or("变量名错误")?;
-                env.insert(
-                    key.into(),
-                    json!(std::env::var(key).map_err(|_| format!("所需环境变量未设置：{key}"))?),
-                );
+                env.insert(key.into(), json!(environment_reference(key)?));
             }
         }
         let mut headers = item.remove("headers").unwrap_or(json!({}));
         if let Some(variable) = item.remove("bearer_token_env_var") {
             let key = variable.as_str().ok_or("变量名错误")?;
-            headers["Authorization"] = json!(format!(
-                "Bearer {}",
-                std::env::var(key).map_err(|_| format!("认证变量未设置：{key}"))?
-            ));
+            headers["Authorization"] = json!(format!("Bearer {}", environment_reference(key)?));
         }
         if let Some(vars) = item.remove("env_http_headers") {
             for (header, variable) in vars.as_object().ok_or("请求头变量配置错误")? {
                 let key = variable.as_str().ok_or("变量名错误")?;
-                headers[header] =
-                    json!(std::env::var(key).map_err(|_| format!("请求头变量未设置：{key}"))?);
+                headers[header] = json!(environment_reference(key)?);
             }
         }
         if item.contains_key("url") {
@@ -372,6 +443,15 @@ fn native_server(server: &Value, client: &str) -> Result<Value, String> {
         item.remove("tool_timeout_sec");
     }
     Ok(Value::Object(item))
+}
+fn environment_reference(name: &str) -> Result<String, String> {
+    if name.is_empty()
+        || name.as_bytes()[0].is_ascii_digit()
+        || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    {
+        return Err("MCP 环境变量名格式错误".into());
+    }
+    Ok(format!("${{{name}}}"))
 }
 fn toml(value: &Value) -> String {
     match value {
@@ -481,19 +561,19 @@ pub fn apply(root: &Path, home: &Path, client: &str) -> Result<Vec<String>, Stri
                 component
             } else {
                 let wrapper = root.join("skill-plugins").join(&item.id);
-                if !wrapper.exists() {
-                    fs::create_dir_all(wrapper.join(".claude-plugin"))
-                        .map_err(|e| e.to_string())?;
-                    fs::write(wrapper.join(".claude-plugin/plugin.json"),json!({"name":item.command.split(':').next().filter(|s| !s.is_empty()).map(String::from).unwrap_or(format!("workbench-{}",item.id)),"version":"1.0.0"}).to_string()).map_err(|e| e.to_string())?;
+                publish_directory(&wrapper, |stage| {
+                    fs::create_dir_all(stage.join(".claude-plugin")).map_err(|e| e.to_string())?;
+                    fs::write(stage.join(".claude-plugin/plugin.json"),json!({"name":item.command.split(':').next().filter(|s| !s.is_empty()).map(String::from).unwrap_or(format!("workbench-{}",item.id)),"version":"1.0.0"}).to_string()).map_err(|e| e.to_string())?;
                     copy_component(
                         &component,
-                        &wrapper.join("skills").join(if item.slug.is_empty() {
+                        &stage.join("skills").join(if item.slug.is_empty() {
                             &item.id
                         } else {
                             &item.slug
                         }),
                     )?;
-                }
+                    Ok(())
+                })?;
                 wrapper
             };
             args.extend(["--plugin-dir".into(), plugin.display().to_string()]);
@@ -518,7 +598,7 @@ pub fn apply(root: &Path, home: &Path, client: &str) -> Result<Vec<String>, Stri
             }
         }
         text.push_str(END);
-        fs::write(path, text).map_err(|e| e.to_string())?;
+        atomic_write(&path, text.as_bytes())?;
         let skills = home.join("skills");
         if skills.exists() {
             let entries = fs::read_dir(skills).map_err(|e| e.to_string())?.filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().starts_with("workbench-skill-")).map(|e| {
@@ -535,7 +615,7 @@ pub fn apply(root: &Path, home: &Path, client: &str) -> Result<Vec<String>, Stri
         let content = json!({"mcpServers":servers}).to_string();
         let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
         let path = home.join(format!("workbench-mcp-{}.json", &hash[..16]));
-        fs::write(&path, content).map_err(|e| e.to_string())?;
+        atomic_write(&path, content.as_bytes())?;
         args.extend([
             "--strict-mcp-config".into(),
             "--mcp-config".into(),
@@ -620,6 +700,57 @@ try {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invalid_timeout_never_reaches_codex_toml() {
+        for value in [
+            json!(null),
+            json!(true),
+            json!("20"),
+            json!(0),
+            json!(-1),
+            json!(601),
+        ] {
+            assert!(
+                parse_servers(
+                    &json!({"demo":{"command":"node","startup_timeout_sec":value}}).to_string()
+                )
+                .is_err()
+            );
+        }
+        assert!(parse_servers(r#"{"demo":{"command":"node","tool_timeout_sec":30.5}}"#).is_ok());
+    }
+    #[test]
+    fn claude_credentials_remain_environment_references() {
+        let server = native_server(&json!({"url":"https://remote.test","bearer_token_env_var":"WB_LAUNCH_TOKEN","env_http_headers":{"X-Auth":"WB_AUTH"}}), "claude").unwrap();
+        assert_eq!(
+            server["headers"]["Authorization"],
+            "Bearer ${WB_LAUNCH_TOKEN}"
+        );
+        assert_eq!(server["headers"]["X-Auth"], "${WB_AUTH}");
+    }
+    #[test]
+    fn failed_component_install_is_not_published_and_can_retry() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let target = root.join("component");
+        let result = publish_directory(&target, |stage| {
+            fs::create_dir_all(stage).unwrap();
+            fs::write(stage.join("SKILL.md"), "partial").unwrap();
+            Err("simulated disk failure".into())
+        });
+        assert!(result.is_err());
+        assert!(!target.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        publish_directory(&target, |stage| {
+            fs::create_dir_all(stage).unwrap();
+            fs::write(stage.join("SKILL.md"), "complete").map_err(|e| e.to_string())
+        })
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(target.join("SKILL.md")).unwrap(),
+            "complete"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn validates_and_translates_mcp_without_running_it() {
         let s = parse_servers(r#"{"mcpServers":{"test":{"command":"must-not-run","args":["--stdio"],"env":{"TOKEN":"local"}}}}"#).unwrap();

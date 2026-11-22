@@ -1,6 +1,5 @@
 package com.cassette.workbench
 
-import android.Manifest
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -10,7 +9,6 @@ import java.net.ServerSocket
 import java.security.SecureRandom
 import java.security.MessageDigest
 import java.util.UUID
-import android.util.Base64
 
 const val TERMUX_PERMISSION = "com.termux.permission.RUN_COMMAND"
 const val TERMUX_RELEASE = "https://github.com/termux/termux-app/releases/tag/v0.118.3"
@@ -71,19 +69,8 @@ class TermuxConnection(private val context: Context, private val store: ProfileS
         // disks, install status and API profiles remain outside this directory.
         val root = "/data/data/com.termux/files/home/.local/share/agent-workbench/runtime/releases/${BuildConfig.VERSION_CODE}-$revision"
         val operation = UUID.randomUUID().toString()
-        val script = buildString {
-            append("set -eu\numask 077\n")
-            append("export PREFIX=/data/data/com.termux/files/usr\nexport HOME=/data/data/com.termux/files/home\n")
-            append("export PATH=\"\u0024PREFIX/bin:/system/bin\"\nexport TMPDIR=\"\u0024PREFIX/tmp\"\n")
-            append("missing=()\nfor pair in python3:python git:git ssh:openssh; do command -v \"\u0024{pair%%:*}\" >/dev/null || missing+=(\"\u0024{pair#*:}\"); done\n")
-            append("if (( \u0024{#missing[@]} )); then pkg update -y; pkg install -y -o Dpkg::Options::=--force-confold \"\u0024{missing[@]}\"; fi\n")
-            append("mkdir -p '$root'\nchmod 700 '$root'\n")
-            assets.forEach { (name, bytes) ->
-                val data = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                append("printf '%s' '$data' | base64 -d > '$root/$name.$operation.tmp'\nmv '$root/$name.$operation.tmp' '$root/$name'\n")
-            }
-            append("exec python3 '$root/termux_bridge.py' --port $port --token '$token' --version '${BuildConfig.VERSION_NAME}' --build ${BuildConfig.VERSION_CODE}\n")
-        }
+        val script = compileBootstrapScript(root, operation, port, token, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE)
+        val arguments = bootstrapArguments(script, assets)
         store.saveBootstrapOperation(operation)
         val callback = PendingIntent.getBroadcast(context, 0,
             Intent(context, TermuxBootstrapResult::class.java).setAction("com.cassette.workbench.BOOTSTRAP.$operation"),
@@ -91,7 +78,7 @@ class TermuxConnection(private val context: Context, private val store: ProfileS
         val intent = Intent("com.termux.RUN_COMMAND").apply {
             setClassName("com.termux", "com.termux.app.RunCommandService")
             putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/bash")
-            putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("--noprofile", "--norc", "-c", script))
+            putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arguments)
             putExtra("com.termux.RUN_COMMAND_WORKDIR", "/data/data/com.termux/files/home")
             putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
             putExtra("com.termux.RUN_COMMAND_PENDING_INTENT", callback)

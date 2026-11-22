@@ -827,6 +827,7 @@ final class ManagerModel: ObservableObject {
             }
             modelCatalog.remember(profile: profileID, gateway: gateway, selected: selectedModel, models: models)
             isUsingCachedModels = false
+            isLoadingModels = false
             statusMessage = "\(models.count) 个可用模型"
             isStatusError = false
             await refreshPricing()

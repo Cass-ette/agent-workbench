@@ -7,12 +7,14 @@ import SwiftUI
 @MainActor
 final class FileDropTerminalView: LocalProcessTerminalView {
     private(set) var isSelectedForInput = false
+    var attachmentDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config/cchp-client/claude-test/attachments", isDirectory: true)
 
     func setSelected(_ selected: Bool) {
         isSelectedForInput = selected
         if selected {
             isHidden = false
-            registerForDraggedTypes([.fileURL])
+            registerForDraggedTypes([.fileURL, .png, .tiff])
         } else {
             unregisterDraggedTypes()
             if let window, window.firstResponder === self { window.makeFirstResponder(nil) }
@@ -23,7 +25,8 @@ final class FileDropTerminalView: LocalProcessTerminalView {
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard isSelectedForInput, !isHiddenOrHasHiddenAncestor,
               sender.draggingSourceOperationMask.contains(.copy),
-              !fileURLs(from: sender.draggingPasteboard).isEmpty else { return [] }
+              (!fileURLs(from: sender.draggingPasteboard).isEmpty ||
+               NSImage.canInit(with: sender.draggingPasteboard)) else { return [] }
         return .copy
     }
 
@@ -37,11 +40,38 @@ final class FileDropTerminalView: LocalProcessTerminalView {
 
     func performFileDrop(from pasteboard: NSPasteboard) -> Bool {
         guard isSelectedForInput, !isHiddenOrHasHiddenAncestor else { return false }
-        let urls = fileURLs(from: pasteboard)
-        guard !urls.isEmpty, isSelectedForInput, !isHiddenOrHasHiddenAncestor else { return false }
+        var urls = fileURLs(from: pasteboard)
+        if urls.isEmpty {
+            do {
+                if let image = try ClipboardAttachment.saveImage(from: pasteboard, in: attachmentDirectory) {
+                    urls = [image]
+                }
+            } catch {
+                if let window {
+                    let alert = NSAlert(error: error)
+                    alert.beginSheetModal(for: window)
+                } else { NSSound.beep() }
+                return true // Consume a failed image paste; never fall through to hidden text.
+            }
+        }
+        guard !urls.isEmpty else { return false }
         window?.makeFirstResponder(self)
         pasteText(urls.map { Self.shellQuote($0.path) }.joined(separator: " ") + " ")
         return true
+    }
+
+    override func paste(_ sender: Any) {
+        guard isSelectedForInput, !isHiddenOrHasHiddenAncestor else { return }
+        if !performFileDrop(from: .general) { super.paste(sender) }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard isSelectedForInput, !isHiddenOrHasHiddenAncestor else { return }
+        // CLI users also expect Ctrl+V to attach a screenshot on macOS.
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control,
+           event.charactersIgnoringModifiers?.lowercased() == "v",
+           performFileDrop(from: .general) { return }
+        super.keyDown(with: event)
     }
 
     private func fileURLs(from pasteboard: NSPasteboard) -> [URL] {

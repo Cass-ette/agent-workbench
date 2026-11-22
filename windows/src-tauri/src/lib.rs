@@ -1,4 +1,5 @@
 mod history;
+mod attachments;
 mod pricing;
 #[cfg(windows)]
 mod terminal_job;
@@ -1085,6 +1086,7 @@ pub fn run() {
             list_history,
             list_all_history,
             write_terminal,
+            attachments::stage_clipboard_image,
             resize_terminal,
             stop_terminal,
             tools::tools_get,

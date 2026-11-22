@@ -23,7 +23,7 @@ private struct GatewayState: Decodable {
     let workspaces: [String]
 }
 
-private struct ModelResponse: Decodable {
+struct ModelResponse: Decodable, Sendable {
     let models: [String]
     let gateway: String?
 }
@@ -404,7 +404,15 @@ final class ManagerModel: ObservableObject {
     @Published var profiles: [KeyProfile] = []
     @Published var selectedProfileID = ""
     @Published var models: [String] = []
-    @Published var selectedModel = ""
+    @Published var selectedModel = "" {
+        didSet {
+            if !selectedModel.isEmpty {
+                modelCatalog.remember(profile: selectedProfileID, gateway: gateway, selected: selectedModel)
+            }
+        }
+    }
+    @Published private(set) var modelLoadError = ""
+    @Published private(set) var isUsingCachedModels = false
     @Published var modelSearch = ""
     @Published var modelFilter: ModelFilter = .all
     @Published var workspace = ""
@@ -456,6 +464,9 @@ final class ManagerModel: ObservableObject {
     let terminalStyle = SharedTerminalStyle()
 
     private var backend: BackendClient?
+    private let modelCatalog: ModelCatalogCache
+    private let modelLoader: (@Sendable (String) async throws -> ModelResponse)?
+    private var modelRequestID: UUID?
     private var pendingSessionMode: SessionMode = .new
     private var gatewayUsageRequest: UUID?
     private var lastGatewayUsage: Date?
@@ -463,7 +474,10 @@ final class ManagerModel: ObservableObject {
     private var pricingRequest: UUID?
     private var billingSettingsProfileID = ""
 
-    init() {
+    init(modelDefaults: UserDefaults = .standard,
+         modelLoader: (@Sendable (String) async throws -> ModelResponse)? = nil) {
+        modelCatalog = ModelCatalogCache(defaults: modelDefaults)
+        self.modelLoader = modelLoader
         activeClient = ClientKind(rawValue: UserDefaults.standard.string(forKey: "client.kind") ?? "") ?? .claude
         launchScope = LaunchScope(rawValue: UserDefaults.standard.string(forKey: "launch.scope") ?? "") ?? .workbench
     }
@@ -556,10 +570,17 @@ final class ManagerModel: ObservableObject {
             let data = try await backend.run(action, stdin: payload)
             let saved = try JSONDecoder().decode(GatewayUpdateResponse.self, from: data)
             let value = saved.gateway
+            let gatewayChanged = gateway != value
             gateway = value
             if profileID == nil || profileID == "free" { defaultGateway = value }
             if let profileID, let index = profiles.firstIndex(where: { $0.id == profileID }) {
                 profiles[index] = KeyProfile(id: profiles[index].id, name: profiles[index].name, gateway: value)
+            }
+            if gatewayChanged {
+                let cached = modelCatalog.entry(profile: selectedProfileID, gateway: value)
+                models = cached.models
+                selectedModel = cached.selected
+                modelLoadError = ""
             }
             isGatewaySettingsPresented = false
             statusMessage = "网关地址已保存；正在刷新当前 Key 的模型列表。"
@@ -587,6 +608,7 @@ final class ManagerModel: ObservableObject {
             if let last, profiles.contains(where: { $0.id == last.profile_id }) {
                 activeClient = ClientKind(rawValue: last.client ?? "claude") ?? .claude
                 selectedProfileID = last.profile_id
+                gateway = selectedProfile?.gateway ?? defaultGateway
                 workspace = last.workspace
                 selectedModel = last.model
             } else {
@@ -757,10 +779,17 @@ final class ManagerModel: ObservableObject {
     }
 
     func selectProfile(_ profile: KeyProfile) async {
-        guard selectedProfileID != profile.id else { return }
+        guard selectedProfileID != profile.id else {
+            if models.isEmpty || !modelLoadError.isEmpty { await loadModels(for: profile.id) }
+            return
+        }
         selectedProfileID = profile.id
         gateway = profile.gateway ?? defaultGateway
-        selectedModel = ""
+        let cached = modelCatalog.entry(profile: profile.id, gateway: gateway)
+        models = cached.models
+        selectedModel = cached.selected
+        modelLoadError = ""
+        isUsingCachedModels = !models.isEmpty
         resetGatewayUsage()
         async let gatewayRefresh: () = refreshGatewayUsage()
         await loadModels(for: profile.id)
@@ -768,29 +797,45 @@ final class ManagerModel: ObservableObject {
     }
 
     func loadModels(for profileID: String) async {
-        guard let backend else { return }
+        guard profileID == selectedProfileID, backend != nil || modelLoader != nil else { return }
         let requestGateway = gateway
+        let requestID = UUID()
+        modelRequestID = requestID
+        let cached = modelCatalog.entry(profile: profileID, gateway: requestGateway)
+        if models.isEmpty { models = cached.models }
+        if selectedModel.isEmpty { selectedModel = cached.selected }
+        isUsingCachedModels = !models.isEmpty
+        modelLoadError = ""
         isLoadingModels = true
         defer {
-            if selectedProfileID == profileID, gateway == requestGateway { isLoadingModels = false }
+            if modelRequestID == requestID { isLoadingModels = false }
         }
         do {
-            let data = try await backend.run(["profile-models", "--profile-id", profileID])
-            let response = try JSONDecoder().decode(ModelResponse.self, from: data)
-            guard selectedProfileID == profileID, gateway == requestGateway else { return }
-            models = response.models.sorted()
+            let response: ModelResponse
+            if let modelLoader { response = try await modelLoader(profileID) }
+            else {
+                let data = try await backend!.run(["profile-models", "--profile-id", profileID])
+                response = try JSONDecoder().decode(ModelResponse.self, from: data)
+            }
+            guard modelRequestID == requestID, selectedProfileID == profileID, gateway == requestGateway else { return }
+            let fetched = Array(Set(response.models.filter { !$0.isEmpty })).sorted()
+            guard !fetched.isEmpty else { throw BackendError(message: "网关未返回可用模型。") }
+            models = fetched
             if let responseGateway = response.gateway { gateway = responseGateway }
             if !models.contains(selectedModel) {
                 selectedModel = models.first ?? ""
             }
+            modelCatalog.remember(profile: profileID, gateway: gateway, selected: selectedModel, models: models)
+            isUsingCachedModels = false
+            isLoadingModels = false
             statusMessage = "\(models.count) 个可用模型"
             isStatusError = false
             await refreshPricing()
         } catch {
-            guard selectedProfileID == profileID, gateway == requestGateway else { return }
-            models = []
-            selectedModel = ""
-            setError(error.localizedDescription)
+            guard modelRequestID == requestID, selectedProfileID == profileID, gateway == requestGateway else { return }
+            modelLoadError = error.localizedDescription
+            isUsingCachedModels = !models.isEmpty || !selectedModel.isEmpty
+            setError("模型列表读取失败：\(modelLoadError)" + (isUsingCachedModels ? " 已保留上次模型选择。" : " 请重试或切换调用配置。"))
         }
     }
 
@@ -810,6 +855,7 @@ final class ManagerModel: ObservableObject {
             selectedProfileID = added.id
             gateway = added.gateway
             selectedModel = ""
+            models = []
             resetGatewayUsage()
             await loadModels(for: added.id)
             await refreshGatewayUsage()

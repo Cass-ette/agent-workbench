@@ -372,20 +372,36 @@ struct ManagerView: View {
             .help("工作台配置使用这里选的 Key 和模型。系统 CLI 沿用你在终端直接运行该命令时的配置。")
 
             if model.launchScope == .workbench {
-                Button {
-                    model.modelSearch = ""
-                    model.isModelPickerPresented = true
-                } label: {
-                    Label {
-                        Text(model.selectedModel.isEmpty ? (model.isLoadingModels ? "正在读取模型" : "选择模型") : model.selectedModel)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    } icon: {
-                        Image(systemName: "cpu")
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 4) {
+                        Button {
+                            model.modelSearch = ""
+                            model.isModelPickerPresented = true
+                        } label: {
+                            Label {
+                                Text(model.selectedModel.isEmpty ? (model.isLoadingModels ? "正在读取模型" : "选择模型") : model.selectedModel)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            } icon: {
+                                Image(systemName: "cpu")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(model.selectedProfile == nil)
+                        Button {
+                            Task { await model.loadModels(for: model.selectedProfileID) }
+                        } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.borderless)
+                        .disabled(model.selectedProfile == nil || model.isLoadingModels)
+                        .help("刷新模型列表")
+                        .accessibilityLabel("刷新模型列表")
+                    }
+                    if !model.modelLoadError.isEmpty {
+                        Text(model.isUsingCachedModels ? "刷新失败，保留上次选择" : "模型读取失败，请刷新或切换配置")
+                            .font(.system(size: 9)).foregroundStyle(.orange).lineLimit(1)
+                            .help(model.modelLoadError)
                     }
                 }
-                .buttonStyle(.bordered)
-                .disabled(model.models.isEmpty)
                 .frame(minWidth: 150, idealWidth: 205, maxWidth: 235)
                 .help("\(model.models.count) 个可用模型")
             } else {
@@ -725,10 +741,23 @@ private struct ModelPickerSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button {
+                    Task { await model.loadModels(for: model.selectedProfileID) }
+                } label: {
+                    Label(model.isLoadingModels ? "正在刷新" : "刷新模型列表", systemImage: "arrow.clockwise")
+                }
+                .disabled(model.isLoadingModels || model.selectedProfile == nil)
                 Button("完成") { dismiss() }
                     .keyboardShortcut(.defaultAction)
             }
             .padding(18)
+
+            if !model.modelLoadError.isEmpty {
+                Text(model.modelLoadError + (model.isUsingCachedModels ? "\n已保留上次模型选择，仍可尝试启动；实际连接情况由终端报告。" : "\n请刷新重试，或关闭后选择其他调用配置。"))
+                    .font(.system(size: 11)).foregroundStyle(.orange)
+                    .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 18).padding(.bottom, 8)
+            }
 
             TextField("搜索模型名称", text: $model.modelSearch)
                 .textFieldStyle(.roundedBorder)

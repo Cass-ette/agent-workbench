@@ -31,6 +31,8 @@ import { UsageStatus } from "./UsagePanel";
 import { WorkbenchUpdate } from "./WorkbenchUpdate";
 import { SSHConnection } from "./SSHConnection";
 import { AgentPermissionDialog, permissionLabel, permissionStorageKey, readAgentPermissions } from "./AgentPermissions";
+import { ToolBridge } from "./ToolBridge";
+import { installImagePaste } from "./TerminalClipboard";
 import type { AgentPermissions } from "./AgentPermissions";
 import type { UsageSnapshot } from "./UsagePanel";
 
@@ -112,6 +114,7 @@ const emptyConfig: AppConfig = {
 };
 
 function App() {
+  const [showTools, setShowTools] = useState(false);
   const [agentPermissions, setAgentPermissions] = useState(readAgentPermissions);
   const [showPermissions, setShowPermissions] = useState(() => readAgentPermissions() === null);
   const [config, setConfig] = useState<AppConfig>(emptyConfig);
@@ -350,6 +353,9 @@ function App() {
   const unregisterTerminal = useCallback((id: string, terminal: Terminal) => {
     if (terminalRefs.current.get(id) === terminal) terminalRefs.current.delete(id);
   }, []);
+
+  const canReceiveInput = useCallback((id: string) =>
+    currentSessionId.current === id && !closing.current.has(id), []);
 
   async function selectProfile(profile: KeyProfile) {
     if (profile.id === config.selected_profile_id) return;
@@ -641,6 +647,7 @@ function App() {
 
           <div className="sidebar-bottom">
             <button className="sidebar-link" onClick={() => setShowPermissions(true)}>权限设置</button>
+            <button className="sidebar-link" onClick={() => setShowTools(true)}>工具与插件</button>
             <button className="sidebar-link" onClick={() => void openHistory("global")}>恢复最近对话</button>
             <button className="sidebar-link" onClick={() => setShowSSHConnection(true)}>手机连接</button>
             <div className="security-note"><span className="security-dot" />密钥保存在 Windows 凭据管理器</div>
@@ -808,6 +815,7 @@ function App() {
                   active={session.id === selectedSessionId}
                   register={registerTerminal}
                   unregister={unregisterTerminal}
+                  canReceiveInput={canReceiveInput}
                 />
               ))}
             </div>
@@ -823,6 +831,7 @@ function App() {
         </main>
       </div>
 
+      {showTools && <ToolBridge close={() => setShowTools(false)} />}
       {loaded && showPermissions && <AgentPermissionDialog settings={agentPermissions} close={() => setShowPermissions(false)} save={(settings: AgentPermissions) => {
         try {
           window.localStorage.setItem(permissionStorageKey, JSON.stringify(settings));
@@ -939,13 +948,24 @@ function TerminalPane({
   active,
   register,
   unregister,
+  canReceiveInput,
 }: {
   session: Session;
   active: boolean;
   register: (id: string, terminal: Terminal) => void;
   unregister: (id: string, terminal: Terminal) => void;
+  canReceiveInput: (id: string) => boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
+  const selected = useRef(active);
+  selected.current = active;
+  const running = useRef(session.exitCode === null);
+  running.current = session.exitCode === null;
+  const [pasteError, setPasteError] = useState("");
+
+  useEffect(() => {
+    if (!active) host.current?.dispatchEvent(new Event("workbench-input-revoked"));
+  }, [active]);
 
   useEffect(() => {
     if (!host.current) return;
@@ -983,6 +1003,12 @@ function TerminalPane({
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(host.current);
+    const removePaste = installImagePaste(host.current, {
+      isCurrent: () => selected.current && running.current && canReceiveInput(session.id),
+      stage: (data) => invoke<string>("stage_clipboard_image", { data }),
+      paste: (text) => { setPasteError(""); terminal.paste(text); },
+      onError: setPasteError,
+    });
     register(session.id, terminal);
     const resize = () => {
       if (!host.current || host.current.clientWidth === 0 || host.current.clientHeight === 0) return;
@@ -1003,14 +1029,18 @@ function TerminalPane({
     if (session.permissions) terminal.writeln("权限：" + session.permissions);
     resize();
     return () => {
+      removePaste();
       observer.disconnect();
       input.dispose();
       unregister(session.id, terminal);
       terminal.dispose();
     };
-  }, [register, session.id, session.title, session.workspace, unregister]);
+  }, [register, session.id, session.title, session.workspace, unregister, canReceiveInput]);
 
-  return <div className={`terminal-pane ${active ? "visible" : "hidden"}`} ref={host} aria-hidden={!active} />;
+  return <div className={`terminal-pane ${active ? "visible" : "hidden"}`} aria-hidden={!active}>
+    {pasteError && <div className="terminal-paste-error" role="alert">粘贴图片失败：{pasteError}</div>}
+    <div ref={host} style={{ width: "100%", height: "100%" }} />
+  </div>;
 }
 
 function shellQuotePowerShell(path: string): string {

@@ -95,6 +95,22 @@ def private_write(path, content):
             os.unlink(temporary)
 
 
+def tools_module():
+    directory = str(Path(__file__).resolve().parent)
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    import tool_bridge
+    return tool_bridge
+
+
+def tool_args(home, client):
+    root = TEST_ROOT / "tools" / client
+    if not (root / "tools.json").exists():
+        return None
+    return tools_module().apply_tools(root, home, client,
+        [sys.executable, str(Path(__file__).with_name("screen_mcp.py"))])
+
+
 def prepare_isolated_config():
     for directory in (TEST_ROOT, CONFIG_DIR):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -648,6 +664,7 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
                                NO_PROXY=bypass, no_proxy=bypass)
             command = build_codex_command(model, workspace, "resume", session_id, fork_history=not same_config,
                                           permission_mode=permission_mode)
+            command += tool_args(home, "codex") or []
         else:
             if not (home / "settings.json").exists():
                 private_write(home / "settings.json", "{}\n")
@@ -703,6 +720,7 @@ def launch_codex_profile(profile_id, model, workspace_value, session_mode, gatew
         "no_proxy": bypass,
     })
     command = build_codex_command(model, workspace, session_mode, permission_mode=permission_mode)
+    command += tool_args(codex_home, "codex") or []
     os.chdir(workspace)
     os.execve(CODEX, command, environment)
 
@@ -970,8 +988,9 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new", ga
     settings = config_dir / "settings.json" if isolated_branch else SETTINGS
     mcp = '{"mcpServers":{}}' if isolated_branch else str(EMPTY_MCP)
     command = [str(CLAUDE), "--bare", "--setting-sources", "user", "--settings", str(settings),
-               "--strict-mcp-config", "--mcp-config", mcp, "--model", model,
+               "--model", model,
                "--append-system-prompt", "全程使用简体中文。"]
+    command += (tool_args(config_dir or CONFIG_DIR, "claude") if not smoke else None) or ["--strict-mcp-config", "--mcp-config", mcp]
     if smoke:
         environment["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "256"
         command += ["--print", "--no-session-persistence", "--tools", "", "--",
@@ -1094,6 +1113,7 @@ def main():
         "gui-state", "history-list", "history-list-global", "history-launch", "history-import-launch", "history-resume-original",
         "profile-models", "add-profile-stdin", "remove-profile", "set-gateway-stdin",
         "set-profile-gateway-stdin", "launch", "codex-launch",
+        "tools-get", "tools-save", "tools-import",
     ])
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--profile-id")
@@ -1107,6 +1127,22 @@ def main():
     parser.add_argument("--fork-history", action="store_true")
     parser.add_argument("--permission-mode", choices=["restricted", "standard", "full"], default="restricted")
     arguments = parser.parse_args()
+    if arguments.action.startswith("tools-"):
+        if arguments.client not in ("codex", "claude"):
+            raise RuntimeError("请选择客户端")
+        module = tools_module()
+        root = TEST_ROOT / "tools" / arguments.client
+        if arguments.action == "tools-get": result = module.public_settings(root)
+        else:
+            payload = json.load(sys.stdin)
+            if arguments.action == "tools-save":
+                module.native_servers(module.normalize_servers(json.loads(payload.get("config", "{}"))), arguments.client)
+                result = module.save_settings(root, payload)
+            else:
+                if payload.get("kind") == "plugin" and arguments.client != "claude":
+                    raise RuntimeError("完整 Claude 插件仅能导入 Claude；Codex 可分别接入其 MCP 和 Skills")
+                result = module.import_directory(root, payload["path"], payload["kind"])
+        print(json.dumps(result, ensure_ascii=False)); return 0
     if arguments.action == "menu": return menu()
     if arguments.action == "setup": setup_key(); return 0
     if arguments.action == "status": status(); return 0

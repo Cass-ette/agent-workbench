@@ -357,6 +357,15 @@ private struct BackendClient: Sendable {
 
 @MainActor
 final class ManagerModel: ObservableObject {
+    @Published var isToolsPresented = false
+
+    func manageTools(_ action: String, client: ClientKind, payload: [String: Any]? = nil) async throws -> ToolBridgeState {
+        guard let backend else { throw BackendError(message: "后端尚未就绪") }
+        let input = try payload.map { try JSONSerialization.data(withJSONObject: $0) }
+        let result = try await backend.run([action, "--client", client.rawValue], stdin: input)
+        return try JSONDecoder().decode(ToolBridgeState.self, from: result)
+    }
+
     @Published private(set) var agentPermissions = AgentPermissions.load()
     @Published var isAgentPermissionsPresented = AgentPermissions.load() == nil
 

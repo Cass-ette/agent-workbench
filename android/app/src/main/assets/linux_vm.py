@@ -154,6 +154,12 @@ else:
     elif mode == "resume":
         args += ["--resume"]
 
+tools_root = home / ".local/share/agent-workbench/tools" / client
+if (tools_root / "tools.json").exists():
+    import sys
+    sys.path.insert(0, "/usr/local/lib")
+    import wb_tool_bridge
+    args += wb_tool_bridge.apply_tools(tools_root, config, client)
 os.execvpe(args[0], args, env)
 '''
 
@@ -550,6 +556,9 @@ class LinuxVM:
                 "permission_mode": payload.get("permission_mode", "standard")}
         self.start()
         self.wait_ready()
+        # Update only the guest launcher and bridge for new sessions; do not
+        # reinstall agents or interrupt terminals already running in the VM.
+        self.sync_tool_bridge()
         shared_workspace = self.ssh("test -d " + shlex.quote(str(guest_workspace)) +
                                     " && test -w " + shlex.quote(str(guest_workspace)),
                                     stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
@@ -571,6 +580,35 @@ class LinuxVM:
         finally:
             self.ssh("rm -f -- " + shlex.quote(remote), stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+
+    def sync_tool_bridge(self):
+        import tool_bridge
+        module = Path(tool_bridge.__file__).read_bytes()
+        script = "umask 077; mkdir -p /usr/local/lib /usr/local/bin\n"
+        for path, content in (("/usr/local/lib/wb_tool_bridge.py", module),
+                              ("/usr/local/bin/wb-agent-runner.py", AGENT_RUNNER.encode())):
+            script += "printf '%s' " + shlex.quote(base64.b64encode(content).decode()) + " | base64 -d > " + path + "\n"
+        self.ssh(script, stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=True)
+
+    def manage_tools(self, action, client, payload):
+        if client not in AGENT_PACKAGES or action not in ("get", "save", "import"):
+            raise ValueError("工具操作参数无效")
+        if not self.status()["installed"]:
+            raise ValueError("请先安装完整 Linux 虚拟机")
+        self.start()
+        self.wait_ready()
+        self.sync_tool_bridge()
+        code = "import sys,json; from pathlib import Path; sys.path.insert(0,'/usr/local/lib'); import wb_tool_bridge as t; "
+        code += "p=json.load(sys.stdin); r=Path.home()/'.local/share/agent-workbench/tools'/" + repr(client) + "; "
+        if action == "save":
+            code += "t.native_servers(t.normalize_servers(json.loads(p.get('config','{}')))," + repr(client) + "); "
+        expression = {"get": "t.public_settings(r)", "save": "t.save_settings(r,p)",
+                      "import": "t.import_directory(r,p['path'],p['kind'])"}[action]
+        code += "print(json.dumps(" + expression + ",ensure_ascii=False))"
+        result = self.ssh("python3 -c " + shlex.quote(code), input=json.dumps(payload).encode(), capture_output=True, timeout=60)
+        if result.returncode:
+            raise ValueError("虚拟机工具配置失败，请核对路径、JSON 和运行环境")
+        return json.loads(result.stdout)
 
     @staticmethod
     def _provision(public):

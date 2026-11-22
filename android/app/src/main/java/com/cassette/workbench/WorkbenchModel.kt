@@ -67,6 +67,27 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     var sshTargets by mutableStateOf(store.sshTargets()); private set
     var options by mutableStateOf(store.options()); private set
     var showAgentPermissions by mutableStateOf(!options.permissionsReviewed)
+    var showTools by mutableStateOf(false)
+    var toolsBusy by mutableStateOf(false); private set
+    var toolsMessage by mutableStateOf(""); private set
+
+    fun manageTools(client: String, environment: String, payload: JSONObject?, completed: (JSONObject) -> Unit) {
+        if (!connected || toolsBusy) { toolsMessage = "请先连接 Termux，或等待当前工具操作完成"; return }
+        toolsBusy = true
+        toolsMessage = "正在读取所选环境；虚拟机未运行时需要启动"
+        worker.execute {
+            try {
+                if (!termux.supportsRuntime()) {
+                    main.post { toolsBusy = false; connectInternal(false) { manageTools(client, environment, payload, completed) } }
+                    return@execute
+                }
+                val body = payload?.put("client", client)?.put("environment", environment)
+                val path = if (body == null) "/tools?client=$client&environment=$environment" else "/tools"
+                val result = termux.request(path, if (body == null) "GET" else "POST", body, 60000)
+                main.post { toolsBusy = false; toolsMessage = if (body == null) "配置已载入；连接和模型能力尚未验证" else "已保存到私有目录；只影响后续会话"; completed(result) }
+            } catch (failure: Exception) { main.post { toolsBusy = false; toolsMessage = failure.message ?: "工具操作失败" } }
+        }
+    }
 
     fun saveAgentPermissions(codex: String, claude: String) {
         require(codex in listOf("restricted", "standard", "full") && claude in listOf("standard", "full"))

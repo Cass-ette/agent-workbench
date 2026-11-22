@@ -130,6 +130,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             } }, actions = {
                 TextButton(onClick = { model.showAgentPermissions = true }) { Text("权限") }
+                TextButton(onClick = { model.showTools = true }) { Text("工具") }
                 TextButton(onClick = updates::open) { Text(updates.nextVersion?.let { "新版 $it" } ?: "检查更新") }
             }) },
             bottomBar = { if (!fullscreen && !terminalInput) NavigationBar {
@@ -152,6 +153,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
         }
         WorkbenchUpdateDialog(updates, model.sessions.count { it.exitCode == null }, model.busy || model.runtimeInstalling || model.vmBusy)
         if (model.showAgentPermissions) AgentPermissionsDialog(model)
+        if (model.showTools) ToolBridgeDialog(model)
     }
 }
 

@@ -471,12 +471,18 @@ def launch_spec(payload, home=None, bundle=None):
                 args += [source["id"]]
                 if not same_config:
                     args += ["--fork-session"]
+    import tool_bridge
+    tool_root = home / ".local/share/agent-workbench/tools/debian" / client
+    if not in_debian:
+        if (tool_root / "tools.json").exists():
+            args += tool_bridge.apply_tools(tool_root, config, client)
     if in_debian:
         # A unique one-use file survives proot's environment clearing. The guest
         # reads and removes it before launching, so no key enters argv/profile.d.
         launch_file = config / ("launch-" + uuid.uuid4().hex + ".json")
         private_write(launch_file, json.dumps({"args": args, "workspace": str(workspace),
             "history_seed": str(seed) if seed else None,
+            "tools_root": str(tool_root), "client": client,
             "environment": {k: v for k, v in env.items() if k in SENSITIVE_ENV or k in NETWORK_ENV}}, ensure_ascii=False))
         env = {k: v for k, v in env.items() if k not in SENSITIVE_ENV}
         args = [proot, "login", "debian", "--user", "workbench", "--bind", str(home) + ":" + str(home),
@@ -602,9 +608,20 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.command == "GET" and uri.path == "/health":
                 return self.reply(200, {"service": "agent-workbench-termux", "version": self.server.version,
-                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions"]})
+                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions", "tool-bridge"]})
             if self.command == "GET" and uri.path == "/usage":
                 return self.reply(200, usage_snapshot())
+            if self.command == "GET" and uri.path == "/tools":
+                query = parse_qs(uri.query)
+                client = query.get("client", [""])[0]
+                environment = query.get("environment", ["debian"])[0]
+                if client not in ("codex", "claude") or environment not in ("debian", "vm"):
+                    raise ValueError("请选择本地运行环境与客户端")
+                if environment == "vm":
+                    from linux_vm import LinuxVM
+                    return self.reply(200, LinuxVM().manage_tools("get", client, {}))
+                import tool_bridge
+                return self.reply(200, tool_bridge.public_settings(Path.home() / ".local/share/agent-workbench/tools/debian" / client))
             if self.command == "GET" and uri.path == "/history":
                 history, codex_homes, claude_homes = history_context(Path.home())
                 query = parse_qs(uri.query)
@@ -620,6 +637,22 @@ class Handler(BaseHTTPRequestHandler):
                 if not 0 <= length <= MAX_REQUEST: return self.reply(413, {"error": "请求过大"})
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 if not isinstance(payload, dict): raise ValueError("请求格式错误")
+            if self.command == "POST" and uri.path == "/tools":
+                client, environment = payload.get("client"), payload.get("environment", "debian")
+                action = payload.get("action")
+                if client not in ("codex", "claude") or environment not in ("debian", "vm") or action not in ("save", "import"):
+                    raise ValueError("工具操作参数无效")
+                if action == "import" and payload.get("kind") == "plugin" and client != "claude":
+                    raise ValueError("完整插件只支持 Claude，Codex 可接入 MCP 与 Skills")
+                if environment == "vm":
+                    from linux_vm import LinuxVM
+                    return self.reply(200, LinuxVM().manage_tools(action, client, payload))
+                import tool_bridge
+                root = Path.home() / ".local/share/agent-workbench/tools/debian" / client
+                if action == "save":
+                    tool_bridge.native_servers(tool_bridge.normalize_servers(json.loads(payload.get("config", "{}"))), client)
+                value = tool_bridge.save_settings(root, payload) if action == "save" else tool_bridge.import_directory(root, payload.get("path", ""), payload.get("kind"))
+                return self.reply(200, value)
             if uri.path == "/runtime" and self.server.runtime:
                 if self.command == "GET": return self.reply(200, self.server.runtime.status())
                 if self.command == "POST": return self.reply(202, self.server.runtime.start(payload.get("clients"), payload.get("environment", "debian")))

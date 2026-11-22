@@ -214,10 +214,12 @@ class VMTests(unittest.TestCase):
             response = SimpleNamespace(returncode=0)
             agent_exit = SimpleNamespace(returncode=7)
             with patch.object(vm, "start"), patch.object(vm, "wait_ready"), \
+                 patch.object(vm, "sync_tool_bridge") as sync_tools, \
                  patch.object(vm, "ssh", side_effect=[response, response, response, agent_exit, response]) as ssh:
                 result = vm.run_agent({"client": "codex", "workspace": str(workspace), "model": "m",
                                        "key": "private-test-key", "gateway": "https://gateway.test"})
             self.assertEqual(result, 7)
+            sync_tools.assert_called_once()
             calls = ssh.call_args_list
             self.assertIn("test -d /projects/sample", calls[0].args[0])
             self.assertIn("command -v codex", calls[1].args[0])

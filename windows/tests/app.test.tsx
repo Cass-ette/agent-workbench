@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import App from "../src/App";
 import { permissionStorageKey } from "../src/AgentPermissions";
 
-const { invoke, onDragDropEvent } = vi.hoisted(() => ({ invoke: vi.fn(), onDragDropEvent: vi.fn() }));
+const { invoke, onDragDropEvent, terminalPaste } = vi.hoisted(() => ({ invoke: vi.fn(), onDragDropEvent: vi.fn(), terminalPaste: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
@@ -16,6 +16,7 @@ vi.mock("@xterm/xterm", () => ({
     open() {}
     onData() { return { dispose() {} }; }
     writeln() {}
+    paste(text: string) { terminalPaste(text); }
     dispose() {}
   },
 }));
@@ -27,6 +28,7 @@ beforeEach(() => {
   window.localStorage.clear();
   window.localStorage.setItem(permissionStorageKey, JSON.stringify({ codex: "standard", claude: "standard" }));
   onDragDropEvent.mockReset().mockResolvedValue(() => undefined);
+  terminalPaste.mockReset();
   invoke.mockReset();
   invoke.mockImplementation(async (command: string) => {
     if (command === "load_app_state") {
@@ -126,6 +128,39 @@ describe("工作会话配置", () => {
     fireEvent.click(screen.getByRole("button", { name: "恢复最近对话" }));
     await screen.findByRole("heading", { name: "恢复最近对话" });
     expect(invoke).toHaveBeenCalledWith("list_all_history");
+  });
+
+  it("截图粘贴在当前标签完成，保存期间切换标签则取消插入", async () => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    let nextId = 0;
+    let finish!: (path: string) => void;
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "start_terminal") return { id: String(++nextId), title: "Terminal", workspace: "C:\\test-project" };
+      if (command === "stage_clipboard_image") return new Promise<string>((resolve) => { finish = resolve; });
+      return normalInvoke(command, args);
+    });
+    await openApp();
+    const add = screen.getByRole("button", { name: "新建会话" });
+    fireEvent.click(add);
+    await screen.findByRole("tab", { selected: true });
+    fireEvent.click(add);
+    await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(2));
+    const clipboardData = { items: [{ kind: "file", type: "image/png", getAsFile: () => ({
+      type: "image/png", size: 4, arrayBuffer: async () => new Uint8Array([137, 80, 78, 71]).buffer,
+    }) }] };
+    const activeHost = document.querySelector(".terminal-pane.visible > div:last-child")!;
+    fireEvent.paste(activeHost, { clipboardData });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("stage_clipboard_image", { data: [137, 80, 78, 71] }));
+    const [first, second] = screen.getAllByRole("tab");
+    fireEvent.click(first);
+    fireEvent.click(second);
+    await act(async () => finish("C:\\old.png"));
+    expect(terminalPaste).not.toHaveBeenCalled();
+    fireEvent.paste(activeHost, { clipboardData });
+    await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "stage_clipboard_image")).toHaveLength(2));
+    await act(async () => finish("C:\\new.png"));
+    expect(terminalPaste).toHaveBeenCalledExactlyOnceWith("'C:\\new.png' ");
   });
 
   it("原对话仍在运行时切回已有标签，关闭后再启动同一条历史", async () => {

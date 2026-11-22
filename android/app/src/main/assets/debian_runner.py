@@ -25,6 +25,12 @@ def main():
     env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
     os.chdir(data["workspace"])
     command = shlex.join(data["args"])
+    tool_root = data.get("tools_root")
+    if tool_root and (Path(tool_root) / "tools.json").exists():
+        import tool_bridge
+        client = data["client"]
+        home = env["CODEX_HOME" if client == "codex" else "CLAUDE_CONFIG_DIR"]
+        command = shlex.join(data["args"] + tool_bridge.apply_tools(tool_root, home, client))
     seed = data.get("history_seed")
     cleanup = "; rm -f -- " + shlex.quote(seed) if seed else ""
     script = command + "; result=$?" + cleanup + "; printf '\\r\\n[Agent 已退出：%s；保留 Debian 终端]\\r\\n' \"$result\"; unset " + " ".join(SENSITIVE) + "; exec /bin/bash -l"

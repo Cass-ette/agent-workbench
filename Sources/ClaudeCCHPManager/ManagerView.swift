@@ -70,6 +70,7 @@ struct ManagerView: View {
         .sheet(isPresented: $model.isAgentPermissionsPresented) {
             AgentPermissionsSheet(model: model)
         }
+        .sheet(isPresented: $model.isToolsPresented) { ToolBridgeSheet(model: model) }
         .confirmationDialog("从历史创建分支？", isPresented: $model.isRestoreConfirmationPresented,
                             titleVisibility: .visible) {
             Button("创建分支并启动") { model.launchConfirmed() }
@@ -242,6 +243,10 @@ struct ManagerView: View {
             .buttonStyle(.borderless)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
+
+            Button { model.isToolsPresented = true } label: {
+                Label("工具与插件", systemImage: "puzzlepiece.extension")
+            }.buttonStyle(.borderless).padding(.horizontal, 16).padding(.vertical, 6)
 
             Spacer(minLength: 12)
             Divider().opacity(0.35)

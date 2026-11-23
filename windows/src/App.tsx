@@ -214,6 +214,12 @@ function App() {
     if (!isTauri() || !loaded) return;
     let cancelled = false;
     const unlisteners: Array<() => void> = [];
+    listen<TerminalInfo & {client: ClientKind; model: string; scope: string}>("remote-terminal-created", event => {
+      const info = event.payload;
+      setSessions(current => current.some(s => s.id === info.id) ? current : [...current, {
+        ...info, mode: "new", exitCode: null, profileName: info.scope === "system" ? "系统 CLI" : "电脑工作台配置",
+      }]);
+    }).then(unlisten => { if (cancelled) unlisten(); else unlisteners.push(unlisten); });
     listen<TerminalOutput>("terminal-output", (event) => {
       const { session_id, data } = event.payload;
       const bytes = new Uint8Array(data);
@@ -836,6 +842,7 @@ function App() {
         try {
           window.localStorage.setItem(permissionStorageKey, JSON.stringify(settings));
           setAgentPermissions(settings);
+          void invoke("sync_remote_permissions", { permissions: settings }).catch(cause => setError(String(cause)));
           setShowPermissions(false);
           setNotice("已保存权限设置；之后新建、恢复和分支的工作台会话使用此设置。");
         } catch { setError("无法保存权限设置，请重试。"); }

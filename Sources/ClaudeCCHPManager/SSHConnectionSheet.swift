@@ -12,6 +12,7 @@ private struct SSHConnectionCode: Encodable {
 }
 
 struct SSHConnectionSheet: View {
+    @ObservedObject var model: ManagerModel
     @Environment(\.dismiss) private var dismiss
     @State private var addresses: [String] = []
     @State private var host = ""
@@ -33,6 +34,9 @@ struct SSHConnectionSheet: View {
             TextField("手机可达的地址", text: $host)
             TextField("SSH 端口", text: $port)
             Text("登录账号 \(user)。同一网络可用局域网地址，异地可填 Tailscale 地址。")
+                .font(.caption).foregroundStyle(.secondary)
+            Toggle("允许通过 SSH 接续这台电脑的工作台", isOn: Binding(get: { model.remoteEnabled }, set: { model.setRemoteEnabled($0) }))
+            Text("保持电脑和工作台运行。手机可查看项目和会话、输入并处理终端审批；断开手机连接不结束任务。复制内容可能被跨设备剪贴板同步。")
                 .font(.caption).foregroundStyle(.secondary)
             if !status.isEmpty { Text(status).font(.caption) }
             HStack {

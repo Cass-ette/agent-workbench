@@ -6,6 +6,17 @@ import SwiftUI
 /// The trailing space lets the user keep composing the command without running it.
 @MainActor
 final class FileDropTerminalView: LocalProcessTerminalView {
+    var onLocalInput: (() -> Void)?
+    var remotePTYSize: winsize?
+    var remoteSizeIsActive: (() -> Bool)?
+    override func getWindowSize() -> winsize {
+        if remoteSizeIsActive?() == true, let size = remotePTYSize { return size }
+        return super.getWindowSize()
+    }
+    override func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        onLocalInput?()
+        super.send(source: source, data: data)
+    }
     private(set) var isSelectedForInput = false
     var attachmentDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/cchp-client/claude-test/attachments", isDirectory: true)
@@ -86,6 +97,7 @@ final class FileDropTerminalView: LocalProcessTerminalView {
 
 @MainActor
 final class EmbeddedTerminalControl: ObservableObject {
+    nonisolated let replay = RemoteTerminalBuffer()
     private weak var terminalView: FileDropTerminalView?
     private var isSelected = false
     private var appliedStyle: TerminalStyleSettings?
@@ -95,6 +107,16 @@ final class EmbeddedTerminalControl: ObservableObject {
         terminalView = view
         appliedStyle = nil
         view.setSelected(isSelected)
+        let buffer = replay
+        view.setProcessByteHandler { buffer.append($0) }
+        view.remoteSizeIsActive = { buffer.hasRemoteControl }
+        view.onLocalInput = { [weak view] in
+            buffer.release()
+            if let view {
+                var size = view.getWindowSize()
+                _ = view.process.updateWindowSize(&size)
+            }
+        }
     }
 
     func detach(_ view: FileDropTerminalView) {
@@ -110,6 +132,21 @@ final class EmbeddedTerminalControl: ObservableObject {
 
     func stop() {
         terminalView?.terminate()
+    }
+
+    func remoteInput(_ bytes: Data, client: String, inputID: String) throws {
+        guard let terminalView else { throw RemoteWorkbenchError.invalid("终端正在准备，请稍后重试") }
+        if try replay.requireControl(client, inputID: inputID) {
+            terminalView.process.send(data: Array(bytes)[...])
+        }
+    }
+
+    func remoteResize(cols: Int, rows: Int, client: String) throws {
+        guard let terminalView else { throw RemoteWorkbenchError.invalid("终端正在准备") }
+        guard try replay.requireControl(client) else { return }
+        var size = winsize(ws_row: UInt16(max(2, min(rows, 200))), ws_col: UInt16(max(10, min(cols, 400))), ws_xpixel: 0, ws_ypixel: 0)
+        terminalView.remotePTYSize = size
+        _ = terminalView.process.updateWindowSize(&size)
     }
 
     func apply(_ style: SharedTerminalStyle, to view: FileDropTerminalView) {

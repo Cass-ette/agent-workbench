@@ -28,7 +28,7 @@ struct ClaudeCCHPManagerApp: App {
             ManagerView(model: model, updates: updates)
                 .frame(minWidth: 960, minHeight: 680)
                 .tint(.accentColor)
-                .task { await model.load() }
+                .task { await model.load(); model.restoreRemoteService() }
                 .task {
                     while !Task.isCancelled {
                         await updates.check()

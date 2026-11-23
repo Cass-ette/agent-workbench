@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { readAgentPermissions } from "./AgentPermissions";
 
 interface ConnectionInfo {
   name: string;
@@ -14,6 +15,7 @@ export function SSHConnection({ close }: { close: () => void }) {
   const [host, setHost] = useState("");
   const [port, setPort] = useState("22");
   const [status, setStatus] = useState("");
+  const [enabled, setEnabled] = useState(false);
   async function readInfo() {
     try {
       const result = await invoke<ConnectionInfo>("ssh_connection_info");
@@ -24,7 +26,17 @@ export function SSHConnection({ close }: { close: () => void }) {
       setStatus(String(error));
     }
   }
-  useEffect(() => { void readInfo(); }, []);
+  useEffect(() => {
+    void readInfo();
+    void invoke<{config: {remote_enabled: boolean}}>("load_app_state").then(state => setEnabled(state.config.remote_enabled));
+  }, []);
+  async function setRemote(value: boolean) {
+    try {
+      await invoke("set_remote_enabled", { enabled: value, permissions: readAgentPermissions() });
+      setEnabled(value);
+      setStatus(value ? "手机接续已启用，请保持电脑和工作台运行。" : "已关闭手机接续，电脑终端继续运行。");
+    } catch (error) { setStatus(String(error)); }
+  }
 
   async function copyCode() {
     if (!info) return;
@@ -50,6 +62,8 @@ export function SSHConnection({ close }: { close: () => void }) {
     <section className="profile-dialog" role="dialog" aria-modal="true" aria-label="手机连接这台电脑">
       <h2>手机连接这台电脑</h2>
       <p>在 Windows 可选功能中安装 OpenSSH 服务器，然后启动 sshd 服务。</p>
+      <label><input type="checkbox" checked={enabled} onChange={e => void setRemote(e.target.checked)} />允许通过 SSH 接续电脑工作台</label>
+      <p>手机可查看和接续电脑会话，断开不结束任务。复制内容可能被跨设备剪贴板同步。</p>
       {info && <>
         <label className="dialog-field">手机可达的地址
           <input list="ssh-addresses" value={host} onChange={(event) => setHost(event.target.value)} />

@@ -51,6 +51,7 @@ export function SSHConnection({ close }: { close: () => void }) {
       host_key: info.host_key, platform: "windows", remember: info.remember,
     });
     try {
+      await invoke("set_remote_discovery_port", { port: Number(port) });
       await navigator.clipboard.writeText("workbench-ssh-v1:" + btoa(String.fromCharCode(...new TextEncoder().encode(code))));
       setStatus("已复制。到手机工作台的「运行环境 → 添加电脑」粘贴。");
     } catch {
@@ -63,14 +64,14 @@ export function SSHConnection({ close }: { close: () => void }) {
       <h2>手机连接这台电脑</h2>
       <p>在 Windows 可选功能中安装 OpenSSH 服务器，然后启动 sshd 服务。</p>
       <label><input type="checkbox" checked={enabled} onChange={e => void setRemote(e.target.checked)} />允许通过 SSH 接续电脑工作台</label>
-      <p>手机可查看和接续电脑会话，断开不结束任务。复制内容可能被跨设备剪贴板同步。</p>
+      <p>手机可查看和接续电脑会话，断开不结束任务。同一局域网换网后会自动寻找已配对电脑的新地址；本轮仅支持局域网。复制内容可能被跨设备剪贴板同步。</p>
       {info && <>
-        <label className="dialog-field">手机可达的地址
+        <label className="dialog-field">局域网地址
           <input list="ssh-addresses" value={host} onChange={(event) => setHost(event.target.value)} />
           <datalist id="ssh-addresses">{info.addresses.map((address) => <option key={address} value={address} />)}</datalist>
         </label>
         <label className="dialog-field">SSH 端口<input value={port} onChange={(event) => setPort(event.target.value)} /></label>
-        <p>账号 {info.user}。同一网络可用局域网地址，异地可填 Tailscale 地址。</p>
+        <p>账号 {info.user}。请填写手机与电脑所在局域网的地址。</p>
         {!info.remember && <p>Windows 管理员账号通过密码登录。普通账号支持记住此手机。</p>}
       </>}
       {status && <p role="status">{status}</p>}

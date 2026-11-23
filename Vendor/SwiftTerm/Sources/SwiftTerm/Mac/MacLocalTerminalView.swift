@@ -135,6 +135,36 @@ public extension LocalProcessTerminalViewDelegate {
     }
 }
 
+/// Keep the function inside a reference rather than a generic inout value.
+/// Reading Locked<Function?> repeatedly can accumulate reabstraction thunks in
+/// optimized builds, eventually overflowing the PTY reader's stack.
+final class LockedProcessByteCallback: Sendable {
+    private final class Callback: Sendable {
+        let body: @Sendable ([UInt8]) -> Void
+        init(_ body: @escaping @Sendable ([UInt8]) -> Void) { self.body = body }
+        func call(_ bytes: [UInt8]) { body(bytes) }
+    }
+    private let callback = Locked<Callback?>(nil)
+
+    func replace(with body: (@Sendable ([UInt8]) -> Void)?) {
+        let next = body.map(Callback.init)
+        callback.withLock { $0 = next }
+    }
+
+    func call(_ bytes: ArraySlice<UInt8>) {
+        let current = callback.withLock { $0 }
+        current?.call(Array(bytes))
+    }
+
+    func call(_ bytes: Span<UInt8>) {
+        guard let current = callback.withLock({ $0 }) else { return }
+        var copy: [UInt8] = []
+        copy.reserveCapacity(bytes.count)
+        for index in 0..<bytes.count { copy.append(bytes[index]) }
+        current.call(copy)
+    }
+}
+
 private final class LocalProcessTerminalViewProcessAdapter:
     LocalProcessDelegate, LocalProcessBorrowedDataDelegate, Sendable
 {
@@ -142,7 +172,7 @@ private final class LocalProcessTerminalViewProcessAdapter:
     private let frameSignal: FrameDriverSignal
     private let diagnosticsState: Locked<TerminalView.Diagnostics>
     private let outputHandler: LockedVoidCallback
-    private let byteHandler: Locked<(@Sendable ([UInt8]) -> Void)?>
+    private let byteHandler: LockedProcessByteCallback
     private let windowSize = Locked(winsize())
     private let inputProcess = Locked(WeakLocalProcessInputReference())
     private let failureHandler: @MainActor @Sendable (LocalProcessError) -> Void
@@ -152,7 +182,7 @@ private final class LocalProcessTerminalViewProcessAdapter:
          frameSignal: FrameDriverSignal,
          diagnosticsState: Locked<TerminalView.Diagnostics>,
          outputHandler: LockedVoidCallback,
-         byteHandler: Locked<(@Sendable ([UInt8]) -> Void)?>,
+         byteHandler: LockedProcessByteCallback,
          failureHandler: @escaping @MainActor @Sendable (LocalProcessError) -> Void,
          terminationHandler: @escaping @MainActor @Sendable (Int32?) -> Void) {
         self.renderOwner = renderOwner
@@ -191,7 +221,7 @@ private final class LocalProcessTerminalViewProcessAdapter:
     }
 
     func dataReceived(slice: ArraySlice<UInt8>) {
-        byteHandler.withLock { $0 }?(Array(slice))
+        byteHandler.call(slice)
         frameSignal.markDirty()
         let parse = Profiling.begin(.ioParse, "bytes=%d", slice.count)
         _ = renderOwner.feed(bytes: slice)
@@ -205,12 +235,7 @@ private final class LocalProcessTerminalViewProcessAdapter:
     }
 
     func dataReceivedBorrowed(_ bytes: Span<UInt8>) {
-        if let handler = byteHandler.withLock({ $0 }) {
-            var copy: [UInt8] = []
-            copy.reserveCapacity(bytes.count)
-            for index in 0..<bytes.count { copy.append(bytes[index]) }
-            handler(copy)
-        }
+        byteHandler.call(bytes)
         frameSignal.markDirty()
         let parse = Profiling.begin(.ioParse, "bytes=%d", bytes.count)
         _ = renderOwner.feed(borrowedBytes: bytes)
@@ -257,7 +282,7 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
     public internal(set) var process: LocalProcess!
     private var processAdapter: LocalProcessTerminalViewProcessAdapter!
     nonisolated private let processOutputHandler = LockedVoidCallback()
-    nonisolated private let processByteHandler = Locked<(@Sendable ([UInt8]) -> Void)?>(nil)
+    nonisolated private let processByteHandler = LockedProcessByteCallback()
 
     public override init (frame: CGRect)
     {
@@ -319,7 +344,7 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
 
     /// A copied output batch for hosts that provide another view of the same PTY.
     public func setProcessByteHandler(_ handler: (@Sendable ([UInt8]) -> Void)?) {
-        processByteHandler.withLock { $0 = handler }
+        processByteHandler.replace(with: handler)
     }
     
     /**

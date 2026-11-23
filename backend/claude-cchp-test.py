@@ -512,12 +512,16 @@ def codex_config(profile_id, model, gateway=None, workspace=None, branch_home=No
 
 
 def agent_permission_args(client, mode="restricted"):
-    if mode not in {"restricted", "standard", "full"}:
+    if mode not in {"restricted", "standard", "full", "dangerous"}:
         raise RuntimeError("权限模式无效；请重新设置。")
     if client == "claude":
+        if mode == "dangerous":
+            return ["--dangerously-skip-permissions"]
         return ["--permission-mode", "bypassPermissions" if mode == "full" else "default"]
     if client != "codex":
         raise RuntimeError("未知客户端权限。")
+    if mode == "dangerous":
+        return ["--dangerously-bypass-approvals-and-sandbox"]
     return ["--sandbox", "danger-full-access" if mode == "full" else "workspace-write",
             "--ask-for-approval", "on-request",
             "-c", "sandbox_workspace_write.network_access=" + ("false" if mode == "restricted" else "true")]

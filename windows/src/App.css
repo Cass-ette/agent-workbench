@@ -134,6 +134,9 @@ button { color: inherit; }
 .terminal-tabs { min-height: 38px; flex: 0 0 auto; display: flex; gap: 3px; padding: 4px 7px 0; overflow-x: auto; border-bottom: 1px solid #373b41; background: #202328; }
 .terminal-tab { min-width: 125px; max-width: 220px; height: 33px; display: flex; align-items: center; border-bottom: 2px solid transparent; }
 .terminal-tab.active { border-bottom-color: #8cabc3; background: #2c3036; }
+.terminal-tab[draggable="true"] { cursor: grab; }
+.terminal-tab.dragging { opacity: .5; }
+.terminal-tab.drop-target { outline: 1px solid #8cabc3; outline-offset: -1px; }
 .terminal-tab-select { min-width: 0; flex: 1; display: flex; align-items: center; gap: 7px; padding: 0 8px; color: #aeb5bd; border: 0; background: transparent; text-align: left; cursor: pointer; }
 .terminal-tab.active .terminal-tab-select { color: #edf0f2; }
 .tab-state { flex: 0 0 6px; width: 6px; height: 6px; background: #5d6570; }

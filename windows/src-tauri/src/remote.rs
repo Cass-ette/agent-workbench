@@ -130,6 +130,7 @@ pub struct Replay {
     base: u64,
     owner: String,
     expires: Option<Instant>,
+    release_reason: &'static str,
     seen: VecDeque<String>,
     pub exit_code: Option<u32>,
     reader_done: bool,
@@ -157,12 +158,19 @@ impl Replay {
         }
     }
     pub fn release(&mut self) {
-        self.owner.clear();
         self.expires = None;
+        self.release_reason = "desktop";
+    }
+    fn detach(&mut self, client: &str) {
+        if self.owner == client {
+            self.expires = None;
+            self.release_reason = "read_only";
+        }
     }
     fn claim(&mut self, client: &str) {
         self.owner = client.into();
         self.expires = Some(Instant::now() + Duration::from_secs(30));
+        self.release_reason = "";
     }
     fn require_control(&mut self, client: &str, input: Option<&str>) -> Result<bool, String> {
         if client.is_empty()
@@ -190,9 +198,12 @@ impl Replay {
         let control = !client.is_empty()
             && self.owner == client
             && self.expires.is_some_and(|t| t > Instant::now());
-        if control {
+        let state = if control {
             self.expires = Some(Instant::now() + Duration::from_secs(30));
-        }
+            "controlled"
+        } else if !client.is_empty() && self.owner == client {
+            if self.release_reason.is_empty() { "expired" } else { self.release_reason }
+        } else if self.has_remote_control() { "other_device" } else { "read_only" };
         let start = after
             .max(self.base)
             .min(self.base + self.bytes.len() as u64);
@@ -203,13 +214,14 @@ impl Replay {
             .take(65_536)
             .copied()
             .collect();
-        json!({"data":STANDARD.encode(&bytes),"after":start+bytes.len() as u64,"truncated":after<self.base,"can_write":control,"exit_code":self.exit_code})
+        json!({"data":STANDARD.encode(&bytes),"after":start+bytes.len() as u64,"truncated":after<self.base,"can_write":control,"control_state":state,"exit_code":self.exit_code})
     }
 }
 
 #[derive(Default)]
 pub struct Service {
     current: Mutex<Option<(Arc<AtomicBool>, PathBuf, String)>>,
+    discovery: crate::discovery::Publisher,
 }
 impl Service {
     pub fn set(&self, app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
@@ -219,6 +231,7 @@ impl Service {
             let _ = fs::remove_file(path);
         }
         if !enabled {
+            self.discovery.set(false, 22)?;
             return Ok(());
         }
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
@@ -241,6 +254,8 @@ impl Service {
         .map_err(|e| e.to_string())?;
         let running = Arc::new(AtomicBool::new(true));
         *current = Some((running.clone(), path, token.clone()));
+        let ssh_port = app.state::<AppState>().config.lock().map(|c| c.remote_ssh_port).unwrap_or(22);
+        let _ = self.discovery.set(true, if ssh_port == 0 { 22 } else { ssh_port });
         thread::spawn(move || {
             while running.load(Ordering::SeqCst) {
                 match listener.accept() {
@@ -259,6 +274,16 @@ impl Service {
         });
         Ok(())
     }
+}
+
+#[tauri::command]
+pub fn set_remote_discovery_port(state: tauri::State<'_, AppState>, port: u16) -> Result<(), String> {
+    if port == 0 { return Err("SSH 端口无效".into()); }
+    let enabled = state.config.lock().map_err(|_| "配置不可用")?.remote_enabled;
+    state.remote.discovery.set(enabled, port)?;
+    let mut config = state.config.lock().map_err(|_| "配置不可用")?;
+    config.remote_ssh_port = port;
+    crate::write_config(&state.config_path, &config)
 }
 
 fn read_request(stream: &mut TcpStream, token: &str) -> Result<Value, String> {
@@ -557,9 +582,7 @@ fn operation(app: &tauri::AppHandle, request: Value) -> Result<Value, String> {
         }
         "output" => Ok(replay.snapshot(request["after"].as_u64().unwrap_or(0), client_id)),
         "detach" => {
-            if replay.owner == client_id {
-                replay.release();
-            }
+            replay.detach(client_id);
             Ok(json!({"detached":true}))
         }
         "input" => {
@@ -657,6 +680,25 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), vec![1, 2, 3, 4]);
         assert!(uploads.path(&id, "other", "phone").is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn control_state_distinguishes_expiry_takeover_and_detach() {
+        let mut buffer = Replay::default();
+        assert_eq!(buffer.snapshot(0, "phone")["control_state"], "read_only");
+        buffer.claim("phone");
+        assert_eq!(buffer.snapshot(0, "phone")["control_state"], "controlled");
+        buffer.expires = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(buffer.snapshot(0, "phone")["control_state"], "expired");
+        assert!(!buffer.has_remote_control());
+        buffer.claim("phone");
+        buffer.release();
+        assert_eq!(buffer.snapshot(0, "phone")["control_state"], "desktop");
+        buffer.claim("other");
+        assert_eq!(buffer.snapshot(0, "phone")["control_state"], "other_device");
+        buffer.detach("phone");
+        assert_eq!(buffer.snapshot(0, "other")["control_state"], "controlled");
+        buffer.detach("other");
+        assert_eq!(buffer.snapshot(0, "other")["control_state"], "read_only");
     }
     #[test]
     fn replay_caps_memory_and_tracks_a_single_writer() {

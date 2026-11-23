@@ -15,6 +15,7 @@ import android.webkit.WebView
 /** Keep terminal rendering in xterm; Android IMEs submit text through a native connection. */
 class TerminalWebView(context: Context, private val sendInput: (String) -> Unit) : WebView(context) {
     var terminalReady = false
+    var inputEnabled = true
     private val keyboard get() = context.getSystemService(InputMethodManager::class.java)
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private var downY = 0f
@@ -27,7 +28,7 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
     }
 
     fun showTerminalKeyboard() {
-        if (!terminalReady) return
+        if (!terminalReady || !inputEnabled) return
         requestFocus()
         evaluateJavascript("window.focusTerminal()", null)
         post { keyboard.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT) }
@@ -79,9 +80,10 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
         return handled
     }
 
-    override fun onCheckIsTextEditor() = terminalReady || super.onCheckIsTextEditor()
+    override fun onCheckIsTextEditor() = inputEnabled && (terminalReady || super.onCheckIsTextEditor())
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+        if (!inputEnabled) return null
         if (!terminalReady) return super.onCreateInputConnection(outAttrs)
         // Do not advertise a password field: MIUI routes that variation to its
         // secure keyboard and composing Chinese text becomes unavailable.
@@ -99,7 +101,7 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
                 val text = buffer.toString()
                 buffer.clear()
                 removeComposingSpans(buffer)
-                if (text.isNotEmpty()) sendInput(text)
+                if (text.isNotEmpty() && inputEnabled) sendInput(terminalImeCommit(text))
             }
 
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
@@ -125,13 +127,21 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
                 deleteSurroundingText(beforeLength, afterLength)
 
             override fun sendKeyEvent(event: KeyEvent): Boolean {
+                if (!inputEnabled) return true
+                if (event.keyCode == KeyEvent.KEYCODE_ENTER && event.hasNoModifiers()) {
+                    if (event.action == KeyEvent.ACTION_DOWN) {
+                        finishComposingText()
+                        sendInput("\r")
+                    }
+                    return true
+                }
                 // Hardware keys, navigation and modifiers retain xterm's key mappings.
                 return this@TerminalWebView.dispatchKeyEvent(event)
             }
 
             override fun performEditorAction(actionCode: Int): Boolean {
                 finishComposingText()
-                sendInput("\r")
+                if (inputEnabled) sendInput("\r")
                 return true
             }
         }

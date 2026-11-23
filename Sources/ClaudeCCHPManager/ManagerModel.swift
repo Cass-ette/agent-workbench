@@ -464,10 +464,13 @@ final class ManagerModel: ObservableObject {
     let terminalStyle = SharedTerminalStyle()
     @Published private(set) var remoteEnabled = false
     private var remoteServer: RemoteHTTPServer?
+    private let remoteDiscovery = RemoteDiscoveryPublisher()
+    @Published private(set) var remoteDiscoveryMessage = ""
     private let remoteAttachments = RemoteAttachments()
 
     func setRemoteEnabled(_ enabled: Bool) {
         if !enabled {
+            remoteDiscovery.stop(); remoteDiscoveryMessage = ""
             remoteServer?.stop(); remoteServer = nil; remoteEnabled = false
             UserDefaults.standard.set(false, forKey: "remote.enabled")
             return
@@ -479,12 +482,27 @@ final class ManagerModel: ObservableObject {
                 return await self.handleRemoteRequest(data)
             }
             remoteEnabled = true
+            refreshRemoteDiscovery()
             UserDefaults.standard.set(true, forKey: "remote.enabled")
         } catch { setError("无法启动手机接续服务：\(error.localizedDescription)") }
     }
 
     func restoreRemoteService() {
         if UserDefaults.standard.bool(forKey: "remote.enabled") { setRemoteEnabled(true) }
+    }
+
+    func refreshRemoteDiscovery(port: Int? = nil) {
+        if let port { UserDefaults.standard.set(port, forKey: "remote.ssh.port") }
+        guard remoteEnabled else { return }
+        let savedPort = UserDefaults.standard.integer(forKey: "remote.ssh.port")
+        let key = (try? String(contentsOfFile: "/etc/ssh/ssh_host_ed25519_key.pub", encoding: .utf8)) ?? ""
+        remoteDiscovery.onFailure = { [weak self] message in
+            Task { @MainActor [weak self] in self?.remoteDiscoveryMessage = message }
+        }
+        do {
+            try remoteDiscovery.start(publicKey: key, port: savedPort == 0 ? 22 : savedPort)
+            remoteDiscoveryMessage = "局域网自动发现已开启；换网后手机会核对电脑身份并更新地址"
+        } catch { remoteDiscoveryMessage = error.localizedDescription }
     }
 
     private func remoteSessionRow(_ session: TerminalSession) -> [String: Any] {
@@ -629,6 +647,14 @@ final class ManagerModel: ObservableObject {
         selectedTerminal?.control.setSelected(false)
         selectedTerminalID = id
         selectedTerminal?.control.setSelected(true)
+    }
+
+    func moveTerminal(_ id: UUID, to targetIndex: Int) {
+        guard let sourceIndex = terminalSessions.firstIndex(where: { $0.id == id }) else { return }
+        let destination = max(0, min(targetIndex, terminalSessions.count - 1))
+        guard sourceIndex != destination else { return }
+        let session = terminalSessions.remove(at: sourceIndex)
+        terminalSessions.insert(session, at: destination)
     }
 
     var agentRunning: Bool { terminalSessions.contains(where: \.isRunning) }
@@ -1303,12 +1329,16 @@ final class ManagerModel: ObservableObject {
             command += [client == .codex ? "resume" : "--resume", history.sessionID]
         }
         let shellCommand = "cd \(shellQuote(directory)) && \(command.map(shellQuote).joined(separator: " ")); exec \(shellQuote(shellPath)) -l -i"
-        let inherited = ProcessInfo.processInfo.environment.map { "\($0.key)=\($0.value)" }
+        var inherited = ProcessInfo.processInfo.environment
+        // These describe our actual PTY, regardless of how Finder or another
+        // terminal launched the app. Keep CLI homes, credentials and proxies.
+        inherited["TERM"] = "xterm-256color"
+        inherited["COLORTERM"] = "truecolor"
         let launch = TerminalLaunchSpec(
             executable: shellPath,
             arguments: ["-l", "-i", "-c", shellCommand],
             workspace: directory,
-            environment: inherited
+            environment: inherited.map { "\($0.key)=\($0.value)" }
         )
         let session = TerminalSession(client: client, profile: nil, model: "系统配置",
                                       workspace: directory, sessionMode: history == nil ? .new : .resume,

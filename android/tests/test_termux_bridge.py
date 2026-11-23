@@ -357,6 +357,31 @@ fi
         finally:
             server.shutdown(); server.server_close()
 
+    def test_closing_remote_login_removes_its_connection_and_stops_ssh(self):
+        target_id, session_id = "12345678-1234-5678-1234-567812345678", "a" * 32
+        server = B.BridgeServer(("127.0.0.1", 0), "a" * 64)
+        connection = SimpleNamespace(id=session_id, owner=target_id, exit_code=None,
+                                     stop=lambda: setattr(connection, "stopped", True), stopped=False)
+        server.remotes[target_id] = connection
+        server.sessions[session_id] = connection
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = "http://127.0.0.1:" + str(server.server_port)
+        headers = {"Authorization": "Bearer " + "a" * 64}
+        try:
+            request = Request(url + "/sessions/" + session_id, method="DELETE", headers=headers)
+            with urlopen(request, timeout=2) as response:
+                self.assertTrue(json.load(response)["stopping"])
+            self.assertTrue(connection.stopped)
+            self.assertNotIn(target_id, server.remotes)
+            self.assertNotIn(session_id, server.sessions)
+            request = Request(url + "/remote/" + target_id, headers=headers)
+            with urlopen(request, timeout=2) as response:
+                status = json.load(response)
+            self.assertFalse(status["connected"])
+            self.assertEqual(status["login_id"], "")
+        finally:
+            server.shutdown(); server.server_close()
+
     def test_usage_endpoint_returns_tokens_without_session_text(self):
         with tempfile.TemporaryDirectory() as home:
             log = Path(home) / ".local/share/agent-workbench/claude/profile/projects/session.jsonl"

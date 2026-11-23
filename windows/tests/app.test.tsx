@@ -79,12 +79,20 @@ describe("工作会话配置", () => {
     fireEvent.change(screen.getByLabelText("Codex 权限"), { target: { value: "full" } });
     const save = screen.getByRole<HTMLButtonElement>("button", { name: "保存权限设置" });
     expect(save.disabled).toBe(true);
-    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByLabelText(/我确认启用上述高权限/));
     expect(save.disabled).toBe(false);
     fireEvent.change(screen.getByLabelText("Claude 权限"), { target: { value: "full" } });
     expect(save.disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(JSON.parse(window.localStorage.getItem(permissionStorageKey)!)).toEqual({ codex: "standard", claude: "standard" });
+  });
+
+  it("危险模式会明确保存跳过审批并关闭沙箱的权限", async () => {
+    await openApp();
+    fireEvent.click(screen.getByRole("button", { name: "权限设置" }));
+    fireEvent.click(screen.getByLabelText("跳过命令审批并关闭沙箱限制"));
+    fireEvent.click(screen.getByRole("button", { name: "保存权限设置" }));
+    expect(JSON.parse(window.localStorage.getItem(permissionStorageKey)!)).toEqual({ codex: "dangerous", claude: "dangerous" });
   });
   it("切回较早的对话时已注册的拖放回调立即使用新选中的终端", async () => {
     vi.stubGlobal("__TAURI_INTERNALS__", {});
@@ -115,6 +123,42 @@ describe("工作会话配置", () => {
       ["write_terminal", { sessionId: "1", data: Array.from(new TextEncoder().encode(`'${path}' `)) }],
     ]);
     expect(onDragDropEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("标签可以拖动排序，关闭当前标签后切换到剩余会话", async () => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    let nextId = 0;
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "start_terminal") {
+        nextId += 1;
+        return { id: String(nextId), title: "Terminal", workspace: `C:\\test-project\\folder-${nextId}` };
+      }
+      return normalInvoke(command, args);
+    });
+    await openApp();
+    const add = screen.getByRole("button", { name: "新建会话" });
+    for (let count = 1; count <= 3; count += 1) {
+      fireEvent.click(add);
+      await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(count));
+    }
+
+    const tabs = screen.getAllByRole("tab");
+    const transfer = { effectAllowed: "", setData: vi.fn(), getData: vi.fn(() => "1") };
+    fireEvent.dragStart(tabs[0].parentElement!, { dataTransfer: transfer });
+    fireEvent.dragOver(tabs[2].parentElement!, { dataTransfer: transfer });
+    fireEvent.drop(tabs[2].parentElement!, { dataTransfer: transfer, clientX: 1 });
+    await waitFor(() => {
+      const order = [...document.querySelectorAll(".terminal-tab .tab-label")].map((node) => node.textContent);
+      expect(order[0]).toContain("folder-2");
+      expect(order[1]).toContain("folder-1");
+      expect(order[2]).toContain("folder-3");
+    });
+
+    const selected = screen.getByRole("tab", { selected: true });
+    fireEvent.click(selected.parentElement!.querySelector(".tab-close")!);
+    await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(2));
+    expect(screen.getByRole("tab", { selected: true }).textContent).toContain("folder-1");
   });
 
   it("侧栏历史跨目录打开全部会话", async () => {

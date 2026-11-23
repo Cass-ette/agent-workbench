@@ -243,6 +243,7 @@ struct TerminalPanel: View {
     let onToggleFullScreen: () -> Void
     let isEmpty: Bool
     let onChooseWorkspace: () -> Void
+    @State private var draggedSessionID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -301,6 +302,18 @@ struct TerminalPanel: View {
                                                selected: model.selectedTerminalID == session.id,
                                                onSelect: { model.selectTerminal(session.id) },
                                                onClose: { model.closeSession(session) })
+                                .onDrag {
+                                    draggedSessionID = session.id
+                                    return NSItemProvider(object: session.id.uuidString as NSString)
+                                }
+                                .onDrop(of: [.text], isTargeted: nil) { _ in
+                                    guard let draggedSessionID,
+                                          let targetIndex = model.terminalSessions.firstIndex(where: { $0.id == session.id }),
+                                          let sourceIndex = model.terminalSessions.firstIndex(where: { $0.id == draggedSessionID }) else { return false }
+                                    model.moveTerminal(draggedSessionID, to: targetIndex)
+                                    self.draggedSessionID = nil
+                                    return sourceIndex != targetIndex
+                                }
                         }
                     }
                     .padding(.horizontal, 8)

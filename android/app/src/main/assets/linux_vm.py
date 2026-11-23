@@ -125,7 +125,10 @@ if client == "codex":
         args += ["resume"]
     # The VM is the isolation boundary; Codex needs guest-wide access for Docker
     # and system package tasks. The phone still exposes only the shared project.
-    args += ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]
+    if data.get("permission_mode") == "dangerous":
+        args += ["--dangerously-bypass-approvals-and-sandbox"]
+    else:
+        args += ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]
     args += ["--model", model, "--cd", str(workspace), "--no-alt-screen"]
 else:
     config = home / ".local/share/agent-workbench/claude" / scope
@@ -147,8 +150,11 @@ else:
     if not executable:
         raise SystemExit("VM 中未安装 Claude，请到运行环境安装 / 检查 Linux VM")
     args = [executable, "--bare", "--add-dir", str(workspace), "--model", model,
-            "--settings", str(settings), "--append-system-prompt", "全程使用简体中文。",
-            "--permission-mode", "bypassPermissions" if data.get("permission_mode") == "full" else "default"]
+            "--settings", str(settings), "--append-system-prompt", "全程使用简体中文。"]
+    if data.get("permission_mode") == "dangerous":
+        args += ["--dangerously-skip-permissions"]
+    else:
+        args += ["--permission-mode", "bypassPermissions" if data.get("permission_mode") == "full" else "default"]
     if mode == "continue":
         args += ["--continue"]
     elif mode == "resume":
@@ -544,7 +550,7 @@ class LinuxVM:
         key = str(payload.get("key") or "")
         gateway = str(payload.get("gateway") or "").rstrip("/")
         mode = payload.get("mode", "new")
-        if payload.get("permission_mode", "standard") not in {"restricted", "standard", "full"}:
+        if payload.get("permission_mode", "standard") not in {"restricted", "standard", "full", "dangerous"}:
             raise ValueError("权限模式无效，请重新设置")
         if not model or not key or mode not in ("new", "continue", "resume"):
             raise ValueError("VM Agent 启动参数无效")

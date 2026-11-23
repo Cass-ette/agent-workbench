@@ -4,15 +4,25 @@ import android.app.Activity
 import android.app.Instrumentation
 import android.content.Context
 import android.content.Intent
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewConfiguration
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.inputmethod.EditorInfo
 import android.webkit.WebView
 import androidx.lifecycle.ViewModelProvider
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
 import androidx.lifecycle.Lifecycle
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -23,6 +33,18 @@ class TerminalInputInstrumentation : Instrumentation() {
     override fun onCreate(arguments: Bundle?) { args = arguments ?: Bundle(); start() }
 
     override fun onStart() {
+        if (args.getString("remote_session_smoke") == "true") {
+            verifyRemoteSession()
+            return
+        }
+        if (args.getString("tab_drag_smoke") == "true") {
+            verifyTabDrag()
+            return
+        }
+        if (args.getString("input_connection_smoke") == "true") {
+            verifyInputConnection()
+            return
+        }
         if (args.getString("device_vm_setup") == "true") {
             DeviceRuntimeSmoke(this).run("vm")
             return
@@ -293,6 +315,195 @@ class TerminalInputInstrumentation : Instrumentation() {
         runOnMainSync { view.dispatchGenericMotionEvent(event) }
         event.recycle()
     }
+    /** Only inspects an explicitly named, already attached test workspace. */
+    private fun verifyRemoteSession() {
+        val result = Bundle()
+        var browser: WebView? = null
+        var model: WorkbenchModel? = null
+        try {
+            val workspace = args.getString("workspace") ?: error("Missing test workspace")
+            check(workspace.startsWith("/private/tmp/workbench-")) { "Use a disposable test workspace" }
+            val activity = startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity
+            runOnMainSync { model = ViewModelProvider(activity)[WorkbenchModel::class.java] }
+            until("bridge connected") { model!!.connected }
+            until("attached test session") {
+                model!!.sessions.any { it.remoteTarget.isNotEmpty() && it.workspace == workspace }
+            }
+            until("remote output received") {
+                model!!.sessions.last { it.remoteTarget.isNotEmpty() && it.workspace == workspace }.output.isNotEmpty()
+            }
+            runOnMainSync { model!!.selectedSession = model!!.sessions.last { it.remoteTarget.isNotEmpty() && it.workspace == workspace }.id }
+            waitForIdleSync()
+            until("WebView attached") { runOnMainSync { browser = findWebView(activity.window.decorView) }; browser?.isAttachedToWindow == true }
+            val view = browser!!
+            until("terminal ready") { eval(view, "typeof window.writeChunk === 'function'") == "true" }
+            until("remote output rendered") {
+                eval(view, "Array.from({length:terminal.buffer.active.length},(_,i)=>terminal.buffer.active.getLine(i)?.translateToString(true)||'').some(line=>line.includes('Codex')||line.includes('GPT-'))") == "true"
+            }
+            result.putString("result", "Attached Mac Codex output rendered in the tablet terminal")
+            finish(Activity.RESULT_OK, result)
+        } catch (cause: Throwable) {
+            result.putString("error", cause.message ?: cause.javaClass.simpleName)
+            browser?.let { view -> runCatching { eval(view, "JSON.stringify({rows:terminal.rows,cols:terminal.cols,type:terminal.buffer.active.type,nonblank:Array.from({length:terminal.buffer.active.length},(_,i)=>terminal.buffer.active.getLine(i)?.translateToString(true)||'').filter(line=>line.trim()).length})") }.onSuccess { result.putString("terminal_debug", it) } }
+            model?.sessions?.lastOrNull { it.workspace == args.getString("workspace") }?.let {
+                result.putString("output_debug", "chunks=${it.output.size}, after=${it.after}, bytes=${it.output.sumOf { chunk -> chunk.encoded.length }}, error=${it.input.control}")
+            }
+            finish(Activity.RESULT_CANCELED, result)
+        }
+    }
+
+    /** Exercises the production tab composable without touching live sessions or preferences. */
+    private fun verifyTabDrag() {
+        val result = Bundle()
+        var activity: MainActivity? = null
+        var resultCode = Activity.RESULT_CANCELED
+        try {
+            val monitor = addMonitor(MainActivity::class.java.name, null, false)
+            // MIUI blocks activity starts from background instrumentation. Start
+            // through the shell while observing the same target activity.
+            uiAutomation.executeShellCommand("am start -n ${targetContext.packageName}/.MainActivity").close()
+            val active = waitForMonitorWithTimeout(monitor, 10000) as? MainActivity ?: error("Test activity did not start")
+            removeMonitor(monitor)
+            activity = active
+            val tabs = mutableStateOf(listOf(
+                TerminalSession("tab-a", "标签测试 A", "/fixture/a", "shell"),
+                TerminalSession("tab-b", "标签测试 B", "/fixture/b", "shell"),
+            ))
+            val selected = mutableStateOf("tab-a")
+            val closed = mutableStateOf("")
+            runOnMainSync {
+                active.setContent {
+                    MaterialTheme {
+                        Box(Modifier.fillMaxSize().systemBarsPadding()) {
+                            TerminalSessionTabs(tabs.value, selected.value,
+                            onSelect = { selected.value = it },
+                            onClose = { closed.value = it.id; tabs.value = tabs.value.filterNot { row -> row.id == it.id } },
+                            onMove = { moving, target, after ->
+                                val ids = reorderSessionIds(tabs.value.map { it.id }, moving, target, after)
+                                tabs.value = ids.map { id -> tabs.value.first { it.id == id } }
+                            })
+                        }
+                    }
+                }
+            }
+            until("test tab titles visible") {
+                runCatching { check(tabBounds("标签测试 A").width() > 20); check(tabBounds("标签测试 B").width() > 20) }.isSuccess
+            }
+            val second = tabBounds("标签测试 B")
+            tapAt(second.exactCenterX(), second.exactCenterY())
+            until("ordinary tap selects second tab") { selected.value == "tab-b" }
+            dragTab("标签测试 A", "标签测试 B")
+            until("long press moves first tab after second") { tabs.value.map { it.id } == listOf("tab-b", "tab-a") }
+            check(closed.value.isEmpty()) { "Drag accidentally closed a tab" }
+            dragTab("标签测试 B", "标签测试 A")
+            until("reverse drag restores order") { tabs.value.map { it.id } == listOf("tab-a", "tab-b") }
+            waitForIdleSync()
+            Thread.sleep(300) // Let the tab indicator and accessibility bounds settle after reordering.
+            val close = tabBounds("关闭 标签测试 B")
+            result.putString("close_bounds", close.toString())
+            tapAt(close.exactCenterX(), close.exactCenterY())
+            result.putString("after_close_tap", "tabs=${tabs.value.map { it.id }} selected=${selected.value} closed=${closed.value}")
+            until("closing selected last tab keeps first tab") { tabs.value.map { it.id } == listOf("tab-a") && closed.value == "tab-b" }
+            result.putString("result", "PASS: titles visible, tap switches tabs, long-press drag reorders both ways, closing selected last tab remains usable; live sessions untouched")
+            resultCode = Activity.RESULT_OK
+        } catch (cause: Throwable) {
+            result.putString("error", cause.stackTraceToString())
+            runCatching {
+                java.io.File(targetContext.getExternalFilesDir(null), "tab-drag-fixture.png").outputStream().use {
+                    uiAutomation.takeScreenshot().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+                }
+            }
+        } finally {
+            runOnMainSync { activity?.finish() }
+        }
+        finishAfterAutomationConnect(resultCode, result)
+    }
+
+    private fun tabBounds(label: String): Rect {
+        fun find(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+            // Reordering replaces the subcomposed nodes; refresh cached labels
+            // and bounds before targeting another input event.
+            if (!node.refresh()) return null
+            if (node.contentDescription?.toString() == label || node.text?.toString() == label) return node
+            for (index in 0 until node.childCount) node.getChild(index)?.let { child -> find(child)?.let { return it } }
+            return null
+        }
+        val root = uiAutomation.rootInActiveWindow ?: error("No active accessibility root")
+        val node = find(root) ?: error("Tab element not found: $label")
+        return Rect().also(node::getBoundsInScreen)
+    }
+
+    private fun tapAt(x: Float, y: Float) {
+        val now = android.os.SystemClock.uptimeMillis()
+        sendPointerSync(MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x, y, 0))
+        Thread.sleep(50)
+        sendPointerSync(MotionEvent.obtain(now, android.os.SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0))
+    }
+
+    private fun dragTab(fromTitle: String, toTitle: String) {
+        val from = tabBounds(fromTitle)
+        val to = tabBounds("关闭 $toTitle")
+        val x1 = from.exactCenterX()
+        val y = from.exactCenterY()
+        val x2 = to.exactCenterX()
+        val downTime = android.os.SystemClock.uptimeMillis()
+        fun inject(action: Int, x: Float) {
+            val pointer = MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_FINGER }
+            val coords = MotionEvent.PointerCoords().apply { this.x = x; this.y = y; pressure = 1f; size = 1f }
+            val event = MotionEvent.obtain(downTime, android.os.SystemClock.uptimeMillis(), action, 1, arrayOf(pointer), arrayOf(coords), 0, 0,
+                1f, 1f, 0, 0, android.view.InputDevice.SOURCE_TOUCHSCREEN, 0)
+            sendPointerSync(event)
+            event.recycle()
+        }
+        inject(MotionEvent.ACTION_DOWN, x1)
+        Thread.sleep(ViewConfiguration.getLongPressTimeout().toLong() + 150)
+        for (step in 1..10) {
+            inject(MotionEvent.ACTION_MOVE, x1 + (x2 - x1) * step / 10f)
+            Thread.sleep(20)
+        }
+        inject(MotionEvent.ACTION_UP, x2)
+        waitForIdleSync()
+    }
+
+    /** No live PTY, preferences, model prompts or tool approvals are touched. */
+    private fun verifyInputConnection() {
+        val result = Bundle()
+        try {
+            runOnMainSync {
+                val sent = mutableListOf<String>()
+                val view = TerminalWebView(targetContext) { sent += it }
+                try {
+                    view.terminalReady = true
+                    val connection = view.onCreateInputConnection(EditorInfo())!!
+                    connection.commitText("\n", 1)
+                    check(sent == listOf("\r")) { "IME newline did not become Enter" }
+                    sent.clear()
+                    connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+                    connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+                    check(sent == listOf("\r")) { "IME key event lost or duplicated Enter" }
+                    sent.clear()
+                    connection.commitText("first\nsecond\n", 1)
+                    check(sent == listOf("first\nsecond\n")) { "Multiline paste was changed" }
+                    sent.clear()
+                    connection.performEditorAction(EditorInfo.IME_ACTION_DONE)
+                    check(sent == listOf("\r")) { "Editor action did not submit Enter" }
+                    sent.clear()
+                    view.inputEnabled = false
+                    connection.commitText("\n", 1)
+                    connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+                    connection.performEditorAction(EditorInfo.IME_ACTION_DONE)
+                    check(sent.isEmpty()) { "Read-only terminal accepted Enter" }
+                    check(view.onCreateInputConnection(EditorInfo()) == null)
+                } finally { view.destroy() }
+            }
+            result.putString("result", "IME Enter, key event, editor action, multiline paste and read-only input passed")
+            finish(Activity.RESULT_OK, result)
+        } catch (cause: Throwable) {
+            result.putString("error", cause.message ?: cause.javaClass.simpleName)
+            finish(Activity.RESULT_CANCELED, result)
+        }
+    }
+
     private fun findWebView(view: View): WebView? {
         if (view is WebView) return view
         if (view is ViewGroup) for (i in 0 until view.childCount) findWebView(view.getChildAt(i))?.let { return it }

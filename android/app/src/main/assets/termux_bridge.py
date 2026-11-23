@@ -262,10 +262,12 @@ if (!(Select-String -LiteralPath $file -SimpleMatch -Pattern $key -Quiet)) {
 
 
 def agent_permission_args(client, mode):
-    if mode not in {"restricted", "standard", "full"}:
+    if mode not in {"restricted", "standard", "full", "dangerous"}:
         raise ValueError("权限模式无效，请重新设置")
     if client == "claude":
+        if mode == "dangerous": return ["--dangerously-skip-permissions"]
         return ["--permission-mode", "bypassPermissions" if mode == "full" else "default"]
+    if mode == "dangerous": return ["--dangerously-bypass-approvals-and-sandbox"]
     return ["--sandbox", "danger-full-access" if mode == "full" else "workspace-write",
             "--ask-for-approval", "on-request", "-c",
             "sandbox_workspace_write.network_access=" + ("false" if mode == "restricted" else "true")]
@@ -620,7 +622,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.command == "GET" and uri.path == "/health":
                 return self.reply(200, {"service": "agent-workbench-termux", "version": self.server.version,
-                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "remote-workbench", "remote-connection-state", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions", "tool-bridge"]})
+                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "ssh-address-verification", "remote-workbench", "remote-connection-state", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions", "tool-bridge"]})
             if self.command == "GET" and uri.path == "/usage":
                 return self.reply(200, usage_snapshot())
             if self.command == "GET" and uri.path == "/tools":
@@ -650,18 +652,29 @@ class Handler(BaseHTTPRequestHandler):
                 if not 0 <= length <= limit: return self.reply(413, {"error": "请求过大"})
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 if not isinstance(payload, dict): raise ValueError("请求格式错误")
+            if self.command == "POST" and uri.path == "/remote/verify-address":
+                from remote_workbench import verify_ssh_address
+                return self.reply(200, verify_ssh_address(payload.get("ssh", {}), payload.get("host"), payload.get("port", 22)))
             if self.command == "POST" and uri.path == "/remote/connect":
-                from remote_workbench import RemoteConnection, remote_command
+                from remote_workbench import RemoteConnection, remote_command, verify_ssh_address
                 target = payload.get("ssh", {})
                 target_id = str(uuid.UUID(str(target.get("id"))))
+                verified = verify_ssh_address(target, target.get("host"), target.get("port", 22))
+                if not verified.get("verified"):
+                    raise ValueError("仅支持局域网内身份已核对的电脑，请确认两端连接同一 Wi-Fi 后重连")
+                target = {**target, "host": verified["host"]}
                 # Apply the exact same host/user validation as the ordinary SSH launcher.
                 launch_spec({"client": "ssh", "ssh": target}, bundle=self.server.bundle)
                 with self.server.guard:
                     previous = self.server.remotes.get(target_id)
-                    if previous and previous.exit_code is None and not previous.ready:
+                    # One computer gets one login tunnel.  Reuse a ready tunnel
+                    # as well as a password prompt; replacing it created several
+                    # identical "电脑登录" tabs on the tablet.
+                    if previous and previous.exit_code is None and not previous.stopped and not payload.get("replace_connection"):
                         return self.reply(200, {"id": previous.id})
-                    if previous and previous.exit_code is None:
+                    if previous:
                         previous.stop()
+                        self.server.sessions.pop(previous.id, None)
                     marker = "WB1:" + uuid.uuid4().hex + ":"
                     env = os.environ.copy()
                     env["PATH"] = str(Path.home().parent / "usr/bin") + ":" + env.get("PATH", "")
@@ -686,6 +699,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, {"connected": bool(connection and connection.ready),
                                             "error": connection.error if connection else "", "schema": 1,
                                             "login_id": connection.id if connection else "",
+                                            "retryable": bool(connection and connection.retryable),
                                             "phase": "idle" if connection is None else "ready" if connection.ready else
                                                      "failed" if connection.exit_code is not None else "connecting"})
                 if connection is None: raise HistoryUnavailable("请先连接电脑工作台")
@@ -748,9 +762,16 @@ class Handler(BaseHTTPRequestHandler):
             if self.command == "GET" and not match.group(2):
                 return self.reply(200, session.snapshot(int(parse_qs(uri.query).get("after", [0])[0])))
             if self.command == "DELETE" and not match.group(2):
+                with self.server.guard:
+                    for target_id, connection in list(self.server.remotes.items()):
+                        if connection is session:
+                            self.server.remotes.pop(target_id, None)
+                    if hasattr(session, "owner"):
+                        self.server.sessions.pop(session.id, None)
                 session.stop()
                 if hasattr(session, "remote_id"):
-                    self.server.sessions.pop(session.id, None)
+                    with self.server.guard:
+                        self.server.sessions.pop(session.id, None)
                 return self.reply(200, {"stopping": True})
             if self.command == "POST" and match.group(2) == "/input":
                 data = base64.b64decode(payload.get("data", ""), validate=True)

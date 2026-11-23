@@ -26,7 +26,7 @@ jobs:
       - name: Test backend and updater
         run: |
           python -m unittest discover -s tests
-          swift test
+          swift test -c release
       - name: Build universal macOS app
         run: ./build-app.command
       - name: Package macOS client

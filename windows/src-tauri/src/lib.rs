@@ -1,5 +1,6 @@
 mod history;
 mod remote;
+mod discovery;
 mod attachments;
 mod pricing;
 #[cfg(windows)]
@@ -33,6 +34,8 @@ const POWERSHELL_EXIT_CODE: &str =
 #[serde(default)]
 struct AppConfig {
     remote_enabled: bool,
+    #[serde(default = "default_ssh_port")]
+    remote_ssh_port: u16,
     remote_permissions: HashMap<String, String>,
     profiles: Vec<KeyProfile>,
     selected_profile_id: String,
@@ -41,6 +44,8 @@ struct AppConfig {
     workspace: String,
     pricing_sources: HashMap<String, PricingSource>,
 }
+
+fn default_ssh_port() -> u16 { 22 }
 
 #[derive(Clone, Serialize, Deserialize)]
 struct PricingSource {
@@ -103,13 +108,16 @@ enum AgentPermission {
     Restricted,
     Standard,
     Full,
+    Dangerous,
 }
 
 impl AgentPermission {
     fn args(self, client: &str) -> Vec<String> {
         if client == "claude" {
+            if matches!(self, Self::Dangerous) { return vec!["--dangerously-skip-permissions".into()]; }
             return vec!["--permission-mode".into(), if matches!(self, Self::Full) { "bypassPermissions" } else { "default" }.into()];
         }
+        if matches!(self, Self::Dangerous) { return vec!["--dangerously-bypass-approvals-and-sandbox".into()]; }
         vec![
             "--sandbox".into(), if matches!(self, Self::Full) { "danger-full-access" } else { "workspace-write" }.into(),
             "--ask-for-approval".into(), "on-request".into(),
@@ -1133,6 +1141,7 @@ pub fn run() {
             start_global_terminal,
             ssh_connection_info,
             remote::set_remote_enabled,
+            remote::set_remote_discovery_port,
             remote::sync_remote_permissions,
             list_history,
             list_all_history,

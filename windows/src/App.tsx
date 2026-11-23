@@ -33,6 +33,7 @@ import { SSHConnection } from "./SSHConnection";
 import { AgentPermissionDialog, permissionLabel, permissionStorageKey, readAgentPermissions } from "./AgentPermissions";
 import { ToolBridge } from "./ToolBridge";
 import { installImagePaste } from "./TerminalClipboard";
+import { reorderSessions } from "./SessionOrder";
 import type { AgentPermissions } from "./AgentPermissions";
 import type { UsageSnapshot } from "./UsagePanel";
 
@@ -139,6 +140,9 @@ function App() {
   const [historyError, setHistoryError] = useState("");
   const [selectedHistory, setSelectedHistory] = useState<LocalConversation | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const sessionsRef = useRef<Session[]>([]);
+  const [draggedSessionId, setDraggedSessionId] = useState("");
+  const [dropTargetId, setDropTargetId] = useState("");
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const currentSessionId = useRef("");
   const [isStarting, setIsStarting] = useState(false);
@@ -161,6 +165,7 @@ function App() {
     () => config.profiles.find((profile) => profile.id === config.selected_profile_id),
     [config.profiles, config.selected_profile_id],
   );
+  sessionsRef.current = sessions;
 
   const matchingHistory = history.filter((entry) => [entry.title, entry.preview ?? "", entry.workspace, entry.client, entry.model, entry.profile_name].some(
     (value) => value.toLocaleLowerCase().includes(historyQuery.trim().toLocaleLowerCase()),
@@ -563,8 +568,12 @@ function App() {
         if (isTauri() && session.exitCode === null) {
           await invoke("stop_terminal", { sessionId: session.id });
         }
+        const closingWasSelected = currentSessionId.current === session.id;
         setSessions((current) => current.filter((item) => item.id !== session.id));
-        if (currentSessionId.current === session.id) selectSession("");
+        if (closingWasSelected) {
+          const remaining = sessionsRef.current.filter((item) => item.id !== session.id);
+          selectSession(remaining[remaining.length - 1]?.id ?? "");
+        }
         pendingOutput.current.delete(session.id);
         return true;
       } catch (cause) {
@@ -791,7 +800,24 @@ function App() {
             {sessions.length > 0 && (
               <div className="terminal-tabs" role="tablist">
                 {sessions.map((session) => (
-                  <div key={session.id} className={`terminal-tab ${session.id === selectedSessionId ? "active" : ""}`}>
+                  <div key={session.id} draggable
+                    className={`terminal-tab ${session.id === selectedSessionId ? "active" : ""} ${draggedSessionId === session.id ? "dragging" : ""} ${dropTargetId === session.id ? "drop-target" : ""}`}
+                    onDragStart={(event) => {
+                      setDraggedSessionId(session.id);
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", session.id);
+                    }}
+                    onDragOver={(event) => { event.preventDefault(); setDropTargetId(session.id); }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      const movingId = event.dataTransfer.getData("text/plain") || draggedSessionId;
+                      const bounds = event.currentTarget.getBoundingClientRect();
+                      const afterTarget = event.clientX >= bounds.left + bounds.width / 2;
+                      setSessions((current) => reorderSessions(current, movingId, session.id, afterTarget));
+                      setDraggedSessionId("");
+                      setDropTargetId("");
+                    }}
+                    onDragEnd={() => { setDraggedSessionId(""); setDropTargetId(""); }}>
                     <button className="terminal-tab-select" role="tab" aria-selected={session.id === selectedSessionId} onClick={() => selectSession(session.id)}>
                       <span className={`tab-state ${session.exitCode === null ? "running" : "ended"}`} />
                       <span className="tab-label" title={`${session.title}\n${session.workspace}\n配置：${session.profileName}`}>

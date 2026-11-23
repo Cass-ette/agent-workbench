@@ -19,6 +19,22 @@ import uuid
 MAX_FRAME = 3 * 1024 * 1024
 
 
+def connection_failure(output):
+    """Return a fixed message; never expose an SSH/child-process command as a toast."""
+    message = output.decode("utf-8", errors="replace").lower()
+    if "remote host identification has changed" in message or "host key verification failed" in message:
+        return "电脑身份校验失败，请在电脑重新复制连接码；不会跳过主机身份校验"
+    if "permission denied" in message or "authentication failed" in message:
+        return "SSH 登录未通过，请核对电脑账号和密码后重试"
+    if "connection refused" in message:
+        return "电脑拒绝了 SSH 连接，请在电脑开启远程登录/OpenSSH，并核对端口"
+    if any(value in message for value in ("no route to host", "network is unreachable", "connection timed out", "operation timed out")):
+        return "无法到达电脑，请检查两端网络和电脑地址；换 Wi-Fi 后请重新复制连接码"
+    if "could not resolve hostname" in message:
+        return "找不到电脑地址，请检查连接码中的域名或重新复制连接码"
+    return "连接未完成，请查看保留的电脑登录终端；电脑需更新并启用手机接续"
+
+
 def remote_command(platform, marker):
     if platform == "macos":
         script = r'''
@@ -163,9 +179,11 @@ class RemoteConnection:
                                 if buffered.endswith(self.marker[:n])), default=0)
                     self._display(buffered[:-keep] if keep else buffered)
                     buffered = buffered[-keep:] if keep else b""
-        except (OSError, ValueError, TypeError):
+        except OSError:
+            self.stop()
+        except (ValueError, TypeError):
             if not self.error:
-                self.error = "SSH 连接已断开；电脑任务不受影响，可重新连接"
+                self.error = "电脑接续协议响应无效，请更新两端工作台后重试"
             self.stop()
         finally:
             self.ready = False
@@ -173,6 +191,8 @@ class RemoteConnection:
                 self.exit_code = self.process.wait()
             except ChildProcessError:
                 self.exit_code = 1
+            if not self.error:
+                self.error = connection_failure(bytes(self.output))
             try:
                 os.close(self.fd)
             except OSError:
@@ -220,7 +240,8 @@ class RemoteConnection:
             start = max(after, self.base)
             data = bytes(self.output[start-self.base:start-self.base+65536])
             return {"id": self.id, "data": base64.b64encode(data).decode(), "after": start + len(data),
-                    "exit_code": self.exit_code, "truncated": after < self.base}
+                    "exit_code": self.exit_code, "truncated": after < self.base, "error": self.error,
+                    "ready": self.ready, "phase": "ready" if self.ready else "failed" if self.exit_code is not None else "connecting"}
 
     def stop(self):
         try:

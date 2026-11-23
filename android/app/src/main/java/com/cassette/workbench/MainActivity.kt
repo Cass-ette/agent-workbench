@@ -47,6 +47,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -118,7 +121,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
             activity?.setImmersiveFullscreen(fullscreen && page == 0)
             onDispose { activity?.setImmersiveFullscreen(false) }
         }
-        val terminalInput = page == 0 && model.sessions.isNotEmpty() &&
+        val terminalInput = page == 0 && model.terminalInputSession.isNotBlank() &&
             WindowInsets.ime.getBottom(LocalDensity.current) > 0
         BackHandler(fullscreen) { fullscreen = false }
         Scaffold(
@@ -180,7 +183,9 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
     var splitEnabled by rememberSaveable { mutableStateOf(false) }
     var splitOtherSessionId by rememberSaveable { mutableStateOf("") }
     val tablet = LocalConfiguration.current.smallestScreenWidthDp >= 600
+    val taskScroll = rememberScrollState()
     LaunchedEffect(sessions.size) { if (sessions.isNotEmpty()) expanded = false }
+    LaunchedEffect(model.terminalRevealVersion) { if (model.terminalRevealVersion > 0) expanded = false }
     LaunchedEffect(sessions.map { it.id }, model.selectedSession) {
         val available = sessions.map { it.id }.filter { it != model.selectedSession }
         if (splitOtherSessionId !in available) splitOtherSessionId = available.firstOrNull().orEmpty()
@@ -200,7 +205,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                 }, enabled = model.connected && !model.busy) { Text("恢复最近对话") }
                 TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "收起配置" else "配置任务") }
             }
-            if (expanded) Column(Modifier.fillMaxWidth().heightIn(max = 370.dp).verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
+            if (expanded) Column(Modifier.fillMaxWidth().heightIn(max = 370.dp).verticalScroll(taskScroll).padding(horizontal = 18.dp)) {
                 ChoiceField("执行位置", model.executionName, Modifier.fillMaxWidth(),
                     (if (model.localAgentSupported) listOf("local-debian" to "手机本地 · Debian") else listOf("local-shell" to "手机本地 · Shell")) +
                         (if (model.vmSupported) listOf("local-vm" to "手机本地 · Linux VM") else emptyList()) +
@@ -231,7 +236,8 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                     Text(model.options.model.ifBlank { "选择模型或手动填写 ID" }, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     Text("⌄")
                 }
-                OutlinedTextField(value = model.options.workspace, onValueChange = { model.updateOptions(model.options.copy(workspace = it)) }, label = { Text("手机项目目录") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = model.options.workspace, onValueChange = { model.updateOptions(model.options.copy(workspace = it)) }, label = { Text("手机项目目录") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) model.terminalFocusChanged("", true) })
                 if (model.options.client == "codex" && model.runtimeEnvironment == "debian") Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = model.options.codexCompatibility, onCheckedChange = { enabled ->
                         if (enabled) confirmCompatibility = true else model.updateOptions(model.options.copy(codexCompatibility = false))
@@ -421,21 +427,25 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
         val path = parts(row)
         if (path.take(prefix.size) == prefix) path.getOrNull(prefix.size) else null
     }.distinct().sorted()
-    AlertDialog(onDismissRequest = onDismiss, title = {
-        Column {
-            Text(if (allProjects) "恢复最近对话" else "从当前项目的历史创建分支")
-            Text(if (allProjects) "点击对话，用原配置恢复" else model.historyWorkspace,
-                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }, text = {
-        Column {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(shape = RoundedCornerShape(20.dp), tonalElevation = 6.dp,
+            modifier = Modifier.widthIn(max = 960.dp).fillMaxWidth(0.94f).fillMaxHeight(0.85f)) {
+        Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(if (allProjects) "恢复最近对话" else "从当前项目的历史创建分支", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                TextButton(onClick = { model.refreshHistory(allProjects) }, enabled = !model.historyLoading) { Text("刷新") }
+                TextButton(onClick = onDismiss) { Text("关闭") }
+            }
+            Text((if (model.localExecution) "手机本地" else "电脑 · ${model.executionName}") + " · " +
+                if (allProjects) "选择对话后用原配置恢复" else "${model.historyWorkspace}\n分支使用当前选择的配置和模型",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (allProjects) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(selected = prefix == null, onClick = { directory = null }, label = { Text("最近") })
                 FilterChip(selected = prefix != null, onClick = { directory = emptyList() }, label = { Text("按目录") })
             }
             OutlinedTextField(query, { query = it; if (prefix != null) directory = emptyList() },
-                label = { Text("搜索标题、模型或项目") }, singleLine = true)
+                label = { Text("搜索标题、内容、模型或项目") }, singleLine = true,
+                modifier = Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) model.terminalFocusChanged("", true) })
             if (prefix != null && prefix.isNotEmpty()) {
                 TextButton(onClick = { directory = prefix.dropLast(1) }) { Text("‹ 上一级") }
                 Text(prefix.joinToString("/", prefix = "/"), maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -445,7 +455,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                 model.historyLoading -> LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 10.dp))
                 model.historyError.isNotEmpty() -> Text(model.historyError, Modifier.padding(top = 10.dp))
                 rows.isEmpty() && folders.isEmpty() -> Text(if (model.localExecution) "暂无匹配的本地对话" else "暂无匹配的电脑对话", Modifier.padding(top = 10.dp))
-                else -> LazyColumn(Modifier.heightIn(max = 300.dp)) {
+                else -> LazyColumn(Modifier.fillMaxWidth().weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (prefix != null) items(folders, key = { "folder:$it" }) { folder ->
                         TextButton(onClick = { directory = prefix + folder }, modifier = Modifier.fillMaxWidth()) {
                             Text(folder, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -454,14 +464,15 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                     }
                     items(rows, key = { it.reference }) { row ->
                         val profile = if (model.localExecution) model.profiles.firstOrNull { it.id == row.profileId }?.name ?: "来源配置未知"
-                            else model.remoteWorkbench?.profiles?.firstOrNull { it.id == row.profileId }?.name ?: "电脑原配置"
-                        Column(Modifier.fillMaxWidth().clickable { onSelect(row) }.padding(vertical = 10.dp)) {
-                            Text(row.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (row.preview.isNotBlank()) Text(row.preview, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.bodySmall)
+                            else if (row.profileId == "global") "系统 CLI" else model.remoteWorkbench?.profiles?.firstOrNull { it.id == row.profileId }?.name ?: "电脑原配置"
+                        Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
+                            .clickable { onSelect(row) }.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(row.displayTitle, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                            if (row.preview.isNotBlank() && row.preview != row.displayTitle) Text(row.preview, maxLines = 3, overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text("${if (row.client == "codex") "Codex" else "Claude"} · ${row.model.ifBlank { "模型未知" }} · $profile",
                                 style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(row.workspace, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(row.workspace, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             Text(java.text.DateFormat.getDateTimeInstance().format(java.util.Date(row.updatedAt * 1000)),
                                 style = MaterialTheme.typography.labelSmall)
                         }
@@ -469,7 +480,8 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                 }
             }
         }
-    }, confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } })
+        }
+    }
 }
 
 @Composable internal fun ChoiceField(label: String, value: String, modifier: Modifier = Modifier, choices: List<Pair<String, String>>, choose: (String) -> Unit, empty: () -> Unit = {}) {
@@ -824,6 +836,7 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
     val handler = remember { Handler(Looper.getMainLooper()) }
     val browser = remember {
         TerminalWebView(context) { model.send(session.id, it) }.apply {
+            setOnFocusChangeListener { _, focused -> model.terminalFocusChanged(session.id, focused) }
             setBackgroundColor(AndroidColor.rgb(22, 24, 31))
             settings.javaScriptEnabled = true
             settings.allowFileAccess = false; settings.allowContentAccess = false
@@ -849,7 +862,11 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
             loadUrl("https://workbench.local/terminal.html")
         }
     }
-    DisposableEffect(browser) { onDispose { browser.removeJavascriptInterface("Workbench"); browser.destroy() } }
+    DisposableEffect(browser) { onDispose {
+        model.terminalFocusChanged(session.id, false)
+        browser.setOnFocusChangeListener(null)
+        browser.removeJavascriptInterface("Workbench"); browser.destroy()
+    } }
     LaunchedEffect(ready) {
         if (ready) {
             browser.requestFocus()

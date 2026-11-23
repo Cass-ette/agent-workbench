@@ -32,6 +32,27 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class RemoteWorkbenchTests(unittest.TestCase):
+    def test_failed_connection_keeps_output_and_a_safe_reason(self):
+        connection = R.RemoteConnection.open("printf '%s\\n' 'ssh: connect to host old-address port 22: Connection refused'; exit 255", "phone", "WB1:test:")
+        deadline = time.monotonic() + 5
+        while connection.exit_code is None and time.monotonic() < deadline:
+            time.sleep(.02)
+        try:
+            state = connection.snapshot(0)
+            self.assertEqual(state["phase"], "failed")
+            self.assertEqual(state["exit_code"], 255)
+            self.assertIn("Connection refused", base64.b64decode(state["data"]).decode())
+            self.assertIn("开启远程登录", state["error"])
+            self.assertNotIn("old-address", state["error"])
+        finally:
+            connection.stop()
+
+    def test_connection_failure_never_copies_arbitrary_command_to_message(self):
+        self.assertIn("重新复制连接码", R.connection_failure(b"ssh: No route to host"))
+        self.assertIn("账号和密码", R.connection_failure(b"Permission denied (publickey,password)."))
+        self.assertIn("不会跳过", R.connection_failure(b"Host key verification failed."))
+        self.assertNotIn("private-token", R.connection_failure(b"failed command secret=private-token"))
+
     def test_attachment_chunk_crosses_phone_bridge_request_limit(self):
         bridge_spec = importlib.util.spec_from_file_location("remote_test_bridge", MODULE.with_name("termux_bridge.py"))
         bridge = importlib.util.module_from_spec(bridge_spec)

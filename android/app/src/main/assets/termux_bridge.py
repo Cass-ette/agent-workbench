@@ -197,7 +197,7 @@ def paired_ssh_arguments(executable, home, env, target, host, user, port, remote
     args = [executable, "-F", "/dev/null", "-tt", "-o", "HostKeyAlgorithms=ssh-ed25519",
             "-o", "StrictHostKeyChecking=yes", "-o", "GlobalKnownHostsFile=/dev/null",
             "-o", "UserKnownHostsFile=" + str(known_hosts), "-o", "UpdateHostKeys=no", "-o", "ServerAliveInterval=30",
-            "-o", "ServerAliveCountMax=3", "-p", str(port), "-l", user]
+            "-o", "ServerAliveCountMax=3", "-o", "ConnectTimeout=10", "-o", "ConnectionAttempts=1", "-p", str(port), "-l", user]
     password_args = args + ["-o", "PubkeyAuthentication=no", host]
     def launch(arguments):
         if remote_command is None:
@@ -620,7 +620,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.command == "GET" and uri.path == "/health":
                 return self.reply(200, {"service": "agent-workbench-termux", "version": self.server.version,
-                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "remote-workbench", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions", "tool-bridge"]})
+                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "remote-workbench", "remote-connection-state", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions", "tool-bridge"]})
             if self.command == "GET" and uri.path == "/usage":
                 return self.reply(200, usage_snapshot())
             if self.command == "GET" and uri.path == "/tools":
@@ -658,6 +658,8 @@ class Handler(BaseHTTPRequestHandler):
                 launch_spec({"client": "ssh", "ssh": target}, bundle=self.server.bundle)
                 with self.server.guard:
                     previous = self.server.remotes.get(target_id)
+                    if previous and previous.exit_code is None and not previous.ready:
+                        return self.reply(200, {"id": previous.id})
                     if previous and previous.exit_code is None:
                         previous.stop()
                     marker = "WB1:" + uuid.uuid4().hex + ":"
@@ -682,7 +684,10 @@ class Handler(BaseHTTPRequestHandler):
                 connection = self.server.remotes.get(target_id)
                 if self.command == "GET":
                     return self.reply(200, {"connected": bool(connection and connection.ready),
-                                            "error": connection.error if connection else "", "schema": 1})
+                                            "error": connection.error if connection else "", "schema": 1,
+                                            "login_id": connection.id if connection else "",
+                                            "phase": "idle" if connection is None else "ready" if connection.ready else
+                                                     "failed" if connection.exit_code is not None else "connecting"})
                 if connection is None: raise HistoryUnavailable("请先连接电脑工作台")
                 if self.command == "POST" and remote_match.group(2) == "/rpc":
                     return self.reply(200, connection.call(payload))

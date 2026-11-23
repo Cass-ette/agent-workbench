@@ -35,7 +35,9 @@ data class RemoteWorkbench(
     val remote = model.remoteWorkbench
     Text("项目、配置、历史和 Agent 均在这台电脑。断开手机不结束电脑任务。", style = MaterialTheme.typography.bodySmall)
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = model::connectRemote, enabled = model.connected && !model.busy) { Text(if (remote == null) "连接电脑工作台" else "重新连接") }
+        Button(onClick = model::connectRemote, enabled = !model.busy) {
+            Text(if (model.remoteConnecting) "打开电脑登录终端" else if (remote == null) "连接电脑工作台" else "重新连接")
+        }
         TextButton(onClick = { model.launch(shell = true) }, enabled = model.connected && !model.busy) { Text("普通 SSH") }
         if (remote != null) TextButton(onClick = { model.refreshRemote() }) { Text("刷新") }
     }

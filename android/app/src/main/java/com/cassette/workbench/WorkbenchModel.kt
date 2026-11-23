@@ -52,6 +52,8 @@ data class TerminalSession(
 class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     var remoteWorkbench by mutableStateOf<RemoteWorkbench?>(null); private set
     var remoteMessage by mutableStateOf(""); private set
+    var remoteConnecting by mutableStateOf(false); private set
+    private var remoteLoginId = ""
     var remoteProfile by mutableStateOf("")
     var remoteModel by mutableStateOf("")
     var remoteClient by mutableStateOf("codex")
@@ -71,10 +73,14 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         .put("host_key", target.hostKey).put("remember", target.remember)
 
     fun connectRemote() {
-        val target = sshTarget ?: return
-        if (busy) return
+        val target = sshTarget ?: run { error = "请先在运行环境中添加并选择电脑"; return }
+        if (busy) { notice = "正在准备连接，请等待当前操作完成"; return }
+        if (!connected) { connectInternal(false) { connectRemote() }; return }
+        if (remoteConnecting && remoteLoginId.isNotEmpty() && sessions.any { it.id == remoteLoginId && it.exitCode == null }) {
+            selectedSession = remoteLoginId; notice = "电脑登录终端已打开，请在终端完成登录"; return
+        }
         if (target.platform.isBlank()) { error = "手动 SSH 主机请先使用普通 SSH；工作台接续需要电脑生成的连接码"; return }
-        busy = true; error = ""
+        busy = true; error = ""; remoteMessage = "正在准备 ${target.name} 的 SSH 登录…"
         worker.execute {
             try {
                 if (!termux.supportsRuntime()) {
@@ -86,7 +92,8 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                     if (sshTarget?.id != target.id) return@post
                     val id = value.getString("id")
                     if (sessions.none { it.id == id }) sessions = sessions + TerminalSession(id, "电脑登录 · ${target.name}", target.destination, "ssh-login", bridgePort = termux.currentPort)
-                    selectedSession = id; saveSessions(); remoteMessage = "请在终端完成 SSH 登录，然后返回配置任务"; refreshRemote()
+                    remoteConnecting = true; remoteLoginId = id
+                    selectedSession = id; saveSessions(); remoteMessage = "正在连接电脑；如需密码，请在下方电脑登录终端输入"; refreshRemote()
                 }
             } catch (cause: Exception) { main.post { busy = false; error = safeError(cause) } }
         }
@@ -107,9 +114,13 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                         remoteModels = emptyList(); selectedHistory = null
                     }
                     remoteTarget = target.id; remoteWorkbench = result
-                    remoteMessage = if (result == null) status.optString("error").ifBlank { "尚未连接电脑工作台" } else "已连接 ${target.name} · ${result.platform}"
+                    remoteLoginId = status.optString("login_id")
+                    remoteConnecting = status.optString("phase") == "connecting"
+                    remoteMessage = if (result == null) status.optString("error").ifBlank {
+                        if (remoteConnecting) "正在连接电脑；请查看下方电脑登录终端，按提示输入密码" else "尚未连接电脑工作台"
+                    } else "已连接 ${target.name} · ${result.platform}"
                 }
-            } catch (cause: Exception) { main.post { if (sshTarget?.id == target.id) { remoteWorkbench = null; remoteMessage = safeError(cause) } } }
+            } catch (cause: Exception) { main.post { if (sshTarget?.id == target.id) { remoteWorkbench = null; remoteConnecting = false; remoteMessage = safeError(cause) } } }
             finally { main.post { remoteRefreshing = false } }
         }
     }
@@ -608,6 +619,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
 
     fun selectExecutionLocation(value: String) {
         remoteWorkbench = null; remoteMessage = ""; remoteModels = emptyList(); selectedHistory = null
+        remoteConnecting = false; remoteLoginId = ""
         when (value) {
             "local-debian" -> { updateOptions(options.copy(executionId = "local")); selectRuntimeEnvironment("debian") }
             "local-shell" -> { updateOptions(options.copy(executionId = "local")); selectRuntimeEnvironment("debian") }
@@ -876,12 +888,18 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                                         val encoded = data.optString("data")
                                         val next = if (encoded.isBlank()) current.output else (current.output + OutputChunk(data.getLong("after"), encoded, current.restoredOutputPending || current.remoteTarget.isNotEmpty())).takeLast(80)
                                         current.copy(after = data.getLong("after"), output = next, restoredOutputPending = false,
+                                            error = if (current.client == "ssh-login") data.optString("error") else current.error,
                                             canWrite = data.optBoolean("can_write", true), exitCode = if (data.isNull("exit_code")) null else data.getInt("exit_code"))
                                     }
                                 }
                                 if (!data.isNull("exit_code")) {
-                                    sessions = sessions.filterNot { it.id == session.id }
-                                    if (selectedSession == session.id) selectedSession = sessions.lastOrNull()?.id.orEmpty()
+                                    if (session.client == "ssh-login") {
+                                        error = data.optString("error").ifBlank { "电脑连接已结束，请查看保留的登录终端并重试" }
+                                        remoteConnecting = false
+                                    } else {
+                                        sessions = sessions.filterNot { it.id == session.id }
+                                        if (selectedSession == session.id) selectedSession = sessions.lastOrNull()?.id.orEmpty()
+                                    }
                                     saveSessions()
                                 }
                                 probeFailures = 0

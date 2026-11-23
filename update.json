@@ -1,34 +1,34 @@
 {
   "schema": 1,
-  "notes": "测试版（Pre-release），可下载安装，尚未经维护者确认为正式版。\n\n本次为三端测试版，可以下载安装。覆盖升级保留配置、Key 与对话历史。\n\n- 修复部分 Android 设备无法启动 Termux 桥接、界面显示大段红色错误的问题。启动文件分段传输，不再受单个命令参数大小限制；准备失败时显示简短的重试提示。\n- 修复 Mac 模型列表读取失败后无法继续选择模型或新建会话的问题。保留当前配置上次的模型和选择，按 Key 配置、网关分别缓存；空列表也能打开选择窗口查看失败原因并刷新。无可用历史选择时提示切换配置，不借用其他网关的模型。终端「＋」与顶部启动按钮使用相同条件。\n- Mac / Windows 补上微信等截图工具的剪贴板图片粘贴：保存为工作台私有 PNG 后交给当前对话，不自动提交。普通文本粘贴保持原行为；图片处理中切换或关闭标签会取消插入，避免串到其他对话。需要支持图片的模型和网关。\n- 三端增加「工具与插件」入口，可分别接入工作台私有 MCP、Skills 和 Claude 本地插件。导入组件默认停用，确认保存后供后续新建、恢复和分支会话加载。外部客户端配置不变。Claude 最小模式的技能调用命令显示在列表中，完整插件 hooks 等能力仍受模式限制。\n- 工具组件完整复制后才启用目标副本；Windows 保存失败保留原配置，拒绝无效超时。Claude 的环境变量凭据在 CLI 启动时读取，不展开保存到配置文件。Android 重连桥接期间锁定客户端和运行环境，失败会结束等待并显示原因。\n- Mac / Windows 可启用主屏幕读取 MCP，供 Codex 和 Claude 调用。需要系统授权与支持图片的模型；不控制鼠标键盘。Android 按 Debian / Linux VM 分别配置工具，本机截屏尚未接入。详见工具接入说明。\n- 三端首次启动显示 Codex / Claude 权限设置，并提供常驻入口。Codex 推荐项目内写入、允许联网和按需审批；Claude 推荐标准审批。高权限需明确确认，运行中的终端保持原权限；系统 CLI、SSH 沿用外部设置。\n- 保留启动环境的代理及用户 NO_PROXY 规则，确保本地网关直连。macOS 不再清空 Claude 的代理；Android 向 Debian 传递 Termux 代理配置。权限、工具连接与应用账号授权分别管理。\n- 修复 Windows 关闭终端后 Codex 仍在后台占用对话的问题。恢复仍在运行的原对话会切回已有标签。若标签正在关闭，工作台会等进程退出后再恢复。\n- macOS 左侧调用配置现在可以删除自定义 Key；确认后同时删除该配置的本机 Key 和只读账单 Token，保留历史对话。默认免费配置不能删除；已有终端进程可能暂时仍持有已删除的 Key。\n- 修复 macOS 和 Windows 切换终端标签后拖放可能串到上一个对话的问题。拖进终端的文件路径只会插入当前选中的 Codex 或 Claude 对话。\n- Mac 左侧常驻「检查更新」入口，有更新时显示新版版本号；Windows 右上角继续提供常驻入口，无需在菜单中寻找。\n- macOS、Windows 和 Android 优先读取固定更新清单。GitHub API 仅作为备用，检查失败会显示原因。`0.x.y` 显示为测试版，`1.0.0` 起显示为正式版，两者都可以通过应用下载安装。旧客户端如果仍找不到此次更新，可从本页手动覆盖安装一次。\n- macOS 和 Windows 的左侧「恢复最近对话」可以浏览所有项目的最近对话，也可展开目录树查找。点击对话即用原配置恢复。\n- 右侧「恢复最近对话」只看当前项目与客户端。「从历史创建分支」会用当前选定的配置创建独立会话。桌面启动方式显示为「工作台配置」或「系统 CLI」。\n- Android 的 Debian 支持跨项目查找和在项目内恢复、创建分支。Linux VM 可恢复虚拟机里当前配置的历史。SSH 使用电脑上的历史。\n- Mac 和 Windows 增加「手机连接」。Android 粘贴连接码后可打开 SSH 终端，首次登录时可由应用记住手机。电脑需开启系统 SSH 服务。异地连接可用 Tailscale 或可达的公网地址。\n\nWindows 默认管理员账号使用密码登录。Windows 安装包尚未使用商业代码签名，Android 测试包使用固定开发签名。\n\n\n源码提交：78aff028c5f79ee27a003f3258450debe6cdc9ca",
+  "notes": "测试版（Pre-release），可下载安装，尚未经维护者确认为正式版。\n\n本次为三端测试版，可以下载安装。覆盖升级保留配置、Key 与对话历史。\n\n- 新增手机接续电脑工作台的第一阶段测试功能：电脑「手机连接」启用后，Android 通过 SSH 查看并接续同一运行终端，使用电脑配置/系统 CLI、新建及恢复历史，支持传入 20 MB 内附件。关闭手机会话只断开，结束电脑任务需单独确认。工具设置与系统授权面板暂留在电脑端；真实跨端 SSH、手机后台与网络切换仍待实机验收。详见手机接续说明。\n- 修复部分 Android 设备无法启动 Termux 桥接、界面显示大段红色错误的问题。启动文件分段传输，不再受单个命令参数大小限制；准备失败时显示简短的重试提示。\n- 修复 Mac 模型列表读取失败后无法继续选择模型或新建会话的问题。保留当前配置上次的模型和选择，按 Key 配置、网关分别缓存；空列表也能打开选择窗口查看失败原因并刷新。无可用历史选择时提示切换配置，不借用其他网关的模型。终端「＋」与顶部启动按钮使用相同条件。\n- Mac / Windows 补上微信等截图工具的剪贴板图片粘贴：保存为工作台私有 PNG 后交给当前对话，不自动提交。普通文本粘贴保持原行为；图片处理中切换或关闭标签会取消插入，避免串到其他对话。需要支持图片的模型和网关。\n- 三端增加「工具与插件」入口，可分别接入工作台私有 MCP、Skills 和 Claude 本地插件。导入组件默认停用，确认保存后供后续新建、恢复和分支会话加载。外部客户端配置不变。Claude 最小模式的技能调用命令显示在列表中，完整插件 hooks 等能力仍受模式限制。\n- 工具组件完整复制后才启用目标副本；Windows 保存失败保留原配置，拒绝无效超时。Claude 的环境变量凭据在 CLI 启动时读取，不展开保存到配置文件。Android 重连桥接期间锁定客户端和运行环境，失败会结束等待并显示原因。\n- Mac / Windows 可启用主屏幕读取 MCP，供 Codex 和 Claude 调用。需要系统授权与支持图片的模型；不控制鼠标键盘。Android 按 Debian / Linux VM 分别配置工具，本机截屏尚未接入。详见工具接入说明。\n- 三端首次启动显示 Codex / Claude 权限设置，并提供常驻入口。Codex 推荐项目内写入、允许联网和按需审批；Claude 推荐标准审批。高权限需明确确认，运行中的终端保持原权限；系统 CLI、SSH 沿用外部设置。\n- 保留启动环境的代理及用户 NO_PROXY 规则，确保本地网关直连。macOS 不再清空 Claude 的代理；Android 向 Debian 传递 Termux 代理配置。权限、工具连接与应用账号授权分别管理。\n- 修复 Windows 关闭终端后 Codex 仍在后台占用对话的问题。恢复仍在运行的原对话会切回已有标签。若标签正在关闭，工作台会等进程退出后再恢复。\n- macOS 左侧调用配置现在可以删除自定义 Key；确认后同时删除该配置的本机 Key 和只读账单 Token，保留历史对话。默认免费配置不能删除；已有终端进程可能暂时仍持有已删除的 Key。\n- 修复 macOS 和 Windows 切换终端标签后拖放可能串到上一个对话的问题。拖进终端的文件路径只会插入当前选中的 Codex 或 Claude 对话。\n- Mac 左侧常驻「检查更新」入口，有更新时显示新版版本号；Windows 右上角继续提供常驻入口，无需在菜单中寻找。\n- macOS、Windows 和 Android 优先读取固定更新清单。GitHub API 仅作为备用，检查失败会显示原因。`0.x.y` 显示为测试版，`1.0.0` 起显示为正式版，两者都可以通过应用下载安装。旧客户端如果仍找不到此次更新，可从本页手动覆盖安装一次。\n- macOS 和 Windows 的左侧「恢复最近对话」可以浏览所有项目的最近对话，也可展开目录树查找。点击对话即用原配置恢复。\n- 右侧「恢复最近对话」只看当前项目与客户端。「从历史创建分支」会用当前选定的配置创建独立会话。桌面启动方式显示为「工作台配置」或「系统 CLI」。\n- Android 的 Debian 支持跨项目查找和在项目内恢复、创建分支。Linux VM 可恢复虚拟机里当前配置的历史。SSH 使用电脑上的历史。\n- Mac 和 Windows 增加「手机连接」。Android 粘贴连接码后可打开 SSH 终端，首次登录时可由应用记住手机。电脑需开启系统 SSH 服务。异地连接可用 Tailscale 或可达的公网地址。\n\nWindows 默认管理员账号使用密码登录。Windows 安装包尚未使用商业代码签名，Android 测试包使用固定开发签名。\n\n\n源码提交：9d1df2a64490851a49d1734da0cb419dec73414f",
   "packages": [
     {
       "platform": "macos",
       "arch": "universal",
       "channel": "preview",
-      "version": "0.1.28",
-      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-45047217993-1/Agent-Workbench-macos-universal-0.1.28.zip",
-      "size": 6068986,
-      "sha256": "37dcadccdf38826385727342a162d47ae3e98238bdb2443c33551a5e05e19793"
+      "version": "0.1.30",
+      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-45099344937-1/Agent-Workbench-macos-universal-0.1.30.zip",
+      "size": 6182279,
+      "sha256": "c4c34f572f02b93f3a1dd1f5fe3583afa6bedfe34cebc9d9079a4e8745882097"
     },
     {
       "platform": "windows",
       "arch": "x64",
       "channel": "preview",
-      "version": "0.1.30",
-      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-45047217993-1/Agent-Workbench-windows-x64-0.1.30-setup.exe",
-      "size": 2680384,
-      "sha256": "a38ca405c7d3d28749919b314cdcb50be1827c17c3e28c5609ef01ee3276782c"
+      "version": "0.1.32",
+      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-45099344937-1/Agent-Workbench-windows-x64-0.1.32-setup.exe",
+      "size": 2717927,
+      "sha256": "51d9d67c8a05ed93bf889b5b4e4270506006937b68e6ad38890414836e90fa42"
     },
     {
       "platform": "android",
       "arch": "universal",
       "channel": "preview",
-      "version": "0.1.45",
-      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-45047217993-1/Agent-Workbench-android-universal-0.1.45.apk",
-      "size": 9132967,
-      "sha256": "193dd3b22a18a1673d35264772d88c97116ea62911ee5bbe47816d94118c6333",
-      "build": 47,
+      "version": "0.1.47",
+      "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/workbench-preview-45099344937-1/Agent-Workbench-android-universal-0.1.47.apk",
+      "size": 9172043,
+      "sha256": "65032ddfe7d928e108039b9162f47f9b3ca22fa5e4fbcadf2c90d6635685e15e",
+      "build": 49,
       "signing": "development"
     }
   ]

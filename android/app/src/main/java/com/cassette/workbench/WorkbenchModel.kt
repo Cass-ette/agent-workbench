@@ -22,7 +22,9 @@ data class LocalConversation(
     val preview: String = "",
     val configuredModel: String = model,
     val gateway: String = "",
-)
+) {
+    val displayTitle get() = if (title.trimStart().startsWith("# AGENTS.md instructions")) preview.ifBlank { "未命名对话" } else title
+}
 data class UsageSummary(
     val inputTokens: Long? = null,
     val outputTokens: Long? = null,
@@ -53,6 +55,12 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     var remoteWorkbench by mutableStateOf<RemoteWorkbench?>(null); private set
     var remoteMessage by mutableStateOf(""); private set
     var remoteConnecting by mutableStateOf(false); private set
+    var terminalInputSession by mutableStateOf(""); private set
+    var terminalRevealVersion by mutableStateOf(0); private set
+    fun terminalFocusChanged(id: String, focused: Boolean) {
+        if (focused) terminalInputSession = id
+        else if (terminalInputSession == id) terminalInputSession = ""
+    }
     private var remoteLoginId = ""
     var remoteProfile by mutableStateOf("")
     var remoteModel by mutableStateOf("")
@@ -151,7 +159,11 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         worker.execute {
             try {
                 val value = remoteRequest(target, body)
-                attachRemoteInWorker(target, value.getString("id"))
+                attachRemoteInWorker(target, value.getString("id"), when (action) {
+                    "original", "recent" -> "已用电脑原配置恢复对话"
+                    "fork" -> "已用当前电脑配置创建独立分支"
+                    else -> "已在电脑新建会话"
+                })
                 main.post { selectedHistory = null }
             } catch (cause: Exception) { main.post { error = safeError(cause) } }
             finally { main.post { busy = false; refreshRemote() } }
@@ -168,7 +180,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
             finally { main.post { busy = false } }
         }
     }
-    private fun attachRemoteInWorker(target: String, id: String) {
+    private fun attachRemoteInWorker(target: String, id: String, resultMessage: String = "已接续同一个电脑进程") {
         val row = termux.request("/remote/$target/attach", "POST", JSONObject().put("session_id", id), 70000)
         val session = TerminalSession(row.getString("id"), row.getString("title"), row.getString("workspace"), row.optString("client", "codex"),
             bridgePort = termux.currentPort, remoteTarget = target, remoteId = row.getString("remote_id"))
@@ -176,7 +188,8 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
             val old = sessions.firstOrNull { it.remoteTarget == target && it.remoteId == session.remoteId }
             sessions = sessions.filterNot { it.remoteTarget == target && it.remoteId == session.remoteId } + (old?.copy(id = session.id, canWrite = true) ?: session)
             selectedSession = session.id; saveSessions()
-            notice = "已接续同一个电脑进程；关闭此标签只会断开，结束任务需单独确认"
+            terminalRevealVersion++
+            notice = "$resultMessage · ${session.workspace}；关闭手机标签只会断开"
         }
     }
 

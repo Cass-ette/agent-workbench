@@ -51,7 +51,7 @@ fn content_text(value: &Value) -> String {
 
 fn preview(content: &Value) -> String {
     let mut raw = content_text(content);
-    for tag in ["environment_context", "system-reminder", "local-command-caveat"] {
+    for tag in ["environment_context", "system-reminder", "local-command-caveat", "INSTRUCTIONS", "skills_instructions"] {
         let open = format!("<{tag}>");
         let close = format!("</{tag}>");
         while let Some(start) = raw.find(&open) {
@@ -59,6 +59,8 @@ fn preview(content: &Value) -> String {
             raw.replace_range(start..end, " ");
         }
     }
+    raw = raw.lines().filter(|line| !line.trim().trim_start_matches('#').trim().starts_with("AGENTS.md instructions"))
+        .collect::<Vec<_>>().join("\n");
     let cleaned = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     let lowercase = cleaned.to_ascii_lowercase();
     let normalized = lowercase.trim_matches(|character: char| " .:;()[]".contains(character));
@@ -399,6 +401,13 @@ mod tests {
     use serde_json::json;
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
+
+    #[test]
+    fn instructions_are_not_a_conversation_title() {
+        let prelude = "# AGENTS.md instructions\n<INSTRUCTIONS>Local tool rules</INSTRUCTIONS>\n<environment_context>Settings</environment_context>";
+        assert_eq!(preview(&json!(prelude)), "");
+        assert_eq!(preview(&json!(format!("{prelude}\nOrganize this library"))), "Organize this library");
+    }
 
     #[test]
     fn preview_reads_structured_text_and_removes_injected_context() {

@@ -35,8 +35,9 @@ def _text(value: object) -> str:
 
 
 def _title(value: str) -> str:
-    for tag in ("environment_context", "system-reminder", "local-command-caveat"):
+    for tag in ("environment_context", "system-reminder", "local-command-caveat", "INSTRUCTIONS", "skills_instructions"):
         value = re.sub(rf"<{tag}>.*?</{tag}>", " ", value, flags=re.DOTALL)
+    value = re.sub(r"(?im)^\s*#+\s*AGENTS\.md instructions\s*", "", value)
     cleaned = " ".join(value.replace("\x00", " ").split())
     if cleaned.casefold().strip(" .:;()[]") in {"none", "null", "undefined", "n/a", "untitled"}:
         return ""

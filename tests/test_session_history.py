@@ -9,6 +9,20 @@ import session_history
 
 
 class SessionHistoryTests(unittest.TestCase):
+    def test_instruction_prelude_is_not_a_history_title(self):
+        prelude = "# AGENTS.md instructions\n<INSTRUCTIONS>\nUse the installed tools\n</INSTRUCTIONS>\n<environment_context>local settings</environment_context>"
+        self.assertEqual(session_history._title(prelude), "")
+        self.assertEqual(session_history._title(prelude + "\nFix the project directory field"), "Fix the project directory field")
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            path = home / "sessions/rollout-test-01a1ec86-bf14-70f2-8144-874b179beb72.jsonl"
+            path.parent.mkdir()
+            path.write_text("\n".join(map(json.dumps, [
+                {"type": "session_meta", "payload": {"id": "01a1ec86-bf14-70f2-8144-874b179beb72", "cwd": "/work/project"}},
+                {"type": "response_item", "payload": {"role": "user", "content": prelude}},
+                {"type": "response_item", "payload": {"role": "user", "content": "Organize this library"}},
+            ])))
+            self.assertEqual(session_history.scan_history([(home, "global", "System")], [])[0]["title"], "Organize this library")
     def test_indexes_codex_and_claude_metadata_and_resolves_source_home(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

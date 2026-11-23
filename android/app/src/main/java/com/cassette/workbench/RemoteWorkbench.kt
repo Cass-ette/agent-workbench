@@ -5,6 +5,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.focus.onFocusChanged
 import org.json.JSONObject
 
 data class RemoteProfile(val id: String, val name: String)
@@ -13,6 +14,7 @@ data class RemoteWorkbench(
     val platform: String, val profiles: List<RemoteProfile>, val tasks: List<RemoteTask>,
     val workspace: String, val profile: String, val client: String, val model: String,
     val codexPermission: String, val claudePermission: String,
+    val workspaces: List<String> = emptyList(),
 ) {
     companion object {
         fun parse(value: JSONObject): RemoteWorkbench {
@@ -26,7 +28,8 @@ data class RemoteWorkbench(
                 RemoteTask(row.getString("id"), row.getString("title"), row.getString("workspace"), row.optBoolean("running", true))
             }, value.optString("workspace"), value.optString("profile_id"), value.optString("client", "codex"), value.optString("model"),
                 value.optJSONObject("permissions")?.optString("codex", "unreviewed") ?: "unreviewed",
-                value.optJSONObject("permissions")?.optString("claude", "unreviewed") ?: "unreviewed")
+                value.optJSONObject("permissions")?.optString("claude", "unreviewed") ?: "unreviewed",
+                value.optJSONArray("workspaces").strings())
         }
     }
 }
@@ -55,14 +58,18 @@ data class RemoteWorkbench(
             Modifier.weight(1f), remote.profiles.map { it.id to it.name }, model::selectRemoteProfile)
     }
     if (model.remoteScope == "workbench") {
-        OutlinedTextField(value = model.remoteModel, onValueChange = { model.remoteModel = it }, label = { Text("电脑模型 ID") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+        OutlinedTextField(value = model.remoteModel, onValueChange = { model.remoteModel = it }, label = { Text("电脑模型 ID") },
+            modifier = Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) model.terminalFocusChanged("", true) }, singleLine = true)
         Row {
             TextButton(onClick = model::loadRemoteModels, enabled = !model.busy) { Text("读取电脑模型") }
             if (model.remoteModels.isNotEmpty()) ChoiceField("模型", model.remoteModel, Modifier.weight(1f), model.remoteModels.map { it to it }, { model.remoteModel = it })
         }
         Text("权限沿用电脑已确认设置：" + if (model.remoteClient == "codex") remote.codexPermission else remote.claudePermission, style = MaterialTheme.typography.labelSmall)
     }
-    OutlinedTextField(value = model.remoteWorkspace, onValueChange = { model.remoteWorkspace = it }, label = { Text("电脑项目目录") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+    OutlinedTextField(value = model.remoteWorkspace, onValueChange = { model.remoteWorkspace = it }, label = { Text("电脑项目目录") },
+        modifier = Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) model.terminalFocusChanged("", true) }, singleLine = true)
+    val directories = (remote.workspaces + remote.tasks.map { it.workspace } + remote.workspace).filter(String::isNotBlank).distinct()
+    if (directories.isNotEmpty()) ChoiceField("选择电脑已有项目", model.remoteWorkspace, Modifier.fillMaxWidth(), directories.map { it to it }, { model.remoteWorkspace = it })
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(onClick = { model.launchRemote() }, enabled = !model.busy) { Text("新建会话") }
         TextButton(onClick = { model.launchRemote("recent") }, enabled = !model.busy) { Text("恢复最近对话") }

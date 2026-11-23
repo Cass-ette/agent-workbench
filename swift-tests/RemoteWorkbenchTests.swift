@@ -26,7 +26,7 @@ final class RemoteWorkbenchTests: XCTestCase {
         }
         XCTAssertTrue(output.contains("shared-pty-check"))
         control.attach(view)
-        view.send(source: view, data: Array("local-input\n".utf8)[...])
+        view.insertText("local-input\n", replacementRange: NSRange(location: NSNotFound, length: 0))
         XCTAssertFalse(control.replay.hasRemoteControl)
     }
     @MainActor

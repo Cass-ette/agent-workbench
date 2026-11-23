@@ -13,9 +13,9 @@ final class FileDropTerminalView: LocalProcessTerminalView {
         if remoteSizeIsActive?() == true, let size = remotePTYSize { return size }
         return super.getWindowSize()
     }
-    override func send(source: TerminalView, data: ArraySlice<UInt8>) {
+    override func insertText(_ string: Any, replacementRange: NSRange) {
         onLocalInput?()
-        super.send(source: source, data: data)
+        super.insertText(string, replacementRange: replacementRange)
     }
     private(set) var isSelectedForInput = false
     var attachmentDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -66,6 +66,7 @@ final class FileDropTerminalView: LocalProcessTerminalView {
             }
         }
         guard !urls.isEmpty else { return false }
+        onLocalInput?()
         window?.makeFirstResponder(self)
         pasteText(urls.map { Self.shellQuote($0.path) }.joined(separator: " ") + " ")
         return true
@@ -73,11 +74,13 @@ final class FileDropTerminalView: LocalProcessTerminalView {
 
     override func paste(_ sender: Any) {
         guard isSelectedForInput, !isHiddenOrHasHiddenAncestor else { return }
+        onLocalInput?()
         if !performFileDrop(from: .general) { super.paste(sender) }
     }
 
     override func keyDown(with event: NSEvent) {
         guard isSelectedForInput, !isHiddenOrHasHiddenAncestor else { return }
+        onLocalInput?()
         // CLI users also expect Ctrl+V to attach a screenshot on macOS.
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control,
            event.charactersIgnoringModifiers?.lowercased() == "v",

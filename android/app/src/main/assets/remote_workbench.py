@@ -27,7 +27,9 @@ marker = MARKER
 try:
     endpoint=json.loads((pathlib.Path.home()/'.agent-workbench/remote.json').read_text())
     assert endpoint['schema']==1 and 0<int(endpoint['port'])<65536
-    direct=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self,*args,**kwargs):return None
+    direct=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
     def request(value):
         req=urllib.request.Request('http://127.0.0.1:%d/rpc'%endpoint['port'],data=json.dumps(value).encode(),headers={'Authorization':'Bearer '+endpoint['token'],'Content-Type':'application/json'})
         with direct.open(req,timeout=60) as response:return json.load(response)
@@ -65,6 +67,7 @@ try {
     function Rpc($body) {
         $request = [Net.WebRequest]::Create($url)
         $request.Proxy = $null
+        $request.AllowAutoRedirect = $false
         $request.Method = 'POST'
         $request.ContentType = 'application/json; charset=utf-8'
         $request.Headers['Authorization'] = 'Bearer ' + $endpoint.token

@@ -98,7 +98,11 @@ final class FileDropTerminalView: LocalProcessTerminalView {
 @MainActor
 final class EmbeddedTerminalControl: ObservableObject {
     nonisolated let replay = RemoteTerminalBuffer()
-    private weak var terminalView: FileDropTerminalView?
+    private var terminalView: FileDropTerminalView?
+    private var processDelegateObject: AnyObject?
+    var existingView: FileDropTerminalView? { terminalView }
+
+    func keepProcessDelegate(_ delegate: AnyObject) { processDelegateObject = delegate }
     private var isSelected = false
     private var appliedStyle: TerminalStyleSettings?
 
@@ -121,7 +125,7 @@ final class EmbeddedTerminalControl: ObservableObject {
 
     func detach(_ view: FileDropTerminalView) {
         view.setSelected(false)
-        if terminalView === view { terminalView = nil }
+        // The session owns its PTY even while no desktop window presents it.
     }
 
     func setSelected(_ selected: Bool) {
@@ -173,9 +177,17 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> FileDropTerminalView {
+        if let view = control.existingView {
+            view.processDelegate = context.coordinator
+            control.keepProcessDelegate(context.coordinator)
+            control.attach(view)
+            control.apply(style, to: view)
+            return view
+        }
         let view = FileDropTerminalView(frame: .zero, font: style.font,
                                         options: TerminalOptions(scrollback: style.settings.scrollback))
         view.processDelegate = context.coordinator
+        control.keepProcessDelegate(context.coordinator)
         control.attach(view)
         control.apply(style, to: view)
 
@@ -195,12 +207,12 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ view: FileDropTerminalView, coordinator: Coordinator) {
-        coordinator.control.detach(view)
+        coordinator.control?.detach(view)
     }
 
     @MainActor
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
-        let control: EmbeddedTerminalControl
+        weak var control: EmbeddedTerminalControl?
         private let onExit: (Int32?) -> Void
 
         init(control: EmbeddedTerminalControl, onExit: @escaping (Int32?) -> Void) {
@@ -320,7 +332,9 @@ struct TerminalPanel: View {
                 ForEach(model.terminalSessions) { session in
                     TerminalSessionPane(session: session, style: model.terminalStyle,
                                         isSelected: model.selectedTerminalID == session.id,
-                                        onExit: { code in model.processDidExit(sessionID: session.id, exitCode: code) })
+                                        onExit: { [weak model, weak session] code in
+                                            if let session { model?.processDidExit(sessionID: session.id, exitCode: code) }
+                                        })
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

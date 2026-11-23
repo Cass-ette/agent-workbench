@@ -138,7 +138,9 @@ pub struct Replay {
 impl Replay {
     pub fn process_exited(&mut self, code: u32) {
         self.pending_exit = Some(code);
-        if self.reader_done { self.exit_code = Some(code); }
+        if self.reader_done {
+            self.exit_code = Some(code);
+        }
     }
     pub fn output_finished(&mut self) {
         self.reader_done = true;
@@ -671,6 +673,10 @@ mod tests {
         buffer.release();
         assert!(buffer.require_control("phone", Some("two")).is_err());
         assert_eq!(buffer.snapshot(u64::MAX, "phone")["after"], 1_048_580);
+        buffer.process_exited(0);
+        assert!(buffer.exit_code.is_none());
+        buffer.output_finished();
+        assert_eq!(buffer.exit_code, Some(0));
     }
     #[test]
     fn http_rejects_missing_token_and_accepts_framed_request() {

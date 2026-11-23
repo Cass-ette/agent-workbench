@@ -891,6 +891,18 @@ fn launch_terminal(
     metadata["running"] = Value::Bool(true);
     state.remote_sessions.lock().map_err(|_| "会话登记失败")?.insert(id.clone(), metadata);
     state.remote_output.lock().map_err(|_| "会话登记失败")?.insert(id.clone(), handle.replay.clone());
+    // Keep replay for recently ended tabs without retaining every past PTY.
+    let expired = {
+        let mut rows = state.remote_sessions.lock().map_err(|_| "会话登记失败")?;
+        let excess = rows.len().saturating_sub(64);
+        let expired: Vec<_> = rows.iter().filter(|(_, row)| row["running"] == false).take(excess).map(|(id, _)| id.clone()).collect();
+        for id in &expired { rows.remove(id); }
+        expired
+    };
+    if !expired.is_empty() {
+        let mut output = state.remote_output.lock().map_err(|_| "会话登记失败")?;
+        for id in expired { output.remove(&id); }
+    }
     terminals.insert(id.clone(), Arc::clone(&handle));
     drop(terminals);
 

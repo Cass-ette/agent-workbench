@@ -11,6 +11,8 @@ final class RemoteWorkbenchTests: XCTestCase {
         control.attach(view)
         view.startProcess(executable: "/bin/cat", args: [], environment: ["TERM=xterm-256color"])
         defer { view.terminate() }
+        control.detach(view)
+        XCTAssertTrue(control.existingView === view)
         control.replay.claim("phone")
         try control.remoteResize(cols: 61, rows: 19, client: "phone")
         XCTAssertEqual(view.getWindowSize().ws_col, 61)
@@ -23,6 +25,7 @@ final class RemoteWorkbenchTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertTrue(output.contains("shared-pty-check"))
+        control.attach(view)
         view.send(source: view, data: Array("local-input\n".utf8)[...])
         XCTAssertFalse(control.replay.hasRemoteControl)
     }

@@ -1,4 +1,5 @@
 mod history;
+mod remote;
 mod attachments;
 mod pricing;
 #[cfg(windows)]
@@ -31,6 +32,8 @@ const POWERSHELL_EXIT_CODE: &str =
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 struct AppConfig {
+    remote_enabled: bool,
+    remote_permissions: HashMap<String, String>,
     profiles: Vec<KeyProfile>,
     selected_profile_id: String,
     client: String,
@@ -132,6 +135,9 @@ struct TerminalInfo {
     id: String,
     title: String,
     workspace: String,
+    client: String,
+    model: String,
+    scope: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -147,6 +153,7 @@ struct ExitNotice {
 }
 
 struct TerminalHandle {
+    replay: Arc<Mutex<remote::Replay>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     #[cfg(windows)]
@@ -166,6 +173,10 @@ impl TerminalHandle {
 }
 
 struct AppState {
+    remote: remote::Service,
+    remote_sessions: Mutex<HashMap<String, Value>>,
+    remote_output: Mutex<HashMap<String, Arc<Mutex<remote::Replay>>>>,
+    remote_uploads: Mutex<remote::Uploads>,
     config_path: PathBuf,
     config: Mutex<AppConfig>,
     terminals: Mutex<HashMap<String, Arc<TerminalHandle>>>,
@@ -176,6 +187,10 @@ impl AppState {
     fn new(config_path: PathBuf) -> Self {
         let config = read_config(&config_path).unwrap_or_default();
         Self {
+            remote: remote::Service::default(),
+            remote_sessions: Mutex::new(HashMap::new()),
+            remote_output: Mutex::new(HashMap::new()),
+            remote_uploads: Mutex::new(remote::Uploads::default()),
             config_path,
             config: Mutex::new(config),
             terminals: Mutex::new(HashMap::new()),
@@ -802,6 +817,9 @@ fn start_terminal(
         id: Uuid::new_v4().to_string(),
         title: format!("{} · {}", request.client, request.model),
         workspace: workspace.display().to_string(),
+        client: request.client,
+        model: request.model,
+        scope: "workbench".into(),
     };
     let restoring = request.session_mode != "new";
     launch_terminal(shell, command_text, source.is_none(), !restoring, info, app, &state)
@@ -849,6 +867,9 @@ fn launch_system_terminal(
         id: Uuid::new_v4().to_string(),
         title: format!("{} · 系统全局", client),
         workspace: workspace.display().to_string(),
+        client,
+        model: "系统配置".into(),
+        scope: "system".into(),
     };
     launch_terminal(shell, command, true, history_id.is_none(), info, app, &state)
 }
@@ -866,12 +887,29 @@ fn launch_terminal(
     let (handle, reader, mut child) = spawn_terminal(shell, &command, load_profiles, keep_shell)?;
     let handle = Arc::new(handle);
     let id = info.id.clone();
+    let mut metadata = serde_json::to_value(&info).map_err(|e| e.to_string())?;
+    metadata["running"] = Value::Bool(true);
+    state.remote_sessions.lock().map_err(|_| "会话登记失败")?.insert(id.clone(), metadata);
+    state.remote_output.lock().map_err(|_| "会话登记失败")?.insert(id.clone(), handle.replay.clone());
+    // Keep replay for recently ended tabs without retaining every past PTY.
+    let expired = {
+        let mut rows = state.remote_sessions.lock().map_err(|_| "会话登记失败")?;
+        let excess = rows.len().saturating_sub(64);
+        let expired: Vec<_> = rows.iter().filter(|(_, row)| row["running"] == false).take(excess).map(|(id, _)| id.clone()).collect();
+        for id in &expired { rows.remove(id); }
+        expired
+    };
+    if !expired.is_empty() {
+        let mut output = state.remote_output.lock().map_err(|_| "会话登记失败")?;
+        for id in expired { output.remove(&id); }
+    }
     terminals.insert(id.clone(), Arc::clone(&handle));
     drop(terminals);
 
     let reader_id = id.clone();
     let reader_app = app.clone();
-    thread::spawn(move || stream_terminal(reader, reader_app, reader_id));
+    let replay = handle.replay.clone();
+    thread::spawn(move || stream_terminal(reader, reader_app, reader_id, replay));
     thread::spawn(move || {
         let exit_code = child.wait().ok().map(|status| status.exit_code());
         #[cfg(windows)]
@@ -884,7 +922,9 @@ fn launch_terminal(
             if let Ok(mut terminals) = state.terminals.lock() {
                 terminals.remove(&id);
             }
+            if let Ok(mut rows) = state.remote_sessions.lock() { if let Some(row) = rows.get_mut(&id) { row["running"] = Value::Bool(false); } }
         }
+        if let Ok(mut replay) = handle.replay.lock() { replay.process_exited(exit_code.unwrap_or(1)); }
         let _ = app.emit("terminal-exit", ExitNotice { session_id: id, exit_code });
         handle.close_pty();
     });
@@ -958,6 +998,7 @@ fn spawn_terminal(
     }
     drop(pair.slave);
     let handle = TerminalHandle {
+        replay: Arc::new(Mutex::new(remote::Replay::default())),
         writer: Mutex::new(Some(writer)),
         master: Mutex::new(Some(pair.master)),
         #[cfg(windows)]
@@ -972,12 +1013,14 @@ fn stream_terminal(
     mut reader: Box<dyn Read + Send>,
     app: tauri::AppHandle,
     session_id: String,
+    replay: Arc<Mutex<remote::Replay>>,
 ) {
     let mut buffer = [0u8; 8192];
     loop {
         match reader.read(&mut buffer) {
             Ok(0) | Err(_) => break,
             Ok(count) => {
+                if let Ok(mut replay) = replay.lock() { replay.append(&buffer[..count]); }
                 let _ = app.emit(
                     "terminal-output",
                     OutputChunk {
@@ -988,6 +1031,7 @@ fn stream_terminal(
             }
         }
     }
+    if let Ok(mut replay) = replay.lock() { replay.output_finished(); }
 }
 
 #[tauri::command]
@@ -1003,6 +1047,7 @@ fn write_terminal(
         .get(&session_id)
         .cloned()
         .ok_or("终端会话不存在")?;
+    handle.replay.lock().map_err(|_| "终端控制状态不可用")?.release();
     let mut writer = handle.writer.lock().map_err(|_| "终端输入锁异常")?;
     writer
         .as_mut()
@@ -1025,6 +1070,7 @@ fn resize_terminal(
         .get(&session_id)
         .cloned()
         .ok_or("终端会话不存在")?;
+    if handle.replay.lock().map_err(|_| "终端控制状态不可用")?.has_remote_control() { return Ok(()); }
     handle
         .master
         .lock()
@@ -1068,6 +1114,9 @@ pub fn run() {
             let config_path = app.path().app_config_dir()?.join("settings.json");
             app.manage(AppState::new(config_path));
             app.manage(updates::UpdateState::default());
+            if app.state::<AppState>().config.lock().map(|c| c.remote_enabled).unwrap_or(false) {
+                let _ = app.state::<AppState>().remote.set(app.handle().clone(), true);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1083,6 +1132,8 @@ pub fn run() {
             start_terminal,
             start_global_terminal,
             ssh_connection_info,
+            remote::set_remote_enabled,
+            remote::sync_remote_permissions,
             list_history,
             list_all_history,
             write_terminal,

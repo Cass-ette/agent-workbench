@@ -180,7 +180,7 @@ def history_context(home):
     return session_history, homes("codex"), homes("claude")
 
 
-def paired_ssh_arguments(executable, home, env, target, host, user, port):
+def paired_ssh_arguments(executable, home, env, target, host, user, port, remote_command=None):
     """Use an app-owned identity only for computers added via a connection code."""
     from contextlib import suppress
     target_id = str(uuid.UUID(str(target.get("id"))))
@@ -199,8 +199,12 @@ def paired_ssh_arguments(executable, home, env, target, host, user, port):
             "-o", "UserKnownHostsFile=" + str(known_hosts), "-o", "UpdateHostKeys=no", "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3", "-p", str(port), "-l", user]
     password_args = args + ["-o", "PubkeyAuthentication=no", host]
+    def launch(arguments):
+        if remote_command is None:
+            return shlex.join(arguments)
+        return shlex.join([arg for arg in arguments[:-1] if arg != "-tt"] + ["-T", arguments[-1], remote_command])
     if target.get("remember") is not True:
-        return shlex.join(password_args)
+        return launch(password_args)
     identity = directory / "id_ed25519"
     if not identity.is_file():
         keygen = shutil.which("ssh-keygen", path=env["PATH"])
@@ -219,7 +223,7 @@ def paired_ssh_arguments(executable, home, env, target, host, user, port):
     args += ["-i", str(identity), "-o", "IdentitiesOnly=yes", host]
     setup = directory / "paired"
     if setup.exists():
-        return shlex.join(args)
+        return launch(args)
     key = "ssh-ed25519 " + public_key[1] + " AgentWorkbench-Android-" + target_id
     if target["platform"] == "macos":
         command = """umask 077
@@ -252,9 +256,9 @@ if (!(Select-String -LiteralPath $file -SimpleMatch -Pattern $key -Quiet)) {
     setup_command = shlex.join(args + [command])
     probe_args = [arg for arg in args[:-1] if arg != "-tt"] + ["-T", "-o", "BatchMode=yes", "-o", "PreferredAuthentications=publickey", args[-1], "exit 0"]
     return ("if " + setup_command + " && " + shlex.join(probe_args) + " && touch " + shlex.quote(str(setup))
-            + "; then " + shlex.join(args)
+            + "; then " + launch(args)
             + "; else printf '\\r\\n[未能记住此手机。按回车用密码连接，或按 Ctrl+C 取消。]\\r\\n'; "
-            + "read -r reply && " + shlex.join(password_args) + "; fi")
+            + "read -r reply && " + launch(password_args) + "; fi")
 
 
 def agent_permission_args(client, mode):
@@ -561,6 +565,13 @@ class Session:
                 except ProcessLookupError: return
         threading.Thread(target=force, daemon=True).start()
 
+    def write(self, data):
+        if self.exit_code is not None:
+            raise ValueError("终端已退出")
+        view = memoryview(data)
+        while view:
+            view = view[os.write(self.fd, view):]
+
 
 class HistoryUnavailable(ValueError):
     def __init__(self, message="找不到这条本地会话，请刷新对话历史"):
@@ -573,6 +584,7 @@ class BridgeServer(ThreadingHTTPServer):
         if address[0] != "127.0.0.1" or len(token) < 32:
             raise ValueError("桥接只允许本机回环与随机凭据")
         self.token, self.sessions, self.guard = token, {}, threading.Lock()
+        self.remotes = {}
         self.version, self.build = version, build
         self.runtime = None
         self.bundle = Path(__file__).resolve().parent
@@ -608,7 +620,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.command == "GET" and uri.path == "/health":
                 return self.reply(200, {"service": "agent-workbench-termux", "version": self.server.version,
-                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions", "tool-bridge"]})
+                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "remote-workbench", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions", "tool-bridge"]})
             if self.command == "GET" and uri.path == "/usage":
                 return self.reply(200, usage_snapshot())
             if self.command == "GET" and uri.path == "/tools":
@@ -634,9 +646,54 @@ class Handler(BaseHTTPRequestHandler):
             payload = {}
             if self.command == "POST":
                 length = int(self.headers.get("Content-Length", 0))
-                if not 0 <= length <= MAX_REQUEST: return self.reply(413, {"error": "请求过大"})
+                limit = 1024 * 1024 if uri.path.startswith("/remote/") and uri.path.endswith("/rpc") else MAX_REQUEST
+                if not 0 <= length <= limit: return self.reply(413, {"error": "请求过大"})
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 if not isinstance(payload, dict): raise ValueError("请求格式错误")
+            if self.command == "POST" and uri.path == "/remote/connect":
+                from remote_workbench import RemoteConnection, remote_command
+                target = payload.get("ssh", {})
+                target_id = str(uuid.UUID(str(target.get("id"))))
+                # Apply the exact same host/user validation as the ordinary SSH launcher.
+                launch_spec({"client": "ssh", "ssh": target}, bundle=self.server.bundle)
+                with self.server.guard:
+                    previous = self.server.remotes.get(target_id)
+                    if previous and previous.exit_code is None:
+                        previous.stop()
+                    marker = "WB1:" + uuid.uuid4().hex + ":"
+                    env = os.environ.copy()
+                    env["PATH"] = str(Path.home().parent / "usr/bin") + ":" + env.get("PATH", "")
+                    executable = shutil.which("ssh", path=env["PATH"])
+                    if not executable: raise ValueError("请安装 Termux OpenSSH")
+                    command = paired_ssh_arguments(executable, Path.home(), env, target, target["host"], target["user"], target.get("port", 22),
+                                                   remote_command(target["platform"], marker))
+                    connection = RemoteConnection.open(command, target_id, marker)
+                    self.server.remotes[target_id] = connection
+                    from remote_workbench import RemoteSession
+                    for session in self.server.sessions.values():
+                        if isinstance(session, RemoteSession) and session.connection.owner == target_id:
+                            session.connection = connection
+                    self.server.sessions[connection.id] = connection
+                return self.reply(201, {"id": connection.id})
+            remote_match = re.fullmatch(r"/remote/([0-9a-f-]{36})(/rpc|/attach)?", uri.path)
+            if remote_match:
+                from remote_workbench import RemoteSession
+                target_id = str(uuid.UUID(remote_match.group(1)))
+                connection = self.server.remotes.get(target_id)
+                if self.command == "GET":
+                    return self.reply(200, {"connected": bool(connection and connection.ready),
+                                            "error": connection.error if connection else "", "schema": 1})
+                if connection is None: raise HistoryUnavailable("请先连接电脑工作台")
+                if self.command == "POST" and remote_match.group(2) == "/rpc":
+                    return self.reply(200, connection.call(payload))
+                if self.command == "POST" and remote_match.group(2) == "/attach":
+                    value = connection.call({"op": "attach", "session_id": payload.get("session_id"), "take_control": True})
+                    with self.server.guard:
+                        existing = next((s for s in self.server.sessions.values() if isinstance(s, RemoteSession)
+                                         and s.connection is connection and s.remote_id == value["id"]), None)
+                        proxy = existing or RemoteSession(connection, value)
+                        self.server.sessions[proxy.id] = proxy
+                    return self.reply(200, {**value, "id": proxy.id, "remote_id": value["id"]})
             if self.command == "POST" and uri.path == "/tools":
                 client, environment = payload.get("client"), payload.get("environment", "debian")
                 action = payload.get("action")
@@ -679,7 +736,7 @@ class Handler(BaseHTTPRequestHandler):
                     if directory.is_dir() and not any(directory.iterdir()):
                         directory.rmdir()
                 return self.reply(200, {"ok": True})
-            match = re.fullmatch(r"/sessions/([0-9a-f]{32})(/input|/resize)?", uri.path)
+            match = re.fullmatch(r"/sessions/([0-9a-f]{32})(/input|/resize|/terminate)?", uri.path)
             if not match: return self.reply(404, {"error": "接口不存在"})
             session = self.server.sessions.get(match.group(1))
             if session is None: return self.reply(404, {"error": "终端不存在，Termux 可能已重启"})
@@ -687,20 +744,28 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, session.snapshot(int(parse_qs(uri.query).get("after", [0])[0])))
             if self.command == "DELETE" and not match.group(2):
                 session.stop()
+                if hasattr(session, "remote_id"):
+                    self.server.sessions.pop(session.id, None)
                 return self.reply(200, {"stopping": True})
             if self.command == "POST" and match.group(2) == "/input":
                 data = base64.b64decode(payload.get("data", ""), validate=True)
-                if session.exit_code is not None: raise ValueError("终端已退出")
-                view = memoryview(data)
-                while view: view = view[os.write(session.fd, view):]
+                session.write(data)
                 return self.reply(200, {"ok": True})
+            if self.command == "POST" and match.group(2) == "/terminate":
+                if hasattr(session, "terminate"): session.terminate()
+                else: session.stop()
+                return self.reply(200, {"stopping": True})
             if self.command == "POST" and match.group(2) == "/resize":
                 session.resize(payload.get("cols", 80), payload.get("rows", 24))
                 return self.reply(200, {"ok": True})
             return self.reply(405, {"error": "操作不支持"})
         except HistoryUnavailable as exc:
             return self.reply(409, {"error": str(exc)})
-        except (ValueError, TypeError, KeyError):
+        except ValueError as exc:
+            if uri.path.startswith("/remote/") or "/sessions/" in uri.path and hasattr(locals().get("session"), "remote_id"):
+                return self.reply(409, {"error": str(exc)[:240]})
+            return self.reply(400, {"error": "参数无效；请检查模型、目录及已安装的客户端"})
+        except (TypeError, KeyError):
             # Expected validation messages never contain the submitted key or body.
             return self.reply(400, {"error": "参数无效；请检查模型、目录及已安装的客户端"})
         except OSError:

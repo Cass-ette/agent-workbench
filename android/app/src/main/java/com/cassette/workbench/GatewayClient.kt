@@ -6,7 +6,8 @@ import java.net.URL
 
 object GatewayClient {
     fun json(url: String, key: String, method: String = "GET", body: JSONObject? = null, timeout: Int = 12000, bridge: Boolean = false): JSONObject {
-        val connection = URL(url).openConnection() as HttpURLConnection
+        val destination = URL(url)
+        val connection = (if (bridge) destination.openConnection(java.net.Proxy.NO_PROXY) else destination.openConnection()) as HttpURLConnection
         connection.instanceFollowRedirects = false
         connection.requestMethod = method
         connection.connectTimeout = timeout

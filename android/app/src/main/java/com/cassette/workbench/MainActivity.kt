@@ -21,6 +21,7 @@ import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -129,8 +130,8 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                 Text(if (BuildConfig.DEBUG) "开发预览 · $connection" else connection,
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             } }, actions = {
-                TextButton(onClick = { model.showAgentPermissions = true }) { Text("权限") }
-                TextButton(onClick = { model.showTools = true }) { Text("工具") }
+                TextButton(onClick = { model.showAgentPermissions = true }, enabled = model.localExecution) { Text("本地权限") }
+                TextButton(onClick = { model.showTools = true }, enabled = model.localExecution) { Text("本地工具") }
                 TextButton(onClick = updates::open) { Text(updates.nextVersion?.let { "新版 $it" } ?: "检查更新") }
             }) },
             bottomBar = { if (!fullscreen && !terminalInput) NavigationBar {
@@ -192,7 +193,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                     Text(model.executionName, fontWeight = FontWeight.Medium)
                     Text(model.sshTarget?.destination ?: model.options.workspace, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (model.localExecution && model.runtimeEnvironment == "debian") TextButton(onClick = {
+                if ((model.localExecution && model.runtimeEnvironment == "debian") || model.remoteWorkbench != null) TextButton(onClick = {
                     allHistoryProjects = true
                     showHistory = true
                     model.refreshHistory(allProjects = true)
@@ -207,11 +208,8 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                     model::selectExecutionLocation)
                 if (!model.localExecution) {
                     Spacer(Modifier.height(8.dp))
-                    Text("通过手机的 SSH 连接电脑，登录后使用电脑上的 CLI、项目和调用配置。手机保存的模型 Key 不会发送给电脑。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = { changePage(2) }) { Text("管理电脑") }
-                        Spacer(Modifier.weight(1f))
-                        Button(onClick = { model.launch(shell = true) }, enabled = model.connected && !model.busy) { Text("连接 SSH") }
+                    RemoteWorkbenchPanel(model) { all ->
+                        allHistoryProjects = all; showHistory = true; model.refreshHistory(all)
                     }
                 } else {
                 Spacer(Modifier.height(8.dp))
@@ -274,7 +272,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
             Column(Modifier.weight(1f).fillMaxWidth().padding(28.dp), verticalArrangement = Arrangement.Center) {
                 Text("把工作留在终端里", fontSize = 25.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(12.dp))
-                Text(if (model.localExecution) "先连接 Termux，即可在这里打开手机本地 Shell。配置网关和模型后，再启动 Claude 或 Codex。" else "Termux 提供 SSH 客户端，任务和文件留在你连接的电脑。已有桌面终端标签页暂不支持直接接续。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(if (model.localExecution) "先连接 Termux，即可在这里打开手机本地 Shell。配置网关和模型后，再启动 Claude 或 Codex。" else "连接电脑工作台后可接续运行中的会话，或用电脑的配置新建、恢复对话。电脑须启用手机接续并保持运行。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(22.dp))
                 if (model.localExecution) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -289,7 +287,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                         if (model.connected) TextButton(onClick = { model.launch(shell = true, shellKind = "termux") }) { Text("Termux Shell") }
                     }
                 } else {
-                    Button(onClick = { if (model.connected) model.launch(shell = true) else changePage(2) }) { Text(if (!model.connected) "设置运行环境" else "连接 SSH") }
+                    Button(onClick = { if (model.connected) model.connectRemote() else changePage(2) }) { Text(if (!model.connected) "设置运行环境" else "连接电脑工作台") }
                 }
             }
         } else {
@@ -299,7 +297,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                 Column(Modifier.fillMaxSize()) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("终端", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
-                        Text(usageCompact(model.usage), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        Text(if (model.localExecution) usageCompact(model.usage) else "电脑用量见桌面工作台", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                         if (model.localExecution) {
                             Box {
                                 TextButton(onClick = { newTerminalMenu = true }, enabled = model.connected && !model.busy) { Text("＋ 终端") }
@@ -321,7 +319,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                                 }
                             }
                         } else {
-                            TextButton(onClick = { model.launch(shell = true) }, enabled = model.connected && !model.busy) { Text("＋ SSH") }
+                            TextButton(onClick = { expanded = true }, enabled = model.connected && !model.busy) { Text("电脑会话") }
                         }
                         if (canSplit) TextButton(onClick = {
                             if (!splitEnabled && splitOtherSessionId.isBlank()) {
@@ -412,7 +410,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
 @Composable private fun HistoryPicker(model: WorkbenchModel, allProjects: Boolean, onDismiss: () -> Unit, onSelect: (LocalConversation) -> Unit) {
     var query by remember { mutableStateOf("") }
     var directory by remember { mutableStateOf<List<String>?>(null) }
-    fun parts(row: LocalConversation) = row.workspace.split('/').filter(String::isNotBlank)
+    fun parts(row: LocalConversation) = row.workspace.replace('\\', '/').split('/').filter(String::isNotBlank)
     val matches = model.history.filter { row ->
         listOf(row.title, row.preview, row.workspace, row.model, row.client)
             .any { it.contains(query.trim(), ignoreCase = true) }
@@ -426,7 +424,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
     AlertDialog(onDismissRequest = onDismiss, title = {
         Column {
             Text(if (allProjects) "恢复最近对话" else "从当前项目的历史创建分支")
-            Text(if (allProjects) "点击对话，用原配置恢复" else model.options.workspace,
+            Text(if (allProjects) "点击对话，用原配置恢复" else model.historyWorkspace,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -446,7 +444,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
             when {
                 model.historyLoading -> LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 10.dp))
                 model.historyError.isNotEmpty() -> Text(model.historyError, Modifier.padding(top = 10.dp))
-                rows.isEmpty() && folders.isEmpty() -> Text("暂无匹配的本地对话", Modifier.padding(top = 10.dp))
+                rows.isEmpty() && folders.isEmpty() -> Text(if (model.localExecution) "暂无匹配的本地对话" else "暂无匹配的电脑对话", Modifier.padding(top = 10.dp))
                 else -> LazyColumn(Modifier.heightIn(max = 300.dp)) {
                     if (prefix != null) items(folders, key = { "folder:$it" }) { folder ->
                         TextButton(onClick = { directory = prefix + folder }, modifier = Modifier.fillMaxWidth()) {
@@ -455,7 +453,8 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                         }
                     }
                     items(rows, key = { it.reference }) { row ->
-                        val profile = model.profiles.firstOrNull { it.id == row.profileId }?.name ?: "来源配置未知"
+                        val profile = if (model.localExecution) model.profiles.firstOrNull { it.id == row.profileId }?.name ?: "来源配置未知"
+                            else model.remoteWorkbench?.profiles?.firstOrNull { it.id == row.profileId }?.name ?: "电脑原配置"
                         Column(Modifier.fillMaxWidth().clickable { onSelect(row) }.padding(vertical = 10.dp)) {
                             Text(row.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             if (row.preview.isNotBlank()) Text(row.preview, maxLines = 2, overflow = TextOverflow.Ellipsis,
@@ -473,7 +472,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
     }, confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } })
 }
 
-@Composable private fun ChoiceField(label: String, value: String, modifier: Modifier = Modifier, choices: List<Pair<String, String>>, choose: (String) -> Unit, empty: () -> Unit = {}) {
+@Composable internal fun ChoiceField(label: String, value: String, modifier: Modifier = Modifier, choices: List<Pair<String, String>>, choose: (String) -> Unit, empty: () -> Unit = {}) {
     var menu by remember { mutableStateOf(false) }
     Box(modifier) {
         OutlinedButton(onClick = { if (choices.isEmpty()) empty() else menu = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp), shape = RoundedCornerShape(10.dp), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)) {
@@ -524,7 +523,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
     var removing by remember { mutableStateOf<KeyProfile?>(null) }
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("调用配置", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            Text("手机本地调用配置", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
             FilledTonalButton(onClick = { adding = true }) { Icon(Icons.Outlined.Add, null); Text("添加") }
         }
         Text("每把 Key 记住自己的网关和模型。密钥由 Android Keystore 加密保存在这部手机。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -763,11 +762,22 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
 
 @Composable private fun TerminalPanel(model: WorkbenchModel, session: TerminalSession, modifier: Modifier = Modifier, showTitle: Boolean = false) {
     var closing by remember { mutableStateOf(false) }
+    var terminating by remember { mutableStateOf(false) }
+    var attachmentTarget by remember { mutableStateOf("") }
+    val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) model.uploadRemoteAttachment(attachmentTarget, uri)
+    }
     var fontDelta by remember { mutableIntStateOf(0) }
     var keyboardRequest by remember { mutableIntStateOf(0) }
     var scrollRequest by remember { mutableIntStateOf(0) }
     var bottomRequest by remember { mutableIntStateOf(0) }
     Column(modifier.fillMaxSize()) {
+        if (session.remoteTarget.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(if (session.canWrite) "控制电脑会话" else "只读 · 电脑已收回控制", style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
+            if (!session.canWrite) TextButton(onClick = { model.attachRemote(session.remoteId, session.remoteTarget) }) { Text("接续并控制") }
+            TextButton(onClick = { attachmentTarget = session.id; attachmentPicker.launch(arrayOf("*/*")) }, enabled = session.canWrite && !model.busy) { Text("传文件/图片") }
+            TextButton(onClick = { terminating = true }) { Text("结束电脑任务") }
+        }
         if (showTitle) {
             TextButton(onClick = { keyboardRequest++ }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
                 Column(Modifier.fillMaxWidth()) {
@@ -794,8 +804,13 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
         }
         if (session.exitCode != null) Text("终端已退出：${session.exitCode}", style = MaterialTheme.typography.labelSmall)
     }
-    if (closing) AlertDialog(onDismissRequest = { closing = false }, title = { Text("结束此终端？") }, text = { Text("该标签中的 Agent 与 Shell 将一起停止。其他终端不受影响。") },
-        confirmButton = { TextButton(onClick = { closing = false; model.close(session.id) }) { Text("结束终端") } }, dismissButton = { TextButton(onClick = { closing = false }) { Text("取消") } })
+    if (closing) AlertDialog(onDismissRequest = { closing = false }, title = { Text(if (session.remoteTarget.isEmpty()) "关闭此终端？" else "断开此会话？") },
+        text = { Text(if (session.remoteTarget.isEmpty()) "该标签中的 Agent 与 Shell 将停止。关闭电脑登录标签只会断开 SSH，电脑任务继续。" else "移除手机标签，电脑上的任务继续运行，可以再次接续。") },
+        confirmButton = { TextButton(onClick = { closing = false; model.close(session.id) }) { Text(if (session.remoteTarget.isEmpty()) "关闭终端" else "断开") } }, dismissButton = { TextButton(onClick = { closing = false }) { Text("取消") } })
+    if (terminating) AlertDialog(onDismissRequest = { terminating = false }, title = { Text("结束电脑任务？") },
+        text = { Text("这会停止电脑上的同一个 Agent 进程，电脑端也会看到任务结束。") },
+        confirmButton = { TextButton(onClick = { terminating = false; model.terminateRemote(session.id) }) { Text("结束任务") } },
+        dismissButton = { TextButton(onClick = { terminating = false }) { Text("取消") } })
 }
 
 private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var scrollRequest: Int = 0, var bottomRequest: Int = 0)

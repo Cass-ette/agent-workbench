@@ -63,7 +63,7 @@ struct ManagerView: View {
         .sheet(isPresented: $model.isBillingSettingsPresented) {
             BillingSettingsSheet(model: model)
         }
-        .sheet(isPresented: $showSSHConnection) { SSHConnectionSheet() }
+        .sheet(isPresented: $showSSHConnection) { SSHConnectionSheet(model: model) }
         .sheet(isPresented: $model.isHistoryPresented) {
             HistoryPickerSheet(model: model)
         }

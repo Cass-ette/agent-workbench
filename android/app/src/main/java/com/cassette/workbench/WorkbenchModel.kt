@@ -44,9 +44,184 @@ data class TerminalSession(
     val exitCode: Int? = null, val error: String = "",
     val bridgePort: Int = 0,
     val restoredOutputPending: Boolean = false,
+    val remoteTarget: String = "",
+    val remoteId: String = "",
+    val canWrite: Boolean = true,
 )
 
 class WorkbenchModel(application: Application) : AndroidViewModel(application) {
+    var remoteWorkbench by mutableStateOf<RemoteWorkbench?>(null); private set
+    var remoteMessage by mutableStateOf(""); private set
+    var remoteProfile by mutableStateOf("")
+    var remoteModel by mutableStateOf("")
+    var remoteClient by mutableStateOf("codex")
+    var remoteWorkspace by mutableStateOf("")
+    var remoteScope by mutableStateOf("workbench")
+    var remoteModels by mutableStateOf(emptyList<String>()); private set
+    private var remoteTarget = ""
+    private var remoteRefreshing = false
+    private var remotePollAt = 0L
+    val historyWorkspace get() = if (localExecution) options.workspace else remoteWorkspace
+
+    private fun remoteRequest(target: String, body: JSONObject): JSONObject =
+        termux.request("/remote/$target/rpc", "POST", body, 70000)
+
+    private fun sshBody(target: SshTarget) = JSONObject().put("host", target.host).put("user", target.user)
+        .put("port", target.port).put("id", target.id).put("platform", target.platform)
+        .put("host_key", target.hostKey).put("remember", target.remember)
+
+    fun connectRemote() {
+        val target = sshTarget ?: return
+        if (busy) return
+        if (target.platform.isBlank()) { error = "手动 SSH 主机请先使用普通 SSH；工作台接续需要电脑生成的连接码"; return }
+        busy = true; error = ""
+        worker.execute {
+            try {
+                if (!termux.supportsRuntime()) {
+                    main.post { busy = false; connectInternal(false) { connectRemote() } }; return@execute
+                }
+                val value = termux.request("/remote/connect", "POST", JSONObject().put("ssh", sshBody(target)), 15000)
+                main.post {
+                    busy = false
+                    if (sshTarget?.id != target.id) return@post
+                    val id = value.getString("id")
+                    if (sessions.none { it.id == id }) sessions = sessions + TerminalSession(id, "电脑登录 · ${target.name}", target.destination, "ssh-login", bridgePort = termux.currentPort)
+                    selectedSession = id; saveSessions(); remoteMessage = "请在终端完成 SSH 登录，然后返回配置任务"; refreshRemote()
+                }
+            } catch (cause: Exception) { main.post { busy = false; error = safeError(cause) } }
+        }
+    }
+
+    fun refreshRemote() {
+        val target = sshTarget ?: return
+        if (!connected || remoteRefreshing) return
+        remoteRefreshing = true
+        worker.execute {
+            try {
+                val status = termux.request("/remote/${target.id}")
+                val result = if (status.optBoolean("connected")) RemoteWorkbench.parse(remoteRequest(target.id, JSONObject().put("op", "state"))) else null
+                main.post {
+                    if (sshTarget?.id != target.id) return@post
+                    if (result != null && (remoteWorkbench == null || remoteTarget != target.id)) {
+                        remoteProfile = result.profile; remoteWorkspace = result.workspace; remoteClient = result.client; remoteModel = result.model
+                        remoteModels = emptyList(); selectedHistory = null
+                    }
+                    remoteTarget = target.id; remoteWorkbench = result
+                    remoteMessage = if (result == null) status.optString("error").ifBlank { "尚未连接电脑工作台" } else "已连接 ${target.name} · ${result.platform}"
+                }
+            } catch (cause: Exception) { main.post { if (sshTarget?.id == target.id) { remoteWorkbench = null; remoteMessage = safeError(cause) } } }
+            finally { main.post { remoteRefreshing = false } }
+        }
+    }
+
+    fun selectRemoteProfile(id: String) { remoteProfile = id; remoteModel = ""; remoteModels = emptyList(); loadRemoteModels() }
+    fun loadRemoteModels() {
+        val target = sshTarget?.id ?: return
+        val profile = remoteProfile
+        if (busy) return
+        busy = true
+        worker.execute {
+            try {
+                val models = remoteRequest(target, JSONObject().put("op", "models").put("profile_id", profile)).getJSONArray("models").strings()
+                main.post { if (sshTarget?.id == target && remoteProfile == profile) { remoteModels = models; if (remoteModel !in models) remoteModel = models.firstOrNull().orEmpty() } }
+            } catch (cause: Exception) { main.post { error = safeError(cause) } }
+            finally { main.post { busy = false } }
+        }
+    }
+
+    fun launchRemote(action: String = "", source: LocalConversation? = null) {
+        val target = sshTarget?.id ?: return
+        if (busy || remoteWorkbench == null) return
+        val body = JSONObject().put("op", "launch").put("client", source?.client ?: remoteClient)
+            .put("workspace", source?.workspace ?: remoteWorkspace).put("scope", remoteScope)
+            .put("model", remoteModel).put("profile_id", remoteProfile).put("history_action", action)
+        if (source != null) body.put("history_ref", source.reference)
+        busy = true; error = ""
+        worker.execute {
+            try {
+                val value = remoteRequest(target, body)
+                attachRemoteInWorker(target, value.getString("id"))
+                main.post { selectedHistory = null }
+            } catch (cause: Exception) { main.post { error = safeError(cause) } }
+            finally { main.post { busy = false; refreshRemote() } }
+        }
+    }
+
+    fun attachRemote(id: String, computer: String? = null) {
+        val target = computer ?: sshTarget?.id ?: return
+        if (busy) return
+        busy = true; error = ""
+        worker.execute {
+            try { attachRemoteInWorker(target, id) }
+            catch (cause: Exception) { main.post { error = safeError(cause) } }
+            finally { main.post { busy = false } }
+        }
+    }
+    private fun attachRemoteInWorker(target: String, id: String) {
+        val row = termux.request("/remote/$target/attach", "POST", JSONObject().put("session_id", id), 70000)
+        val session = TerminalSession(row.getString("id"), row.getString("title"), row.getString("workspace"), row.optString("client", "codex"),
+            bridgePort = termux.currentPort, remoteTarget = target, remoteId = row.getString("remote_id"))
+        main.post {
+            val old = sessions.firstOrNull { it.remoteTarget == target && it.remoteId == session.remoteId }
+            sessions = sessions.filterNot { it.remoteTarget == target && it.remoteId == session.remoteId } + (old?.copy(id = session.id, canWrite = true) ?: session)
+            selectedSession = session.id; saveSessions()
+            notice = "已接续同一个电脑进程；关闭此标签只会断开，结束任务需单独确认"
+        }
+    }
+
+    fun terminateRemote(id: String) {
+        val session = sessions.firstOrNull { it.id == id && it.remoteTarget.isNotEmpty() } ?: return
+        worker.execute {
+            try { termux.request("/sessions/$id/terminate", "POST", JSONObject(), 70000, session.bridgePort); main.post { close(id); refreshRemote() } }
+            catch (cause: Exception) { main.post { error = safeError(cause) } }
+        }
+    }
+
+    fun uploadRemoteAttachment(id: String, uri: android.net.Uri) {
+        val session = sessions.firstOrNull { it.id == id && it.remoteTarget.isNotEmpty() } ?: return
+        if (selectedSession != id || busy) return
+        val uploadId = java.util.UUID.randomUUID().toString()
+        busy = true; error = ""; notice = "正在传输附件到电脑"
+        worker.execute {
+            var pasted = false
+            try {
+                val resolver = getApplication<Application>().contentResolver
+                val name = resolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                    if (it.moveToFirst()) it.getString(0) else "attachment"
+                } ?: "attachment"
+                val bytes = resolver.openInputStream(uri)?.use { input ->
+                    val output = java.io.ByteArrayOutputStream()
+                    val buffer = ByteArray(65536)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        require(output.size() + count <= 20 * 1024 * 1024) { "附件不能超过 20 MB" }
+                        output.write(buffer, 0, count)
+                    }
+                    output.toByteArray()
+                } ?: throw IllegalStateException("无法读取所选文件")
+                require(bytes.isNotEmpty()) { "附件为空" }
+                var offset = 0
+                while (offset < bytes.size) {
+                    check(selectedSession == id && sessions.any { it.id == id }) { "目标会话已切换，取消插入附件" }
+                    val end = minOf(offset + 131072, bytes.size)
+                    val result = remoteRequest(session.remoteTarget, JSONObject().put("op", "attachment").put("session_id", session.remoteId)
+                        .put("upload_id", uploadId).put("name", name).put("size", bytes.size).put("offset", offset)
+                        .put("data", Base64.encodeToString(bytes.copyOfRange(offset, end), Base64.NO_WRAP)))
+                    check(result.getInt("received") == end) { "电脑接收的附件长度不一致" }
+                    offset = end
+                }
+                check(selectedSession == id && sessions.any { it.id == id }) { "目标会话已切换，取消插入附件" }
+                remoteRequest(session.remoteTarget, JSONObject().put("op", "attachment-paste").put("session_id", session.remoteId).put("upload_id", uploadId))
+                pasted = true
+                main.post { notice = "附件已传到电脑并插入当前会话，未自动发送消息" }
+            } catch (cause: Exception) { main.post { error = safeError(cause) } }
+            finally {
+                main.post { busy = false }
+                if (!pasted) runCatching { remoteRequest(session.remoteTarget, JSONObject().put("op", "attachment-cancel").put("session_id", session.remoteId).put("upload_id", uploadId)) }
+            }
+        }
+    }
     private val store = ProfileStore(application)
     val termux = TermuxConnection(application, store)
     private val worker = Executors.newFixedThreadPool(3)
@@ -141,7 +316,8 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
 
     init {
         sessions = store.sessionRows().let { rows -> (0 until rows.length()).mapNotNull { index ->
-            runCatching { rows.getJSONObject(index).let { TerminalSession(it.getString("id"), it.getString("title"), it.getString("workspace"), it.getString("client"), bridgePort = it.optInt("bridge_port", termux.currentPort), restoredOutputPending = true) } }.getOrNull()
+            runCatching { rows.getJSONObject(index).let { TerminalSession(it.getString("id"), it.getString("title"), it.getString("workspace"), it.getString("client"), bridgePort = it.optInt("bridge_port", termux.currentPort), restoredOutputPending = true,
+                remoteTarget = it.optString("remote_target"), remoteId = it.optString("remote_id")) } }.getOrNull()
         } }
         selectedSession = sessions.firstOrNull()?.id.orEmpty()
     }
@@ -221,12 +397,21 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         historyLoading = true
         history = emptyList()
         historyError = ""
-        val directory = if (allProjects) null else options.workspace
+        val remote = sshTarget?.id
+        val directory = if (allProjects) null else historyWorkspace
         worker.execute {
-            val result = runCatching { readHistory(directory) }
+            val result = runCatching { if (remote == null) readHistory(directory) else {
+                val value = remoteRequest(remote, JSONObject().put("op", "history").put("workspace", directory ?: ""))
+                val rows = value.getJSONArray("sessions")
+                (0 until rows.length()).map { index -> val row = rows.getJSONObject(index)
+                    LocalConversation(row.getString("id"), row.getString("history_ref"), row.getString("client"), row.getString("title"),
+                        row.getString("workspace"), row.getString("model"), row.getString("profile_id"), row.getLong("updated_at"),
+                        row.optString("preview"), row.optString("configured_model", row.getString("model")), row.optString("gateway"))
+                }
+            } }
             main.post {
-                result.onSuccess { rows -> if (directory == null || options.workspace == directory) history = rows }
-                    .onFailure { historyError = "无法读取本地历史，请在运行环境页重新连接 Termux" }
+                result.onSuccess { rows -> if (sshTarget?.id == remote && (directory == null || historyWorkspace == directory)) history = rows }
+                    .onFailure { historyError = if (remote == null) "无法读取本地历史，请在运行环境页重新连接 Termux" else it.message ?: "无法读取电脑历史" }
                 historyLoading = false
             }
         }
@@ -251,11 +436,12 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun restoreOriginal(entry: LocalConversation) {
-        launch(original = entry)
+        if (localExecution) launch(original = entry) else launchRemote("original", entry)
     }
 
     fun chooseHistory(entry: LocalConversation) {
         selectedHistory = entry
+        if (!localExecution) { remoteClient = entry.client; return }
         updateOptions(options.copy(executionId = "local", client = entry.client, mode = "resume"))
     }
     fun saveSshTarget(name: String, host: String, user: String, port: String, done: () -> Unit) {
@@ -421,6 +607,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectExecutionLocation(value: String) {
+        remoteWorkbench = null; remoteMessage = ""; remoteModels = emptyList(); selectedHistory = null
         when (value) {
             "local-debian" -> { updateOptions(options.copy(executionId = "local")); selectRuntimeEnvironment("debian") }
             "local-shell" -> { updateOptions(options.copy(executionId = "local")); selectRuntimeEnvironment("debian") }
@@ -429,6 +616,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
             } else error = "此设备的 Termux 架构暂不支持完整 Linux VM；可使用 Debian Shell 或 SSH 电脑"
             else -> updateOptions(options.copy(executionId = value))
         }
+        if (!localExecution) refreshRemote()
     }
 
     fun controlVirtualMachine(action: String) {
@@ -606,6 +794,9 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     }
     fun sendBytes(id: String, value: ByteArray) {
         if (value.isEmpty()) return
+        if (sessions.firstOrNull { it.id == id }?.let { it.remoteTarget.isNotEmpty() && !it.canWrite } == true) {
+            error = "电脑已收回输入控制；点接续并控制后再输入"; return
+        }
         inputWorker.execute {
             try {
                 termux.request("/sessions/$id/input", "POST", JSONObject().put("data", Base64.encodeToString(value, Base64.NO_WRAP)), bridgePort = sessions.firstOrNull { it.id == id }?.bridgePort ?: termux.currentPort)
@@ -632,10 +823,14 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         }
     }
     private fun saveSessions() {
-        store.saveSessions(JSONArray(sessions.map { JSONObject().put("id", it.id).put("title", it.title).put("workspace", it.workspace).put("client", it.client).put("bridge_port", it.bridgePort) }))
+        store.saveSessions(JSONArray(sessions.map { JSONObject().put("id", it.id).put("title", it.title).put("workspace", it.workspace).put("client", it.client).put("bridge_port", it.bridgePort)
+            .put("remote_target", it.remoteTarget).put("remote_id", it.remoteId) }))
     }
     private fun poll() {
         if (!foreground || polling || busy || !termux.configured) return
+        if (!localExecution && connected && SystemClock.elapsedRealtime() >= remotePollAt) {
+            remotePollAt = SystemClock.elapsedRealtime() + 2500; refreshRemote()
+        }
         if (connected && !runtimePolling && SystemClock.elapsedRealtime() >= runtimePollAt) {
             runtimePollAt = SystemClock.elapsedRealtime() + 1500
             runtimePolling = true
@@ -679,8 +874,9 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                                 sessions = sessions.map { current ->
                                     if (current.id != session.id) current else {
                                         val encoded = data.optString("data")
-                                        val next = if (encoded.isBlank()) current.output else (current.output + OutputChunk(data.getLong("after"), encoded, current.restoredOutputPending)).takeLast(80)
-                                        current.copy(after = data.getLong("after"), output = next, restoredOutputPending = false, exitCode = if (data.isNull("exit_code")) null else data.getInt("exit_code"))
+                                        val next = if (encoded.isBlank()) current.output else (current.output + OutputChunk(data.getLong("after"), encoded, current.restoredOutputPending || current.remoteTarget.isNotEmpty())).takeLast(80)
+                                        current.copy(after = data.getLong("after"), output = next, restoredOutputPending = false,
+                                            canWrite = data.optBoolean("can_write", true), exitCode = if (data.isNull("exit_code")) null else data.getInt("exit_code"))
                                     }
                                 }
                                 if (!data.isNull("exit_code")) {

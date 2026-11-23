@@ -462,6 +462,140 @@ final class ManagerModel: ObservableObject {
     @Published var pricingError = ""
     @Published private var favoriteKeys = Set(UserDefaults.standard.stringArray(forKey: "models.favorite") ?? [])
     let terminalStyle = SharedTerminalStyle()
+    @Published private(set) var remoteEnabled = false
+    private var remoteServer: RemoteHTTPServer?
+    private let remoteAttachments = RemoteAttachments()
+
+    func setRemoteEnabled(_ enabled: Bool) {
+        if !enabled {
+            remoteServer?.stop(); remoteServer = nil; remoteEnabled = false
+            UserDefaults.standard.set(false, forKey: "remote.enabled")
+            return
+        }
+        guard remoteServer == nil else { return }
+        do {
+            remoteServer = try RemoteHTTPServer(endpoint: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".agent-workbench/remote.json")) { [weak self] data in
+                guard let self else { return Data("{\"ok\":false,\"error\":\"电脑工作台已退出\"}".utf8) }
+                return await self.handleRemoteRequest(data)
+            }
+            remoteEnabled = true
+            UserDefaults.standard.set(true, forKey: "remote.enabled")
+        } catch { setError("无法启动手机接续服务：\(error.localizedDescription)") }
+    }
+
+    func restoreRemoteService() {
+        if UserDefaults.standard.bool(forKey: "remote.enabled") { setRemoteEnabled(true) }
+    }
+
+    private func remoteSessionRow(_ session: TerminalSession) -> [String: Any] {
+        ["id": session.id.uuidString, "title": session.title, "client": session.client.rawValue,
+         "workspace": session.workspace, "profile_id": session.profileID, "model": session.model,
+         "scope": session.isGlobal ? "system" : "workbench", "permissions": session.permissions,
+         "running": session.isRunning]
+    }
+
+    private func handleRemoteRequest(_ data: Data) async -> Data {
+        let response: [String: Any]
+        do {
+            guard remoteEnabled, let request = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let op = request["op"] as? String else { throw RemoteWorkbenchError.invalid("请求无效") }
+            if op != "ping" {
+                guard let clientID = request["client_id"] as? String, UUID(uuidString: clientID) != nil else { throw RemoteWorkbenchError.invalid("控制端标识无效") }
+            }
+            let value = try await remoteOperation(request, op: op)
+            response = ["ok": true, "value": value]
+        } catch { response = ["ok": false, "error": error.localizedDescription] }
+        return (try? JSONSerialization.data(withJSONObject: response)) ?? Data("{\"ok\":false,\"error\":\"响应无法编码\"}".utf8)
+    }
+
+    private func remoteOperation(_ request: [String: Any], op: String) async throws -> Any {
+        func text(_ key: String) -> String { request[key] as? String ?? "" }
+        if op == "ping" { return ["schema": 1] }
+        guard let backend else { throw RemoteWorkbenchError.invalid("电脑工作台正在读取配置") }
+        if op == "state" {
+            return ["schema": 1, "platform": "macos", "capabilities": ["sessions", "launch", "system-cli", "history", "models", "attachments"],
+                    "profiles": profiles.map { ["id": $0.id, "name": $0.name, "gateway": $0.gateway ?? defaultGateway] },
+                    "workspace": workspace, "workspaces": workspaces, "client": activeClient.rawValue,
+                    "profile_id": selectedProfileID, "model": selectedModel,
+                    "permissions": ["codex": agentPermissions?.codex.rawValue ?? "unreviewed", "claude": agentPermissions?.claude.rawValue ?? "unreviewed"],
+                    "sessions": terminalSessions.map(remoteSessionRow)] as [String: Any]
+        }
+        if op == "models" {
+            guard profiles.contains(where: { $0.id == text("profile_id") }) else { throw RemoteWorkbenchError.invalid("电脑调用配置不存在") }
+            let data = try await backend.run(["profile-models", "--profile-id", text("profile_id")])
+            return try JSONSerialization.jsonObject(with: data)
+        }
+        if op == "history" {
+            var args = ["history-list-global"]
+            if !text("workspace").isEmpty { args += ["--workspace", text("workspace")] }
+            if ["codex", "claude"].contains(text("client")) { args += ["--client", text("client")] }
+            return try JSONSerialization.jsonObject(with: await backend.run(args))
+        }
+        if op == "launch" {
+            guard !installingApplicationUpdate, let client = ClientKind(rawValue: text("client")) else { throw RemoteWorkbenchError.invalid("电脑正在更新或客户端无效") }
+            let directory = text("workspace")
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: directory, isDirectory: &isDirectory), isDirectory.boolValue else { throw RemoteWorkbenchError.invalid("电脑项目目录不存在") }
+            let previous = Set(terminalSessions.map(\.id))
+            let action = text("history_action")
+            if !action.isEmpty {
+                let data = try await backend.run(["history-list-global", "--workspace", directory, "--client", client.rawValue])
+                let rows = try JSONDecoder().decode(HistoryListResponse.self, from: data).sessions
+                let entry = action == "recent" ? rows.first : rows.first(where: { $0.history_ref == text("history_ref") })
+                guard let entry else { throw RemoteWorkbenchError.invalid("电脑当前项目找不到这条对话") }
+                if action == "original" || action == "recent" {
+                    let running = terminalSessions.filter { $0.isRunning && $0.workspace == directory && $0.client == client }
+                    if !running.contains(where: { $0.sourceHistoryRef == entry.history_ref }), running.contains(where: { $0.sourceHistoryRef == nil }) {
+                        throw RemoteWorkbenchError.invalid("此项目有正在运行的会话，请从电脑运行列表接续；要恢复其他历史，请先确认原会话已结束")
+                    }
+                    restoreOriginal(entry)
+                }
+                else if action == "fork" {
+                    guard ensureAgentPermissions(), let profile = profiles.first(where: { $0.id == text("profile_id") }), !text("model").isEmpty else { throw RemoteWorkbenchError.invalid("请先在电脑确认权限并选择调用配置、模型") }
+                    launchWorkbench(client: client, profile: profile, model: text("model"), directory: directory, targetGateway: profile.gateway ?? defaultGateway, mode: .resume, history: entry)
+                } else { throw RemoteWorkbenchError.invalid("历史操作无效") }
+            } else if text("scope") == "system" { launchGlobal(client: client, directory: directory) }
+            else {
+                guard ensureAgentPermissions(), let profile = profiles.first(where: { $0.id == text("profile_id") }), !text("model").isEmpty else { throw RemoteWorkbenchError.invalid("请先在电脑确认权限并选择调用配置、模型") }
+                launchWorkbench(client: client, profile: profile, model: text("model"), directory: directory, targetGateway: profile.gateway ?? defaultGateway, mode: .new, history: nil)
+            }
+            guard !isStatusError, let session = terminalSessions.first(where: { !previous.contains($0.id) }) ?? selectedTerminal else { throw RemoteWorkbenchError.invalid(statusMessage) }
+            return remoteSessionRow(session)
+        }
+        guard let id = UUID(uuidString: text("session_id")), let session = terminalSessions.first(where: { $0.id == id }) else { throw RemoteWorkbenchError.invalid("电脑会话已结束或不存在，请刷新") }
+        let clientID = text("client_id")
+        switch op {
+        case "attachment":
+            _ = try session.control.replay.requireControl(clientID)
+            return try remoteAttachments.receive(request, session: text("session_id"), owner: clientID)
+        case "attachment-cancel":
+            remoteAttachments.cancel(id: text("upload_id"), session: text("session_id"), owner: clientID)
+            return ["ok": true]
+        case "attachment-paste":
+            let path = try remoteAttachments.path(id: text("upload_id"), session: text("session_id"), owner: clientID)
+            let input = "\u{1b}[200~" + shellQuote(path) + " " + "\u{1b}[201~"
+            try session.control.remoteInput(Data(input.utf8), client: clientID, inputID: text("upload_id"))
+            return ["attached": true]
+        case "attach":
+            guard session.isRunning else { throw RemoteWorkbenchError.invalid("电脑进程已退出；请使用恢复历史") }
+            session.control.replay.claim(clientID)
+            return remoteSessionRow(session)
+        case "output":
+            var value = session.control.replay.snapshot(after: request["after"] as? Int ?? 0, client: clientID)
+            value["exit_code"] = session.isRunning ? NSNull() : (session.exitCode ?? 0) as Any
+            return value
+        case "input":
+            guard session.isRunning, let bytes = Data(base64Encoded: text("data")), bytes.count <= 65_536 else { throw RemoteWorkbenchError.invalid("终端已退出或输入过大") }
+            try session.control.remoteInput(bytes, client: clientID, inputID: text("input_id")); return ["accepted": true]
+        case "resize":
+            try session.control.remoteResize(cols: request["cols"] as? Int ?? 80, rows: request["rows"] as? Int ?? 24, client: clientID); return ["ok": true]
+        case "detach": session.control.replay.release(clientID); return ["detached": true]
+        case "stop":
+            _ = try session.control.replay.requireControl(clientID)
+            session.stop(); return ["stopping": true]
+        default: throw RemoteWorkbenchError.invalid("电脑版本尚不支持此功能")
+        }
+    }
 
     private var backend: BackendClient?
     private let modelCatalog: ModelCatalogCache
@@ -1151,9 +1285,9 @@ final class ManagerModel: ObservableObject {
         isStatusError = false
     }
 
-    func launchGlobal(client: ClientKind, history: LocalHistoryEntry? = nil) {
+    func launchGlobal(client: ClientKind, history: LocalHistoryEntry? = nil, directory: String? = nil) {
         guard !installingApplicationUpdate else { return }
-        let directory = history?.workspace ?? workspace
+        let directory = history?.workspace ?? directory ?? workspace
         var isDirectory: ObjCBool = false
         guard !directory.isEmpty, FileManager.default.fileExists(atPath: directory, isDirectory: &isDirectory),
               isDirectory.boolValue else {

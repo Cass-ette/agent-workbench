@@ -6,6 +6,17 @@ import SwiftUI
 /// The trailing space lets the user keep composing the command without running it.
 @MainActor
 final class FileDropTerminalView: LocalProcessTerminalView {
+    var onLocalInput: (() -> Void)?
+    var remotePTYSize: winsize?
+    var remoteSizeIsActive: (() -> Bool)?
+    override func getWindowSize() -> winsize {
+        if remoteSizeIsActive?() == true, let size = remotePTYSize { return size }
+        return super.getWindowSize()
+    }
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        onLocalInput?()
+        super.insertText(string, replacementRange: replacementRange)
+    }
     private(set) var isSelectedForInput = false
     var attachmentDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/cchp-client/claude-test/attachments", isDirectory: true)
@@ -55,6 +66,7 @@ final class FileDropTerminalView: LocalProcessTerminalView {
             }
         }
         guard !urls.isEmpty else { return false }
+        onLocalInput?()
         window?.makeFirstResponder(self)
         pasteText(urls.map { Self.shellQuote($0.path) }.joined(separator: " ") + " ")
         return true
@@ -62,11 +74,13 @@ final class FileDropTerminalView: LocalProcessTerminalView {
 
     override func paste(_ sender: Any) {
         guard isSelectedForInput, !isHiddenOrHasHiddenAncestor else { return }
+        onLocalInput?()
         if !performFileDrop(from: .general) { super.paste(sender) }
     }
 
     override func keyDown(with event: NSEvent) {
         guard isSelectedForInput, !isHiddenOrHasHiddenAncestor else { return }
+        onLocalInput?()
         // CLI users also expect Ctrl+V to attach a screenshot on macOS.
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control,
            event.charactersIgnoringModifiers?.lowercased() == "v",
@@ -86,7 +100,12 @@ final class FileDropTerminalView: LocalProcessTerminalView {
 
 @MainActor
 final class EmbeddedTerminalControl: ObservableObject {
-    private weak var terminalView: FileDropTerminalView?
+    nonisolated let replay = RemoteTerminalBuffer()
+    private var terminalView: FileDropTerminalView?
+    private var processDelegateObject: AnyObject?
+    var existingView: FileDropTerminalView? { terminalView }
+
+    func keepProcessDelegate(_ delegate: AnyObject) { processDelegateObject = delegate }
     private var isSelected = false
     private var appliedStyle: TerminalStyleSettings?
 
@@ -95,11 +114,21 @@ final class EmbeddedTerminalControl: ObservableObject {
         terminalView = view
         appliedStyle = nil
         view.setSelected(isSelected)
+        let buffer = replay
+        view.setProcessByteHandler { buffer.append($0) }
+        view.remoteSizeIsActive = { buffer.hasRemoteControl }
+        view.onLocalInput = { [weak view] in
+            buffer.release()
+            if let view {
+                var size = view.getWindowSize()
+                _ = view.process.updateWindowSize(&size)
+            }
+        }
     }
 
     func detach(_ view: FileDropTerminalView) {
         view.setSelected(false)
-        if terminalView === view { terminalView = nil }
+        // The session owns its PTY even while no desktop window presents it.
     }
 
     func setSelected(_ selected: Bool) {
@@ -110,6 +139,21 @@ final class EmbeddedTerminalControl: ObservableObject {
 
     func stop() {
         terminalView?.terminate()
+    }
+
+    func remoteInput(_ bytes: Data, client: String, inputID: String) throws {
+        guard let terminalView else { throw RemoteWorkbenchError.invalid("终端正在准备，请稍后重试") }
+        if try replay.requireControl(client, inputID: inputID) {
+            terminalView.process.send(data: Array(bytes)[...])
+        }
+    }
+
+    func remoteResize(cols: Int, rows: Int, client: String) throws {
+        guard let terminalView else { throw RemoteWorkbenchError.invalid("终端正在准备") }
+        guard try replay.requireControl(client) else { return }
+        var size = winsize(ws_row: UInt16(max(2, min(rows, 200))), ws_col: UInt16(max(10, min(cols, 400))), ws_xpixel: 0, ws_ypixel: 0)
+        terminalView.remotePTYSize = size
+        _ = terminalView.process.updateWindowSize(&size)
     }
 
     func apply(_ style: SharedTerminalStyle, to view: FileDropTerminalView) {
@@ -136,9 +180,17 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> FileDropTerminalView {
+        if let view = control.existingView {
+            view.processDelegate = context.coordinator
+            control.keepProcessDelegate(context.coordinator)
+            control.attach(view)
+            control.apply(style, to: view)
+            return view
+        }
         let view = FileDropTerminalView(frame: .zero, font: style.font,
                                         options: TerminalOptions(scrollback: style.settings.scrollback))
         view.processDelegate = context.coordinator
+        control.keepProcessDelegate(context.coordinator)
         control.attach(view)
         control.apply(style, to: view)
 
@@ -158,12 +210,12 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ view: FileDropTerminalView, coordinator: Coordinator) {
-        coordinator.control.detach(view)
+        coordinator.control?.detach(view)
     }
 
     @MainActor
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
-        let control: EmbeddedTerminalControl
+        weak var control: EmbeddedTerminalControl?
         private let onExit: (Int32?) -> Void
 
         init(control: EmbeddedTerminalControl, onExit: @escaping (Int32?) -> Void) {
@@ -283,7 +335,9 @@ struct TerminalPanel: View {
                 ForEach(model.terminalSessions) { session in
                     TerminalSessionPane(session: session, style: model.terminalStyle,
                                         isSelected: model.selectedTerminalID == session.id,
-                                        onExit: { code in model.processDidExit(sessionID: session.id, exitCode: code) })
+                                        onExit: { [weak model, weak session] code in
+                                            if let session { model?.processDidExit(sessionID: session.id, exitCode: code) }
+                                        })
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

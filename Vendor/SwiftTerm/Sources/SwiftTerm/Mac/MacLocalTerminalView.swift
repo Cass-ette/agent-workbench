@@ -142,6 +142,7 @@ private final class LocalProcessTerminalViewProcessAdapter:
     private let frameSignal: FrameDriverSignal
     private let diagnosticsState: Locked<TerminalView.Diagnostics>
     private let outputHandler: LockedVoidCallback
+    private let byteHandler: Locked<(@Sendable ([UInt8]) -> Void)?>
     private let windowSize = Locked(winsize())
     private let inputProcess = Locked(WeakLocalProcessInputReference())
     private let failureHandler: @MainActor @Sendable (LocalProcessError) -> Void
@@ -151,12 +152,14 @@ private final class LocalProcessTerminalViewProcessAdapter:
          frameSignal: FrameDriverSignal,
          diagnosticsState: Locked<TerminalView.Diagnostics>,
          outputHandler: LockedVoidCallback,
+         byteHandler: Locked<(@Sendable ([UInt8]) -> Void)?>,
          failureHandler: @escaping @MainActor @Sendable (LocalProcessError) -> Void,
          terminationHandler: @escaping @MainActor @Sendable (Int32?) -> Void) {
         self.renderOwner = renderOwner
         self.frameSignal = frameSignal
         self.diagnosticsState = diagnosticsState
         self.outputHandler = outputHandler
+        self.byteHandler = byteHandler
         self.failureHandler = failureHandler
         self.terminationHandler = terminationHandler
     }
@@ -188,6 +191,7 @@ private final class LocalProcessTerminalViewProcessAdapter:
     }
 
     func dataReceived(slice: ArraySlice<UInt8>) {
+        byteHandler.withLock { $0 }?(Array(slice))
         frameSignal.markDirty()
         let parse = Profiling.begin(.ioParse, "bytes=%d", slice.count)
         _ = renderOwner.feed(bytes: slice)
@@ -201,6 +205,12 @@ private final class LocalProcessTerminalViewProcessAdapter:
     }
 
     func dataReceivedBorrowed(_ bytes: Span<UInt8>) {
+        if let handler = byteHandler.withLock({ $0 }) {
+            var copy: [UInt8] = []
+            copy.reserveCapacity(bytes.count)
+            for index in 0..<bytes.count { copy.append(bytes[index]) }
+            handler(copy)
+        }
         frameSignal.markDirty()
         let parse = Profiling.begin(.ioParse, "bytes=%d", bytes.count)
         _ = renderOwner.feed(borrowedBytes: bytes)
@@ -247,6 +257,7 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
     public internal(set) var process: LocalProcess!
     private var processAdapter: LocalProcessTerminalViewProcessAdapter!
     nonisolated private let processOutputHandler = LockedVoidCallback()
+    nonisolated private let processByteHandler = Locked<(@Sendable ([UInt8]) -> Void)?>(nil)
 
     public override init (frame: CGRect)
     {
@@ -276,6 +287,7 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
             frameSignal: frameSignal,
             diagnosticsState: diagnosticsState,
             outputHandler: processOutputHandler,
+            byteHandler: processByteHandler,
             failureHandler: { [weak self] error in
                 guard let self, let process = self.process else { return }
                 self.processFailedToStart(process, error: error)
@@ -303,6 +315,11 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
     /// and must return quickly.
     public func setProcessOutputHandler(_ handler: (@Sendable () -> Void)?) {
         processOutputHandler.replace(with: handler)
+    }
+
+    /// A copied output batch for hosts that provide another view of the same PTY.
+    public func setProcessByteHandler(_ handler: (@Sendable ([UInt8]) -> Void)?) {
+        processByteHandler.withLock { $0 = handler }
     }
     
     /**

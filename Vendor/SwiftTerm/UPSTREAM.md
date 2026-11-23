@@ -11,3 +11,7 @@ so macOS builds do not fetch unrelated cross-platform dependencies. Two small
 source files provide the build metadata and an empty XTGETTCAP table that the
 upstream SwiftPM build normally generates. Terminal emulation and local PTY
 support are provided by the upstream SwiftTerm implementation.
+
+The macOS host adds an optional copied-byte callback on the process adapter.
+It observes the existing PTY output for authenticated remote viewers without
+replacing the parser, input transport, or process delegate.

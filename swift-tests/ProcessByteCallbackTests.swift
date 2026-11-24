@@ -14,7 +14,10 @@ final class ProcessByteCallbackTests: XCTestCase {
         view.setProcessByteHandler { bytes in
             replay.append(bytes)
         }
-        let script = "import os,time\nfor i in range(12000):\n os.write(1,b'workbench-output-batch\\r\\n'); time.sleep(.0015)\nos.write(1,b'PTY_STRESS_COMPLETE\\r\\n')"
+        // Shared CI runners may round each tiny sleep to a much longer timer
+        // interval. Exercise the real reader with continuous output; the test
+        // below separately exercises 50,000 individual callback deliveries.
+        let script = "import os\nfor i in range(12000):\n os.write(1,b'workbench-output-batch\\r\\n')\nos.write(1,b'PTY_STRESS_COMPLETE\\r\\n')"
         view.startProcess(executable: "/usr/bin/python3", args: ["-u", "-c", script], environment: ["TERM=xterm-256color"])
         defer { view.terminate() }
         let deadline = Date().addingTimeInterval(40)
@@ -29,8 +32,17 @@ final class ProcessByteCallbackTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertTrue(complete, "Continuous output must finish without losing the PTY reader")
-        let end = replay.snapshot(after: .max, client: "")["after"] as? Int ?? 0
-        XCTAssertGreaterThan(end, 12_000 * 20, "Retain the complete stream across coalesced PTY deliveries")
+        var cursor = 0
+        var output = Data()
+        while true {
+            let snapshot = replay.snapshot(after: cursor, client: "")
+            let data = Data(base64Encoded: snapshot["data"] as? String ?? "") ?? Data()
+            if data.isEmpty { break }
+            output.append(data)
+            cursor = snapshot["after"] as? Int ?? cursor
+        }
+        XCTAssertEqual(String(decoding: output, as: UTF8.self).components(separatedBy: "workbench-output-batch").count - 1, 12_000,
+                       "Retain every output line across coalesced PTY deliveries")
     }
 
     func testRepeatedReadsOnPTYSizeStackDoNotAccumulateCallbackWrappers() {

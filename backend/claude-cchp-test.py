@@ -673,21 +673,36 @@ def global_history_roots():
     return codex, claude
 
 
-def history_list(workspace=None, client=None):
+def history_list(workspace=None, client=None, include_archived=False):
     session_history = history_module()
     codex_roots, claude_roots = history_roots()
     rows = session_history.mark_scope(
         session_history.scan_history(codex_roots, claude_roots, workspace=workspace, client=client), "workbench")
+    rows = session_history.archive_rows(rows, TEST_ROOT / "history-archive", include_archived)
     print(json.dumps({"sessions": session_history.public_rows(rows)}, ensure_ascii=False))
 
 
-def global_history_list(workspace=None, client=None):
+def global_history_list(workspace=None, client=None, include_archived=False):
     session_history = history_module()
     codex_roots, claude_roots = global_history_roots()
     workbench_codex, workbench_claude = history_roots()
     rows = session_history.scan_all_history(
         workbench_codex, workbench_claude, codex_roots, claude_roots, workspace=workspace, client=client)
+    rows = session_history.archive_rows(rows, TEST_ROOT / "history-archive", include_archived)
     print(json.dumps({"sessions": session_history.public_rows(rows)}, ensure_ascii=False))
+
+
+def archive_history_from_stdin():
+    payload = json.load(sys.stdin)
+    if not isinstance(payload, dict) or not isinstance(payload.get("archived"), bool):
+        raise RuntimeError("归档请求格式不正确。")
+    session_history = history_module()
+    codex_roots, claude_roots = history_roots()
+    global_codex, global_claude = global_history_roots()
+    row = session_history.resolve_history(payload.get("history_ref"), payload.get("history_id"), payload.get("client"),
+                                          codex_roots + global_codex, claude_roots + global_claude)
+    session_history.set_archived(row, TEST_ROOT / "history-archive", payload["archived"])
+    print(json.dumps({"archived": payload["archived"]}))
 
 
 def launch_history(history_ref, session_id, client, profile_id, model, workspace_value,
@@ -1196,7 +1211,7 @@ def main():
         "menu", "setup", "status", "models", "plan", "chat", "smoke", "usage",
         "profile-account", "profile-billing", "billing-settings", "save-billing-stdin", "remove-billing",
         "profile-pricing", "save-pricing-source-stdin",
-        "gui-state", "history-list", "history-list-global", "history-launch", "history-import-launch", "history-resume-original",
+        "gui-state", "history-list", "history-list-global", "history-archive-stdin", "history-launch", "history-import-launch", "history-resume-original",
         "profile-models", "add-profile-stdin", "remove-profile", "set-gateway-stdin",
         "set-profile-gateway-stdin", "launch", "codex-launch",
         "tools-get", "tools-save", "tools-import",
@@ -1207,6 +1222,7 @@ def main():
     parser.add_argument("--session-mode", choices=["new", "continue", "resume"], default="new")
     parser.add_argument("--gateway-url")
     parser.add_argument("--history-ref")
+    parser.add_argument("--include-archived", action="store_true")
     parser.add_argument("--session-id")
     parser.add_argument("--client", choices=["codex", "claude"])
     parser.add_argument("--force", action="store_true")
@@ -1246,8 +1262,9 @@ def main():
         billing_actions[arguments.action](arguments.profile_id); return 0
     if arguments.action == "plan": plan(arguments.model); return 0
     if arguments.action == "gui-state": gui_state(); return 0
-    if arguments.action == "history-list": history_list(arguments.workspace, arguments.client); return 0
-    if arguments.action == "history-list-global": global_history_list(arguments.workspace, arguments.client); return 0
+    if arguments.action == "history-list": history_list(arguments.workspace, arguments.client, arguments.include_archived); return 0
+    if arguments.action == "history-list-global": global_history_list(arguments.workspace, arguments.client, arguments.include_archived); return 0
+    if arguments.action == "history-archive-stdin": archive_history_from_stdin(); return 0
     if arguments.action == "history-resume-original":
         if not all((arguments.history_ref, arguments.session_id, arguments.client, arguments.workspace)):
             raise RuntimeError("恢复会话缺少历史来源或工作目录。")

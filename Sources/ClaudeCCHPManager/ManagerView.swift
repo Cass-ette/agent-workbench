@@ -551,15 +551,15 @@ private struct HistoryPickerSheet: View {
     @ObservedObject var model: ManagerModel
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
+    @State private var showArchived = false
 
     private var filtered: [LocalHistoryEntry] {
-        guard !query.isEmpty else { return model.historySessions }
         return model.historySessions.filter {
-            $0.title.localizedCaseInsensitiveContains(query)
+            $0.isArchived == showArchived && (query.isEmpty || $0.title.localizedCaseInsensitiveContains(query)
                 || ($0.preview?.localizedCaseInsensitiveContains(query) ?? false)
                 || $0.workspace.localizedCaseInsensitiveContains(query)
                 || $0.profile_name.localizedCaseInsensitiveContains(query)
-                || $0.model.localizedCaseInsensitiveContains(query)
+                || $0.model.localizedCaseInsensitiveContains(query))
         }
     }
 
@@ -580,6 +580,13 @@ private struct HistoryPickerSheet: View {
                     .keyboardShortcut(.cancelAction)
             }
             .padding(16)
+            Picker("归档状态", selection: $showArchived) {
+                Text("未归档").tag(false)
+                Text("已归档").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 10)
             if model.historyScope == "global" {
                 Picker("浏览方式", selection: $byDirectory) {
                     Text("最近").tag(false)
@@ -624,6 +631,7 @@ private struct HistoryPickerSheet: View {
     }
 
     private func conversation(_ entry: LocalHistoryEntry) -> some View {
+        HStack(spacing: 12) {
         Button {
             model.chooseHistory(entry)
         } label: {
@@ -650,6 +658,13 @@ private struct HistoryPickerSheet: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        Button(entry.isArchived ? "取消归档" : "归档") {
+            Task { await model.archiveHistory(entry, archived: !entry.isArchived) }
+        }
+        .disabled(!model.archivingHistoryRef.isEmpty)
+        .help("只改变历史列表显示；保留对话内容、原配置和正在运行的终端。")
+        }
         .padding(.vertical, 4)
     }
 }

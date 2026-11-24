@@ -9,6 +9,39 @@ import session_history
 
 
 class SessionHistoryTests(unittest.TestCase):
+    def test_archive_survives_rescan_and_preserves_original_history_and_restore_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "codex"
+            session_id = "01a1ec86-bf14-70f2-8144-874b179beb72"
+            path = home / "sessions" / f"rollout-test-{session_id}.jsonl"
+            path.parent.mkdir(parents=True)
+            path.write_text("\n".join(map(json.dumps, [
+                {"type": "session_meta", "payload": {"id": session_id, "cwd": "/work/project"}},
+                {"type": "response_item", "payload": {"role": "user", "content": "Keep this conversation"}},
+            ])))
+            original = path.read_bytes(), path.stat().st_mtime_ns
+            roots = [(home, "p", "Profile")]
+            archive = Path(temporary) / "workbench/history-archive"
+            rows = session_history.scan_history(roots, [])
+            self.assertFalse(session_history.archive_rows(rows, archive)[0]["archived"])
+            session_history.set_archived(rows[0], archive, True)
+            session_history.set_archived(rows[0], archive, True)
+            rescanned = session_history.scan_history(roots, [])
+            self.assertEqual(session_history.archive_rows(rescanned, archive), [])
+            archived = session_history.archive_rows(rescanned, archive, include_archived=True)[0]
+            self.assertTrue(archived["archived"])
+            self.assertEqual(archived["history_ref"], rows[0]["history_ref"])
+            source = session_history.resolve_history(archived["history_ref"], session_id, "codex", roots, [])
+            self.assertEqual(source["_path"], str(path))
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), original)
+            self.assertEqual(len(session_history.scan_history(roots, [])), 1)
+            session_history.set_archived(source, archive, False)
+            session_history.set_archived(source, archive, False)
+            self.assertEqual(len(session_history.archive_rows(rescanned, archive)), 1)
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), original)
+            with self.assertRaises(ValueError):
+                session_history.set_archived(source, archive, "true")
+
     def test_instruction_prelude_is_not_a_history_title(self):
         prelude = "# AGENTS.md instructions\n<INSTRUCTIONS>\nUse the installed tools\n</INSTRUCTIONS>\n<environment_context>local settings</environment_context>"
         self.assertEqual(session_history._title(prelude), "")

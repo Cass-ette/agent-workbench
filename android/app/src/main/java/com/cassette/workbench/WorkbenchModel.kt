@@ -25,6 +25,7 @@ data class LocalConversation(
     val preview: String = "",
     val configuredModel: String = model,
     val gateway: String = "",
+    val archived: Boolean = false,
 ) {
     val displayTitle get() = if (title.trimStart().startsWith("# AGENTS.md instructions")) preview.ifBlank { "未命名对话" } else title
 }
@@ -430,6 +431,8 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     var history by mutableStateOf(emptyList<LocalConversation>()); private set
     var historyLoading by mutableStateOf(false); private set
     var historyError by mutableStateOf(""); private set
+    var historyArchiving by mutableStateOf(""); private set
+    val canArchiveHistory get() = localExecution || remoteWorkbench?.capabilities?.contains("history-archive") == true
     var selectedHistory by mutableStateOf<LocalConversation?>(null); private set
     var sessions by mutableStateOf(emptyList<TerminalSession>()); private set
     var selectedSession by mutableStateOf("")
@@ -540,17 +543,17 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         store.saveOptions(if (next.mode == "resume") next.copy(mode = "new") else next)
     }
 
-    private fun readHistory(directory: String?, client: String? = null): List<LocalConversation> {
+    private fun readHistory(directory: String?, client: String? = null, includeArchived: Boolean = false): List<LocalConversation> {
         val query = if (directory == null) "scope=all" else
             "workspace=" + java.net.URLEncoder.encode(directory, Charsets.UTF_8.name())
-        val rows = termux.request("/history?$query" + (client?.let { "&client=$it" } ?: ""), timeout = 15000)
+        val rows = termux.request("/history?$query" + (client?.let { "&client=$it" } ?: "") + (if(includeArchived) "&archive=all" else ""), timeout = 15000)
             .getJSONArray("sessions")
         return (0 until rows.length()).map { index ->
             val row = rows.getJSONObject(index)
             LocalConversation(row.getString("id"), row.getString("history_ref"), row.getString("client"),
                 row.getString("title"), row.getString("workspace"), row.getString("model"),
                 row.getString("profile_id"), row.getLong("updated_at"), row.optString("preview"),
-                row.optString("configured_model", row.getString("model")), row.optString("gateway"))
+                row.optString("configured_model", row.getString("model")), row.optString("gateway"), row.optBoolean("archived"))
         }
     }
 
@@ -562,19 +565,42 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         val remote = sshTarget?.id
         val directory = if (allProjects) null else historyWorkspace
         worker.execute {
-            val result = runCatching { if (remote == null) readHistory(directory) else {
-                val value = remoteRequest(remote, JSONObject().put("op", "history").put("workspace", directory ?: ""))
+            val result = runCatching { if (remote == null) readHistory(directory, includeArchived = true) else {
+                val value = remoteRequest(remote, JSONObject().put("op", "history").put("workspace", directory ?: "").put("include_archived", true))
                 val rows = value.getJSONArray("sessions")
                 (0 until rows.length()).map { index -> val row = rows.getJSONObject(index)
                     LocalConversation(row.getString("id"), row.getString("history_ref"), row.getString("client"), row.getString("title"),
                         row.getString("workspace"), row.getString("model"), row.getString("profile_id"), row.getLong("updated_at"),
-                        row.optString("preview"), row.optString("configured_model", row.getString("model")), row.optString("gateway"))
+                        row.optString("preview"), row.optString("configured_model", row.getString("model")), row.optString("gateway"), row.optBoolean("archived"))
                 }
             } }
             main.post {
                 result.onSuccess { rows -> if (sshTarget?.id == remote && (directory == null || historyWorkspace == directory)) history = rows }
                     .onFailure { historyError = if (remote == null) "无法读取本地历史，请在运行环境页重新连接 Termux" else it.message ?: "无法读取电脑历史" }
                 historyLoading = false
+            }
+        }
+    }
+
+    fun archiveHistory(entry: LocalConversation) {
+        if(historyArchiving.isNotEmpty() || historyLoading || !canArchiveHistory) return
+        historyArchiving = entry.reference
+        historyError = ""
+        val remote = sshTarget?.id
+        val archived = !entry.archived
+        worker.execute {
+            val result = runCatching {
+                val payload = JSONObject().put("history_ref", entry.reference).put("history_id", entry.id)
+                    .put("client", entry.client).put("archived", archived)
+                if(remote == null) termux.request("/history/archive", "POST", payload)
+                else remoteRequest(remote, payload.put("op", "history-archive"))
+            }
+            main.post {
+                if(sshTarget?.id == remote) result.onSuccess {
+                    history = history.map { if(it.reference == entry.reference) it.copy(archived = archived) else it }
+                    notice = if(archived) "已归档；可在“已归档”中查找和取消归档" else "已取消归档"
+                }.onFailure { historyError = it.message ?: "归档失败，请确认已更新运行环境与电脑工作台" }
+                historyArchiving = ""
             }
         }
     }

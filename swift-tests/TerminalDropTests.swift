@@ -89,7 +89,8 @@ final class TerminalDropTests: XCTestCase {
         let history = LocalHistoryEntry(sessionID: UUID().uuidString, history_ref: "first-conversation",
                                         client: "codex", title: "First conversation", workspace: workspace,
                                         model: "test", configured_model: nil, profile_id: "global",
-                                        profile_name: "System", gateway: "", updated_at: 0, scope: "global", preview: nil)
+                                        profile_name: "System", gateway: "", updated_at: 0, scope: "global", preview: nil, archived: true)
+        XCTAssertTrue(history.isArchived, "An archived conversation remains directly restorable.")
         func session(_ historyRef: String?) -> TerminalSession {
             TerminalSession(client: .codex, profile: nil, model: "test", workspace: workspace,
                             sessionMode: .new, gateway: "",

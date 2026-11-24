@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import tempfile
+import time
 from urllib.parse import urlsplit
 from typing import Iterable
 from uuid import UUID, uuid4
@@ -326,6 +328,43 @@ def public_rows(rows: Iterable[dict]) -> list[dict]:
          "configured_model": row.get("_configured_model") or row.get("model", "")}
         for row in rows
     ]
+
+
+def _archive_marker(row: dict, root: Path) -> Path:
+    # Derive the filename from a resolved, trusted session, never from request paths.
+    return root / (_session_ref(row["client"], Path(row["_path"])) + ".json")
+
+
+def archive_rows(rows: Iterable[dict], root: Path, include_archived: bool = False) -> list[dict]:
+    result = []
+    for row in rows:
+        marker = _archive_marker(row, root)
+        archived = not marker.is_symlink() and marker.is_file()
+        if include_archived or not archived:
+            result.append({**row, "archived": archived})
+    return result
+
+
+def set_archived(row: dict, root: Path, archived: bool) -> None:
+    """Keep app-owned visibility state without writing the original conversation."""
+    if not isinstance(archived, bool):
+        raise ValueError("归档状态无效。")
+    marker = _archive_marker(row, root)
+    if root.is_symlink() or marker.is_symlink():
+        raise ValueError("归档状态路径无效。")
+    if not archived:
+        marker.unlink(missing_ok=True)
+        return
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".archive-", dir=root)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"version": 1, "archived_at": int(time.time())}, stream)
+        os.replace(temporary, marker)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def key_fingerprint(key: str) -> str:

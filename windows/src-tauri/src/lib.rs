@@ -672,6 +672,13 @@ async fn list_all_history(app: tauri::AppHandle) -> Result<Vec<history::Conversa
 }
 
 #[tauri::command]
+async fn set_history_archived(app: tauri::AppHandle, history_ref: String, history_id: String, client: String, archived: bool) -> Result<(), String> {
+    let root = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || history::set_archived(&root, &history_ref, &history_id, &client, archived))
+        .await.map_err(|_| "更新归档状态失败".to_string())?
+}
+
+#[tauri::command]
 fn start_terminal(
     mut request: StartTerminalRequest,
     app: tauri::AppHandle,
@@ -1218,6 +1225,7 @@ pub fn run() {
             remote::sync_remote_permissions,
             list_history,
             list_all_history,
+            set_history_archived,
             write_terminal,
             attachments::stage_clipboard_image,
             resize_terminal,

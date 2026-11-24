@@ -50,6 +50,23 @@ describe("Token 与费用", () => {
     expect(screen.getByRole("img", { name: "每日费用柱状图" })).toBeTruthy();
   });
 
+  it("输出与输入分列，量级相差很大时可单独缩放输出且保留汇总", () => {
+    render(<UsageAnalytics sessions={[{ ...usage.sessions[0], timeline: [{ date: "2026-11-22", input_tokens: 1000000, output_tokens: 1000 }] }]} />);
+    const input = screen.getByLabelText("2026-11-22 输入 1000000");
+    const output = screen.getByLabelText("2026-11-22 输出 1000");
+    expect(Number(input.getAttribute("x")) + Number(input.getAttribute("width"))).toBeLessThan(Number(output.getAttribute("x")));
+    expect(Number(output.getAttribute("height"))).toBeCloseTo(.14);
+    fireEvent.change(screen.getByLabelText("图表系列"), { target: { value: "output" } });
+    expect(screen.queryByLabelText("2026-11-22 输入 1000000")).toBeNull();
+    expect(Number(screen.getByLabelText("2026-11-22 输出 1000").getAttribute("height"))).toBeCloseTo(140);
+    expect(screen.getByRole("img", { name: "每日输出Token柱状图" })).toBeTruthy();
+    expect(screen.getByText("1,000,000")).toBeTruthy();
+    expect(screen.getByText("1,000")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("图表系列"), { target: { value: "input" } });
+    expect(screen.queryByLabelText("2026-11-22 输出 1000")).toBeNull();
+    expect(Number(screen.getByLabelText("2026-11-22 输入 1000000").getAttribute("height"))).toBeCloseTo(140);
+  });
+
   it("项目、配置和实际模型可组合筛选，同名目录不会混算", () => {
     const sessions = [
       { ...usage.sessions[0], id: "one", workspace: "/a/project", profile_id: "key-a", profile_name: "配置A", model: "last", timeline: [

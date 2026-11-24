@@ -1,6 +1,51 @@
 import SwiftUI
 import Charts
 
+enum UsageTokenSeries: String, CaseIterable, Identifiable {
+    case both, input, output
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .both: return "输入与输出"
+        case .input: return "仅看输入"
+        case .output: return "仅看输出"
+        }
+    }
+}
+
+struct UsageChart: View {
+    let points: [UsagePoint]
+    let money: Bool
+    let series: UsageTokenSeries
+
+    var body: some View {
+        Chart(points) { point in
+            if money {
+                if let cost = point.estimated_cost {
+                    BarMark(x: .value("分组", point.date), y: .value("USD", cost)).foregroundStyle(.orange)
+                }
+            } else {
+                if series != .output, let input = point.input_tokens {
+                    BarMark(x: .value("分组", point.date), y: .value("Token", input), stacking: .unstacked)
+                        .position(by: .value("类型", "输入"))
+                        .foregroundStyle(by: .value("类型", "输入"))
+                        .accessibilityLabel("\(point.date) 输入")
+                        .accessibilityValue(input.formatted())
+                }
+                if series != .input, let output = point.output_tokens {
+                    BarMark(x: .value("分组", point.date), y: .value("Token", output), stacking: .unstacked)
+                        .position(by: .value("类型", "输出"))
+                        .foregroundStyle(by: .value("类型", "输出"))
+                        .accessibilityLabel("\(point.date) 输出")
+                        .accessibilityValue(output.formatted())
+                }
+            }
+        }
+        .chartForegroundStyleScale(domain: ["输入", "输出"], range: [Color(red: 102/255, green: 141/255, blue: 240/255), Color(red: 215/255, green: 144/255, blue: 69/255)])
+        .chartLegend(money || series != .both ? .hidden : .visible)
+    }
+}
+
 func projectMatches(_ workspace: String, _ project: String, _ children: Bool = false) -> Bool {
     if project.isEmpty { return true }
     if project == "__unknown" { return workspace.isEmpty }
@@ -24,6 +69,7 @@ struct UsageAnalyticsView: View {
     @State private var group = "date"
     @State private var period = "all"
     @State private var money = false
+    @State private var tokenSeries: UsageTokenSeries = .both
     @State private var start = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
     @State private var end = Date()
 
@@ -122,15 +168,14 @@ struct UsageAnalyticsView: View {
             HStack { Text("输入 \(count(\.input_tokens)) · 输出 \(count(\.output_tokens))"); Spacer(); Text(usageCostLabel(cost, upper: nil, label: missing > 0 ? "已提供部分费用" : "上游费用／按上游单价计算")) }.font(.caption.monospacedDigit())
             Text("缓存读 \(count(\.cached_input_tokens)) / 写 \(count(\.cache_creation_input_tokens)) · 推理 \(count(\.reasoning_output_tokens))").font(.caption).foregroundStyle(.secondary)
             Picker("图表指标", selection: $money) { Text("Token").tag(false); if hasCost { Text("费用 USD").tag(true) } }.pickerStyle(.segmented)
+            if !showMoney {
+                Picker("Token 系列", selection: $tokenSeries) { ForEach(UsageTokenSeries.allCases) { Text($0.label).tag($0) } }.pickerStyle(.segmented)
+                Text(tokenSeries == .both ? "输入蓝／输出橙，并列同刻度；量级相差较大时可仅看输出。" : "单独按所选系列缩放；上方用量汇总不变。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             ScrollView(.horizontal) {
-                Chart(points.filter { !$0.date.isEmpty }) { point in
-                    if showMoney {
-                        if let cost = point.estimated_cost { BarMark(x: .value("日期 UTC", point.date), y: .value("USD", cost)).foregroundStyle(.orange) }
-                    } else {
-                        BarMark(x: .value("日期 UTC", point.date), y: .value("输入", point.input_tokens ?? 0)).foregroundStyle(by: .value("类型", "输入"))
-                        BarMark(x: .value("日期 UTC", point.date), y: .value("输出", point.output_tokens ?? 0)).foregroundStyle(by: .value("类型", "输出"))
-                    }
-                }.frame(width: CGFloat(max(500, points.count * 36)), height: 180).padding(.bottom, 4)
+                UsageChart(points: points.filter { !$0.date.isEmpty }, money: showMoney, series: tokenSeries)
+                    .frame(width: CGFloat(max(500, points.count * 48)), height: 180).padding(.bottom, 4)
             }
             if group != "date" { ScrollView { LazyVStack(alignment: .leading, spacing: 5) { ForEach(points) { row in
                 Text("\(groupLabel(row.date)) · 输入 \(usageCount(row.input_tokens)) · 输出 \(usageCount(row.output_tokens)) · \(usageCostLabel(row.estimated_cost, upper: nil, label: "费用"))").font(.caption).textSelection(.enabled)

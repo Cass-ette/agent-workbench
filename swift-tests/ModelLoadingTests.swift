@@ -26,6 +26,41 @@ private actor PendingModels {
 
 final class ModelLoadingTests: XCTestCase {
     @MainActor
+    func testCatalogOverrideScopesCacheAndLegacyProfilesDefaultToShared() throws {
+        let legacy = try JSONDecoder().decode(KeyProfile.self, from: Data(#"{"id":"a","name":"A","gateway":"https://gateway.test/api/v1"}"#.utf8))
+        XCTAssertNil(legacy.model_catalog_url)
+        let name = "ModelLoadingTests." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let cache = ModelCatalogCache(defaults: defaults)
+        cache.remember(profile: "a", gateway: "https://gateway.test/api/v1", selected: "old", models: ["old"])
+        XCTAssertTrue(cache.entry(profile: "a", gateway: "https://gateway.test/api/v1", catalogURL: "https://gateway.test/catalog/models").models.isEmpty)
+        cache.remember(profile: "a", gateway: "https://gateway.test/api/v1", catalogURL: "https://gateway.test/catalog/models", selected: "new", models: ["new"])
+        XCTAssertEqual(cache.entry(profile: "a", gateway: "https://gateway.test/api/v1").models, ["old"])
+        XCTAssertEqual(cache.entry(profile: "a", gateway: "https://gateway.test/api/v1", catalogURL: "https://gateway.test/catalog/models").models, ["new"])
+    }
+
+    @MainActor
+    func testChangedCatalogRejectsLateResultsForSameProfileAndGateway() async {
+        let name = "ModelLoadingTests." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let pending = PendingModels()
+        let model = configured(defaults) { _ in try await pending.load() }
+        let first = Task { await model.loadModels(for: "a") }
+        while !(await pending.waiting(1)) { await Task.yield() }
+        model.profiles[0].model_catalog_url = "https://gateway.test/catalog/models"
+        await pending.finish(0, model: "stale")
+        await first.value
+        XCTAssertTrue(model.models.isEmpty)
+        let second = Task { await model.loadModels(for: "a") }
+        while !(await pending.waiting(1)) { await Task.yield() }
+        await pending.finish(1, model: "fresh")
+        await second.value
+        XCTAssertEqual(model.models, ["fresh"])
+    }
+
+    @MainActor
     private func configured(_ defaults: UserDefaults,
                             loader: @escaping @Sendable (String) async throws -> ModelResponse) -> ManagerModel {
         let model = ManagerModel(modelDefaults: defaults, modelLoader: loader)

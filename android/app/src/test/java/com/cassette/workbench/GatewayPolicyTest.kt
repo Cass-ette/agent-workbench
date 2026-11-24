@@ -30,6 +30,23 @@ class GatewayPolicyTest {
         }
     }
 
+    @Test fun independentCatalogUsesExactEndpointAndDefaultsToSharedAddress() {
+        val gateway = "https://gateway.test/api/v1"
+        val catalog = "https://gateway.test/api/paas/v4/models"
+        assertEquals(listOf("$gateway/models"), GatewayPolicy.modelUrls(gateway))
+        assertEquals(listOf(catalog), GatewayPolicy.modelUrls(gateway, catalog))
+        assertEquals("https://gateway.test/v1", GatewayPolicy.normalizeCatalogUrl("https://gateway.test/v1"))
+        assertEquals(gateway, GatewayPolicy.apiBase(gateway))
+        for(url in listOf("http://gateway.test/models", "https://key@gateway.test/models", "https://gateway.test/models?token=x", "file:///tmp/models")) {
+            assertThrows(IllegalArgumentException::class.java) { GatewayPolicy.modelUrls(gateway, url) }
+        }
+        val profile = KeyProfile(name = "Legacy", gateway = gateway)
+        assertTrue(profile.modelCatalogUrl.isEmpty())
+        val edited = profile.copy(modelCatalogUrl = catalog)
+        assertEquals(profile.id, edited.id)
+        assertEquals(profile.gateway, edited.gateway)
+    }
+
 
 
 }

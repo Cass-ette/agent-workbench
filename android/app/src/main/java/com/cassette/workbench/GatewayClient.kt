@@ -51,8 +51,8 @@ object GatewayClient {
         } finally { connection.disconnect() }
     }
 
-    fun models(gateway: String, key: String): List<String> {
-        for (url in GatewayPolicy.modelUrls(gateway)) {
+    fun models(gateway: String, key: String, modelCatalogUrl: String = "", allowInsecureLan: Boolean = false): List<String> {
+        for (url in GatewayPolicy.modelUrls(gateway, modelCatalogUrl, allowInsecureLan)) {
             val data = try { json("$url?limit=1000", key) } catch (cause: GatewayHttpException) {
                 if (cause.status in setOf(401, 403)) {
                     try { json("$url", key, includeApiKey = false) } catch (bearer: GatewayHttpException) {

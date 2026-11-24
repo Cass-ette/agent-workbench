@@ -663,17 +663,18 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         account = ""
     }
 
-    fun saveProfile(name: String, address: String, key: String, validate: Boolean, allowInsecureLan: Boolean, done: () -> Unit) {
+    fun saveProfile(name: String, address: String, key: String, validate: Boolean, allowInsecureLan: Boolean, modelCatalogUrl: String = "", done: () -> Unit) {
         if (busy) return
         busy = true; error = ""
         worker.execute {
             try {
                 require(name.isNotBlank() && name.length <= 80 && key.isNotBlank() && key.length <= 4096 && key.trim().none { it.isWhitespace() || it.isISOControl() }) { "请填写名称和完整调用 Key" }
                 val gateway = GatewayPolicy.normalize(address, allowInsecureLan)
+                val catalogUrl = GatewayPolicy.normalizeCatalogUrl(modelCatalogUrl, allowInsecureLan)
                 var catalogNotice = if (validate) "" else "已跳过模型列表读取；Key 和模型尚未验证，请手动填写模型 ID"
-                val models = if (validate) try { GatewayClient.models(gateway, key.trim()) }
+                val models = if (validate) try { GatewayClient.models(gateway, key.trim(), catalogUrl, allowInsecureLan) }
                     catch (cause: ModelCatalogUnavailable) { catalogNotice = cause.message.orEmpty(); emptyList() } else emptyList()
-                val created = KeyProfile(name = name.trim(), gateway = gateway, models = models, allowInsecureLan = allowInsecureLan)
+                val created = KeyProfile(name = name.trim(), gateway = gateway, models = models, allowInsecureLan = allowInsecureLan, modelCatalogUrl = catalogUrl)
                 store.saveSecret(created.id, key.trim())
                 main.post {
                     try {
@@ -686,6 +687,34 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                     busy = false
                 }
             } catch (cause: Exception) { main.post { busy = false; error = safeError(cause) } }
+        }
+    }
+
+    fun updateProfileConnection(id: String, address: String, modelCatalogUrl: String, validate: Boolean, allowInsecureLan: Boolean, done: () -> Unit) {
+        if(busy) return
+        val previous = profiles.find { it.id == id } ?: return
+        busy = true; error = ""
+        worker.execute {
+            try {
+                val gateway = GatewayPolicy.normalize(address, allowInsecureLan)
+                val catalogUrl = GatewayPolicy.normalizeCatalogUrl(modelCatalogUrl, allowInsecureLan)
+                var catalogNotice = if(validate) "" else "已跳过模型列表读取；连接尚未验证"
+                val models = if(validate) try { GatewayClient.models(gateway, store.secret(id), catalogUrl, allowInsecureLan) }
+                    catch(cause: ModelCatalogUnavailable) { catalogNotice = cause.message.orEmpty(); emptyList() } else emptyList()
+                main.post {
+                    try {
+                        val current = profiles.find { it.id == id } ?: throw IllegalStateException("调用配置已删除")
+                        check(current.gateway == previous.gateway && current.modelCatalogUrl == previous.modelCatalogUrl) { "连接设置已更改，请重新打开后保存" }
+                        val updated = current.copy(gateway = gateway, modelCatalogUrl = catalogUrl, models = models, allowInsecureLan = allowInsecureLan)
+                        val next = profiles.map { if(it.id == id) updated else it }
+                        store.saveProfiles(next); profiles = next
+                        if(options.profileId == id) account = ""
+                        notice = "连接设置已保存；已运行终端保留原配置。" + catalogNotice
+                        done()
+                    } catch(cause: Exception) { error = safeError(cause) }
+                    busy = false
+                }
+            } catch(cause: Exception) { main.post { busy = false; error = safeError(cause) } }
         }
     }
 
@@ -709,13 +738,15 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         worker.execute {
             try {
                 val key = store.secret(selected.id)
-                val models = GatewayClient.models(selected.gateway, key)
+                val models = GatewayClient.models(selected.gateway, key, selected.modelCatalogUrl, selected.allowInsecureLan)
                 val balance = runCatching {
                     val response = GatewayClient.json(selected.gateway + "/v1/cchp/account", key)
                     val value = response.optJSONObject("balance")?.opt("spendable")
                     if (value == null || value == JSONObject.NULL) "账户接口未返回可消费额度" else "网关可消费额度：$value ${response.optString("currency", "USD") }"
                 }.getOrDefault("此网关未提供可读取的账户信息")
                 main.post {
+                    val current = profiles.find { it.id == selected.id }
+                    if(current == null || current.gateway != selected.gateway || current.modelCatalogUrl != selected.modelCatalogUrl) { loadingModels = false; return@post }
                     profiles = profiles.map { if (it.id == selected.id) it.copy(models = models) else it }; store.saveProfiles(profiles)
                     if (options.profileId == selected.id) { account = balance; if (options.model.isBlank() && models.isNotEmpty()) updateOptions(options.copy(model = models[0])) }
                     notice = if (models.isEmpty()) "网关未返回模型；已保留手动填写的模型" else "已刷新 ${models.size} 个模型"

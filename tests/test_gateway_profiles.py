@@ -67,6 +67,101 @@ class GatewayProfileTests(unittest.TestCase):
 
         profiles = BACKEND.load_profiles()
         self.assertEqual(profiles[0]["gateway"], "https://default.example.test")
+        self.assertEqual(profiles[0]["model_catalog_url"], "")
+
+    def test_independent_catalog_is_saved_used_for_refresh_and_not_written_to_codex_route(self):
+        gateway = "https://gateway.test/api/v1"
+        catalog_url = "https://gateway.test/api/paas/v4/models"
+        paths = []
+        def respond(request, **kwargs):
+            paths.append(request.full_url)
+            self.assertEqual(request.full_url, catalog_url + "?limit=1000")
+            return io.BytesIO(b'{"data":[{"id":"glm-test"}]}')
+        with patch.object(BACKEND, "build_opener") as build:
+            build.return_value.open.side_effect = respond
+            saved = BACKEND.save_profile_key("Separate", "dummy", gateway, model_catalog_url=catalog_url)
+            with patch("sys.stdout", io.StringIO()) as out:
+                BACKEND.profile_models(saved["id"])
+            self.assertEqual(json.loads(out.getvalue())["models"], ["glm-test"])
+        profile = BACKEND.load_profiles()[0]
+        self.assertEqual(profile["model_catalog_url"], catalog_url)
+        home = BACKEND.codex_config(profile["id"], "glm-test", profile["gateway"])
+        config = (home/"config.toml").read_text()
+        self.assertIn('base_url = "' + gateway + '"', config)
+        self.assertNotIn(catalog_url, config)
+        self.assertEqual(len(paths), 2)
+
+    def test_editing_connections_keeps_key_id_unknown_metadata_and_can_reset_catalog(self):
+        catalog_url = "https://gateway.test/catalog/models"
+        saved = BACKEND.save_profile_key("Editable", "dummy", "https://gateway.test/api/v1", read_models=False, model_catalog_url=catalog_url)
+        key_path = BACKEND.KEY_DIR/(saved["id"] + ".key")
+        before = (key_path.read_bytes(), key_path.stat().st_mtime_ns)
+        index = json.loads(BACKEND.PROFILE_INDEX.read_text())
+        index[saved["id"]]["future_setting"] = "preserve"
+        BACKEND.PROFILE_INDEX.write_text(json.dumps(index))
+        for request, expected in (({"url":"https://gateway.test/other", "read_models":False}, catalog_url),
+                                  ({"url":"https://gateway.test/other", "read_models":False, "model_catalog_url":""}, "")):
+            with patch.object(BACKEND, "fetch_models", side_effect=AssertionError("explicit skip must not query")), \
+                    patch("sys.stdin", io.StringIO(json.dumps(request))), patch("sys.stdout", io.StringIO()):
+                BACKEND.set_profile_gateway_from_stdin(saved["id"])
+            self.assertEqual(BACKEND.load_profiles()[0]["model_catalog_url"], expected)
+            self.assertEqual(json.loads(BACKEND.PROFILE_INDEX.read_text())[saved["id"]]["future_setting"], "preserve")
+        self.assertEqual((key_path.read_bytes(), key_path.stat().st_mtime_ns), before)
+
+    def test_catalog_validation_and_failures_do_not_probe_other_routes_or_save_changes(self):
+        for url in ("https://key@gateway.test/models", "https://gateway.test/models?key=x", "http://gateway.test/models", "file:///tmp/models"):
+            with self.subTest(url=url), patch.object(BACKEND, "fetch_models") as fetch, self.assertRaises(RuntimeError):
+                BACKEND.save_profile_key("Unsafe", "dummy", "https://gateway.test", read_models=False, model_catalog_url=url)
+            fetch.assert_not_called()
+        endpoint = "https://gateway.test/catalog/models"
+        self.assertEqual(BACKEND.gateway_model_urls("https://gateway.test/api/v1", endpoint), [endpoint])
+        self.assertEqual(BACKEND.normalize_model_catalog_url("https://gateway.test/v1"), "https://gateway.test/v1")
+        with patch.object(BACKEND, "build_opener") as build:
+            build.return_value.open.side_effect = lambda req, **kw: (_ for _ in ()).throw(HTTPError(req.full_url, 404, "missing", {}, None))
+            catalog = BACKEND.model_catalog("dummy", "https://gateway.test/api/v1", model_catalog_url=endpoint)
+            self.assertEqual(catalog["models"], [])
+            self.assertEqual(build.return_value.open.call_count, 1)
+        saved = BACKEND.save_profile_key("Keep", "dummy", "https://gateway.test", read_models=False)
+        before = BACKEND.PROFILE_INDEX.read_bytes()
+        with patch.object(BACKEND, "fetch_models", side_effect=RuntimeError("HTTP 401")), \
+                patch("sys.stdin", io.StringIO(json.dumps({"url":"https://other.test", "model_catalog_url":endpoint}))):
+            with self.assertRaisesRegex(RuntimeError, "401"):
+                BACKEND.set_profile_gateway_from_stdin(saved["id"])
+        self.assertEqual(BACKEND.PROFILE_INDEX.read_bytes(), before)
+
+    def test_default_catalog_survives_legacy_gateway_updates(self):
+        BACKEND.save_gateway("https://gateway.test/api/v1", "https://gateway.test/api/paas/v4/models")
+        BACKEND.save_gateway("https://gateway.test/next")
+        self.assertEqual(BACKEND.default_model_catalog_url(), "https://gateway.test/api/paas/v4/models")
+        BACKEND.save_gateway("https://gateway.test/next", "")
+        self.assertEqual(BACKEND.default_model_catalog_url(), "")
+
+    def test_pricing_model_cache_tracks_catalog_changes_and_keeps_legacy_shared_cache(self):
+        saved = BACKEND.save_profile_key("Catalog cache", "dummy", "https://gateway.test/api/v1", read_models=False)
+        profile_id = saved["id"]
+        path = BACKEND.TEST_ROOT / "pricing" / (profile_id + "-models.json")
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"gateway": saved["gateway"], "models": ["shared-model"], "fetched_at": BACKEND.time.time()}))
+        with patch.object(BACKEND, "pricing_service") as service, patch.object(BACKEND, "fetch_models") as fetch, patch("sys.stdout", io.StringIO()):
+            service.return_value.profiles = []
+            service.return_value.snapshot.side_effect = lambda _id, models: {"models": models}
+            BACKEND.profile_pricing(profile_id)
+            fetch.assert_not_called()
+            self.assertEqual(service.return_value.snapshot.call_args.args, (profile_id, ["shared-model"]))
+
+            endpoint = "https://gateway.test/separate/models"
+            index = json.loads(BACKEND.PROFILE_INDEX.read_text())
+            index[profile_id]["model_catalog_url"] = endpoint
+            BACKEND.PROFILE_INDEX.write_text(json.dumps(index))
+            fetch.return_value = ["separate-model"]
+            BACKEND.profile_pricing(profile_id)
+            fetch.assert_called_once_with("dummy", saved["gateway"], endpoint)
+            self.assertEqual(json.loads(path.read_text())["model_catalog_url"], endpoint)
+
+            fetch.reset_mock()
+            BACKEND.profile_pricing(profile_id)
+            fetch.assert_not_called()
+            self.assertEqual(service.return_value.snapshot.call_args.args, (profile_id, ["separate-model"]))
 
     def test_remove_profile_deletes_key_and_billing_secrets_but_preserves_history(self):
         with patch.object(BACKEND, "fetch_models", return_value=["model-a"]):

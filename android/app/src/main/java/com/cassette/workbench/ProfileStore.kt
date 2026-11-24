@@ -20,9 +20,11 @@ data class KeyProfile(
     val models: List<String> = emptyList(),
     val favorites: Set<String> = emptySet(),
     val allowInsecureLan: Boolean = false,
+    val modelCatalogUrl: String = "",
 ) {
     fun json() = JSONObject().put("id", id).put("name", name).put("gateway", gateway)
         .put("models", JSONArray(models)).put("favorites", JSONArray(favorites.toList())).put("allowInsecureLan", allowInsecureLan)
+        .put("model_catalog_url", modelCatalogUrl)
 }
 
 data class TaskOptions(
@@ -76,7 +78,7 @@ class ProfileStore(context: Context) {
         (0 until values.length()).map { index ->
             val row = values.getJSONObject(index)
             KeyProfile(row.getString("id"), row.getString("name"), row.getString("gateway"),
-                row.optJSONArray("models").strings(), row.optJSONArray("favorites").strings().toSet(), row.optBoolean("allowInsecureLan", false))
+                row.optJSONArray("models").strings(), row.optJSONArray("favorites").strings().toSet(), row.optBoolean("allowInsecureLan", false), row.optString("model_catalog_url"))
         }
     } catch (_: Exception) { emptyList() }
 

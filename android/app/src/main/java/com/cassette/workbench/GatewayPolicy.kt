@@ -25,7 +25,16 @@ object GatewayPolicy {
         return if (URI(base).path.isNullOrEmpty()) "$base/v1" else base
     }
 
-    fun modelUrls(gateway: String): List<String> {
+    fun normalizeCatalogUrl(value: String, allowInsecureLan: Boolean = false): String {
+        val url = value.trim().trimEnd('/')
+        if(url.isEmpty()) return ""
+        normalize(url, allowInsecureLan)
+        return url // Exact endpoint: do not remove a trailing /v1 or append /models.
+    }
+
+    fun modelUrls(gateway: String, modelCatalogUrl: String = "", allowInsecureLan: Boolean = false): List<String> {
+        val explicit = normalizeCatalogUrl(modelCatalogUrl, allowInsecureLan)
+        if(explicit.isNotEmpty()) return listOf(explicit)
         val base = gateway.trimEnd('/')
         return listOf(apiBase(base) + "/models") +
             if (!URI(base).path.isNullOrEmpty() && !base.endsWith("/v1")) listOf("$base/v1/models") else emptyList()

@@ -8,6 +8,8 @@ import shlex
 import tempfile
 import threading
 import time
+import socket
+from types import SimpleNamespace
 import unittest
 import urllib.request
 from unittest.mock import patch
@@ -48,10 +50,42 @@ class RemoteWorkbenchTests(unittest.TestCase):
             connection.stop()
 
     def test_connection_failure_never_copies_arbitrary_command_to_message(self):
-        self.assertIn("重新复制连接码", R.connection_failure(b"ssh: No route to host"))
+        self.assertIn("自动查找", R.connection_failure(b"ssh: No route to host"))
         self.assertIn("账号和密码", R.connection_failure(b"Permission denied (publickey,password)."))
         self.assertIn("不会跳过", R.connection_failure(b"Host key verification failed."))
         self.assertNotIn("private-token", R.connection_failure(b"failed command secret=private-token"))
+
+    def test_discovery_candidates_require_pinned_key_and_lan_address_before_login(self):
+        key = "ssh-ed25519 " + base64.b64encode(bytes(range(51))).decode()
+        target = {"platform": "macos", "user": "tester", "host_key": key}
+        def address(host): return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, 22))]
+        good = SimpleNamespace(stdout=("192.168.2.9 " + key + "\n").encode())
+        with patch.object(R.shutil, "which", return_value="/usr/bin/ssh-keyscan"), \
+             patch.object(R.socket, "getaddrinfo", return_value=address("192.168.2.9")), \
+             patch.object(R.subprocess, "run", return_value=good) as scan:
+            self.assertEqual(R.verify_ssh_address(target, "new-computer.local", 22),
+                             {"verified": True, "host": "192.168.2.9", "port": 22})
+            self.assertNotIn("tester", str(scan.call_args))
+            scan.return_value = SimpleNamespace(stdout=b"192.168.2.9 ssh-ed25519 wrong-key\n")
+            self.assertEqual(R.verify_ssh_address(target, "192.168.2.9", 22)["reason"], "identity")
+        for host in ("8.8.8.8", "127.0.0.1", "100.64.0.1", "169.254.1.3"):
+            with patch.object(R.shutil, "which", return_value="/usr/bin/ssh-keyscan"), \
+                 patch.object(R.socket, "getaddrinfo", return_value=address(host)), \
+                 patch.object(R.subprocess, "run") as scan:
+                self.assertEqual(R.verify_ssh_address(target, host, 22)["reason"], "outside_lan")
+                scan.assert_not_called()
+        with self.assertRaises(ValueError): R.verify_ssh_address(target, "host;id", 22)
+
+    def test_only_network_failure_retries_and_explicit_close_cancels_retry(self):
+        self.assertTrue(R.retryable_connection_failure(b"ssh: Connection timed out"))
+        self.assertFalse(R.retryable_connection_failure(b"Permission denied"))
+        self.assertFalse(R.retryable_connection_failure(b"Host key verification failed"))
+        connection = R.RemoteConnection.__new__(R.RemoteConnection)
+        connection.stopped, connection.ever_ready, connection.exit_code = False, True, 255
+        connection.output = bytearray()
+        self.assertTrue(connection.retryable)
+        connection.stopped = True
+        self.assertFalse(connection.retryable)
 
     def test_attachment_chunk_crosses_phone_bridge_request_limit(self):
         bridge_spec = importlib.util.spec_from_file_location("remote_test_bridge", MODULE.with_name("termux_bridge.py"))

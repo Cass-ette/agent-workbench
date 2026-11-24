@@ -21,6 +21,13 @@ object SshTargetPolicy {
     private const val CODE_PREFIX = "workbench-ssh-v1:"
     private val hostKeyPattern = Regex("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}")
 
+    // A verified computer/account keeps its pairing when its Wi-Fi address or
+    // forwarded port changes. An IP alone must never establish this identity.
+    fun sameComputer(first: SshTarget, second: SshTarget): Boolean =
+        first.platform.isNotEmpty() && first.platform == second.platform &&
+            first.user == second.user && first.user.isNotBlank() &&
+            hostKeyPattern.matches(first.hostKey) && first.hostKey == second.hostKey
+
     fun connectionCode(input: String, remember: Boolean): SshTarget {
         val code = input.trim()
         require(code.length <= 2048 && code.startsWith(CODE_PREFIX)) { "请粘贴电脑工作台生成的连接码" }

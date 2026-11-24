@@ -126,7 +126,7 @@ class BridgeTests(unittest.TestCase):
 
             payload = dict(client="codex", mode="new", profile_id="vm-profile", model="test-model",
                            key="private-vm-key", gateway="https://gateway.test",
-                           workspace="~/projects/vm-project", environment="vm")
+                           workspace="~/projects/vm-project", environment="vm", permission_mode="dangerous")
             with patch.dict(B.sys.modules, {"linux_vm": SimpleNamespace(LinuxVM=InstalledVM)}), \
                  patch.object(B.shutil, "which", side_effect=lambda name, **kw: "/bin/" + name):
                 args, env, workspace = B.launch_spec(payload, home)
@@ -137,6 +137,7 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(launch_file.stat().st_mode & 0o777, 0o600)
             launch = json.loads(launch_file.read_text())
             self.assertEqual(launch["key"], payload["key"])
+            self.assertEqual(launch["permission_mode"], "dangerous")
             self.assertEqual(launch["workspace"], str(Path(workspace).resolve()))
             self.assertIn("linux_vm.py", args[-1])
             self.assertIn("; unset", args[-1])
@@ -354,6 +355,31 @@ fi
             request = Request(url + "/health", headers={"Authorization": "Bearer " + "a" * 64})
             with urlopen(request, timeout=2) as response:
                 self.assertEqual(json.load(response)["service"], "agent-workbench-termux")
+        finally:
+            server.shutdown(); server.server_close()
+
+    def test_closing_remote_login_removes_its_connection_and_stops_ssh(self):
+        target_id, session_id = "12345678-1234-5678-1234-567812345678", "a" * 32
+        server = B.BridgeServer(("127.0.0.1", 0), "a" * 64)
+        connection = SimpleNamespace(id=session_id, owner=target_id, exit_code=None,
+                                     stop=lambda: setattr(connection, "stopped", True), stopped=False)
+        server.remotes[target_id] = connection
+        server.sessions[session_id] = connection
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = "http://127.0.0.1:" + str(server.server_port)
+        headers = {"Authorization": "Bearer " + "a" * 64}
+        try:
+            request = Request(url + "/sessions/" + session_id, method="DELETE", headers=headers)
+            with urlopen(request, timeout=2) as response:
+                self.assertTrue(json.load(response)["stopping"])
+            self.assertTrue(connection.stopped)
+            self.assertNotIn(target_id, server.remotes)
+            self.assertNotIn(session_id, server.sessions)
+            request = Request(url + "/remote/" + target_id, headers=headers)
+            with urlopen(request, timeout=2) as response:
+                status = json.load(response)
+            self.assertFalse(status["connected"])
+            self.assertEqual(status["login_id"], "")
         finally:
             server.shutdown(); server.server_close()
 

@@ -6,10 +6,14 @@ connection carries framed requests; desktop PTYs never belong to this process.
 import base64
 import fcntl
 import json
+import ipaddress
 import os
 import pty
 import signal
 import subprocess
+import re
+import shutil
+import socket
 import sys
 import termios
 import threading
@@ -17,6 +21,62 @@ import tty
 import uuid
 
 MAX_FRAME = 3 * 1024 * 1024
+LAN_NETWORKS = tuple(ipaddress.ip_network(value) for value in
+                     ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"))
+
+
+def is_lan_address(value):
+    try:
+        address = ipaddress.ip_address(value)
+        return any(address.version == network.version and address in network for network in LAN_NETWORKS)
+    except ValueError:
+        return False
+
+
+def verify_ssh_address(target, host, port, env=None):
+    """Check a LAN candidate's pinned public host key without sending login credentials."""
+    if target.get("platform") not in ("macos", "windows") or not target.get("user"):
+        raise ValueError("请选择已配对的电脑")
+    expected = target.get("host_key", "")
+    parts = expected.split()
+    if len(parts) != 2 or parts[0] != "ssh-ed25519":
+        raise ValueError("电脑主机密钥格式无效")
+    if (not isinstance(host, str) or not 1 <= len(host) <= 253 or
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", host) or
+        type(port) is not int or not 1 <= port <= 65535):
+        raise ValueError("电脑地址或端口无效")
+    env = env or os.environ.copy()
+    executable = shutil.which("ssh-keyscan", path=env.get("PATH"))
+    if not executable:
+        raise ValueError("请更新 Termux OpenSSH 后重试")
+    try:
+        addresses = list(dict.fromkeys(row[4][0] for row in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)))
+    except OSError:
+        return {"verified": False, "reason": "network"}
+    candidates = [address for address in addresses if is_lan_address(address)][:4]
+    if not candidates:
+        return {"verified": False, "reason": "outside_lan"}
+    reason = "network"
+    for address in candidates:
+        try:
+            output = subprocess.run([executable, "-T", "2", "-t", "ed25519", "-p", str(port), address],
+                                    env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        keys = [line.split() for line in output.stdout[:65536].decode("ascii", errors="ignore").splitlines()
+                if line and not line.startswith("#")]
+        if any(len(key) == 3 and key[1:] == parts for key in keys):
+            return {"verified": True, "host": address, "port": port}
+        if keys:
+            reason = "identity"
+    return {"verified": False, "reason": reason}
+
+
+def retryable_connection_failure(output):
+    message = output.decode("utf-8", errors="replace").lower()
+    return any(value in message for value in ("no route to host", "network is unreachable", "connection timed out",
+        "operation timed out", "could not resolve hostname", "connection refused", "connection reset", "broken pipe",
+        "server not responding"))
 
 
 def connection_failure(output):
@@ -29,7 +89,7 @@ def connection_failure(output):
     if "connection refused" in message:
         return "电脑拒绝了 SSH 连接，请在电脑开启远程登录/OpenSSH，并核对端口"
     if any(value in message for value in ("no route to host", "network is unreachable", "connection timed out", "operation timed out")):
-        return "无法到达电脑，请检查两端网络和电脑地址；换 Wi-Fi 后请重新复制连接码"
+        return "暂时无法到达电脑，将在前台自动查找同一局域网中的已配对电脑；也可点重新连接"
     if "could not resolve hostname" in message:
         return "找不到电脑地址，请检查连接码中的域名或重新复制连接码"
     return "连接未完成，请查看保留的电脑登录终端；电脑需更新并启用手机接续"
@@ -123,6 +183,7 @@ class RemoteConnection:
         obj = cls.__new__(cls)
         obj.id, obj.owner, obj.marker = uuid.uuid4().hex, owner, marker.encode()
         obj.ready, obj.error, obj.exit_code = False, "", None
+        obj.ever_ready, obj.stopped = False, False
         obj.output, obj.base = bytearray(), 0
         obj.lock, obj.request_lock, obj.pending = threading.Lock(), threading.Lock(), {}
         obj.fd, slave = pty.openpty()
@@ -163,6 +224,7 @@ class RemoteConnection:
                         frame = json.loads(base64.b64decode(line.split(self.marker, 1)[1].strip(), validate=True))
                         if "ready" in frame:
                             self.ready = frame["ready"] is True and frame.get("schema") == 1
+                            self.ever_ready = self.ever_ready or self.ready
                             self.error = str(frame.get("error", ""))[:200]
                             self._display(("\r\n" + ("电脑工作台已连接。返回配置任务可查看运行会话。" if self.ready else self.error) + "\r\n").encode())
                         else:
@@ -180,7 +242,7 @@ class RemoteConnection:
                     self._display(buffered[:-keep] if keep else buffered)
                     buffered = buffered[-keep:] if keep else b""
         except OSError:
-            self.stop()
+            self.stop(user_requested=False)
         except (ValueError, TypeError):
             if not self.error:
                 self.error = "电脑接续协议响应无效，请更新两端工作台后重试"
@@ -243,7 +305,13 @@ class RemoteConnection:
                     "exit_code": self.exit_code, "truncated": after < self.base, "error": self.error,
                     "ready": self.ready, "phase": "ready" if self.ready else "failed" if self.exit_code is not None else "connecting"}
 
-    def stop(self):
+    @property
+    def retryable(self):
+        return (not self.stopped and self.exit_code is not None and
+                (self.ever_ready or retryable_connection_failure(bytes(self.output))))
+
+    def stop(self, user_requested=True):
+        self.stopped = self.stopped or user_requested
         try:
             os.killpg(self.pid, signal.SIGTERM)
         except ProcessLookupError:

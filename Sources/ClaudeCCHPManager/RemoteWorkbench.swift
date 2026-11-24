@@ -8,39 +8,53 @@ enum RemoteWorkbenchError: LocalizedError {
 
 /// Bounded replay of one existing PTY. The IO thread only appends copied bytes.
 final class RemoteTerminalBuffer: @unchecked Sendable {
+    private static let capacity = 1_048_576
     private let lock = NSLock()
-    private var bytes = Data()
+    // The PTY reader calls append synchronously. Keep the replay storage fixed
+    // so continuous output does not allocate and copy the entire retained log.
+    private var bytes = [UInt8](repeating: 0, count: RemoteTerminalBuffer.capacity)
     private var base = 0
+    private var end = 0
     private var owner = ""
     private var expires = Date.distantPast
+    private var releaseReason = ""
+    private let now: () -> Date
     private var seen: [String] = []
+    init(now: @escaping () -> Date = { Date() }) { self.now = now }
     var hasRemoteControl: Bool {
         lock.lock(); defer { lock.unlock() }
-        return !owner.isEmpty && expires > Date()
+        return !owner.isEmpty && expires > now()
     }
 
     func append(_ data: [UInt8]) {
         lock.lock(); defer { lock.unlock() }
-        bytes.append(contentsOf: data)
-        if bytes.count > 1_048_576 {
-            let count = bytes.count - 1_048_576
-            bytes = Data(bytes.dropFirst(count)); base += count
+        guard !data.isEmpty else { return }
+        let nextEnd = end + data.count
+        var logical = end
+        for byte in data {
+            bytes[logical % Self.capacity] = byte
+            logical += 1
         }
+        end = nextEnd
+        base = max(base, end - Self.capacity)
     }
     func claim(_ client: String) {
         lock.lock(); defer { lock.unlock() }
-        owner = client; expires = Date().addingTimeInterval(30)
+        owner = client; expires = now().addingTimeInterval(30); releaseReason = ""
     }
     func release(_ client: String? = nil) {
         lock.lock(); defer { lock.unlock() }
-        if client == nil || owner == client { owner = ""; expires = .distantPast }
+        if !owner.isEmpty && (client == nil || owner == client) {
+            expires = .distantPast
+            releaseReason = client == nil ? "desktop" : "read_only"
+        }
     }
     func requireControl(_ client: String, inputID: String? = nil) throws -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard !client.isEmpty, owner == client, expires > Date() else {
+        guard !client.isEmpty, owner == client, expires > now() else {
             throw RemoteWorkbenchError.invalid("当前为只读查看；请重新点接续并控制")
         }
-        expires = Date().addingTimeInterval(30)
+        expires = now().addingTimeInterval(30)
         if let inputID {
             guard !inputID.isEmpty, inputID.count <= 80 else { throw RemoteWorkbenchError.invalid("输入标识无效") }
             if seen.contains(inputID) { return false }
@@ -51,12 +65,18 @@ final class RemoteTerminalBuffer: @unchecked Sendable {
     }
     func snapshot(after: Int, client: String) -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
-        let controlled = !client.isEmpty && owner == client && expires > Date()
-        if controlled { expires = Date().addingTimeInterval(30) }
-        let start = min(max(after, base), base + bytes.count)
-        let chunk = bytes.subdata(in: (start - base)..<min(bytes.count, start - base + 65_536))
-        return ["data": chunk.base64EncodedString(), "after": start + chunk.count,
-                "truncated": after < base, "can_write": controlled]
+        let active = !owner.isEmpty && expires > now()
+        let controlled = !client.isEmpty && owner == client && active
+        let state: String
+        if controlled { state = "controlled"; expires = now().addingTimeInterval(30) }
+        else if !client.isEmpty && owner == client { state = releaseReason.isEmpty ? "expired" : releaseReason }
+        else { state = active ? "other_device" : "read_only" }
+        let start = min(max(after, base), end)
+        let length = min(end - start, 65_536)
+        var chunk = [UInt8](); chunk.reserveCapacity(length)
+        for offset in 0..<length { chunk.append(bytes[(start + offset) % Self.capacity]) }
+        return ["data": Data(chunk).base64EncodedString(), "after": start + length,
+                "truncated": after < base, "can_write": controlled, "control_state": state]
     }
 }
 

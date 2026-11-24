@@ -5,6 +5,41 @@ import XCTest
 
 final class TerminalDropTests: XCTestCase {
     @MainActor
+    func testMovingAdjacentTabsBothWaysPreservesSelectionAndAttachmentTarget() {
+        let model = ManagerModel()
+        let workspace = NSTemporaryDirectory()
+        func session(_ name: String) -> TerminalSession {
+            TerminalSession(client: .codex, profile: nil, model: name, workspace: workspace,
+                sessionMode: .new, gateway: "",
+                launchSpec: TerminalLaunchSpec(executable: "/bin/zsh", arguments: [], workspace: workspace, environment: []))
+        }
+        let first = session("a")
+        let second = session("b")
+        let third = session("c")
+        model.terminalSessions = [first, second, third]
+        let firstView = FileDropTerminalView(frame: .zero, options: TerminalOptions())
+        let secondView = FileDropTerminalView(frame: .zero, options: TerminalOptions())
+        first.control.attach(firstView)
+        second.control.attach(secondView)
+        model.selectTerminal(second.id)
+        let process = secondView.process
+
+        model.moveTerminal(first.id, to: 1)
+        XCTAssertEqual(model.terminalSessions.map(\.id), [second.id, first.id, third.id])
+        model.moveTerminal(first.id, to: 0)
+        XCTAssertEqual(model.terminalSessions.map(\.id), [first.id, second.id, third.id])
+        model.moveTerminal(first.id, to: 2)
+        XCTAssertEqual(model.terminalSessions.map(\.id), [second.id, third.id, first.id])
+        XCTAssertEqual(model.selectedTerminalID, second.id)
+        XCTAssertTrue(model.selectedTerminal === second)
+        XCTAssertTrue(secondView.process === process)
+        XCTAssertTrue(secondView.registeredDraggedTypes.contains(.fileURL))
+        XCTAssertFalse(firstView.registeredDraggedTypes.contains(.fileURL))
+        model.moveTerminal(UUID(), to: 0)
+        XCTAssertEqual(model.terminalSessions.map(\.id), [second.id, third.id, first.id])
+    }
+
+    @MainActor
     func testScreenshotTIFFIsSavedAsPrivatePNGAndInactiveTabRejectsIt() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

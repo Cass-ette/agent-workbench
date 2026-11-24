@@ -89,8 +89,8 @@ class ProfileStore(context: Context) {
         return TaskOptions(data.optString("profile"), data.optString("client", "codex"), data.optString("model"),
             data.optString("workspace", "~/projects"), data.optString("mode", "new"), data.optString("execution", "local"),
             data.optBoolean("codex_compatibility", false),
-            data.optString("codex_permission", "restricted").takeIf { it in listOf("restricted", "standard", "full") } ?: "restricted",
-            data.optString("claude_permission", "standard").takeIf { it in listOf("standard", "full") } ?: "standard",
+            data.optString("codex_permission", "restricted").takeIf { it in listOf("restricted", "standard", "full", "dangerous") } ?: "restricted",
+            data.optString("claude_permission", "standard").takeIf { it in listOf("standard", "full", "dangerous") } ?: "standard",
             data.optBoolean("permissions_reviewed", false))
     }
 

@@ -32,6 +32,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccountCircle
@@ -179,6 +180,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
     var showHistory by remember { mutableStateOf(false) }
     var allHistoryProjects by remember { mutableStateOf(false) }
     var confirmCompatibility by remember { mutableStateOf(false) }
+    var closeTabPending by remember { mutableStateOf<TerminalSession?>(null) }
     var newTerminalMenu by rememberSaveable { mutableStateOf(false) }
     var splitEnabled by rememberSaveable { mutableStateOf(false) }
     var splitOtherSessionId by rememberSaveable { mutableStateOf("") }
@@ -355,17 +357,11 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                             }
                         }
                     }
-                    key(sessions.map { it.id }) {
-                        ScrollableTabRow(selectedTabIndex = sessions.indexOf(selectedSession).coerceAtLeast(0), edgePadding = 4.dp) {
-                            sessions.forEach { session ->
-                                Tab(selected = selectedSession?.id == session.id, onClick = {
-                                    val previous = model.selectedSession
-                                    model.selectedSession = session.id
-                                    if (splitEnabled && splitOtherSessionId == session.id) splitOtherSessionId = previous
-                                }, text = { Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis) })
-                            }
-                        }
-                    }
+                    TerminalSessionTabs(sessions, selectedSession?.id.orEmpty(), onSelect = { id ->
+                        val previous = model.selectedSession
+                        model.selectedSession = id
+                        if (splitEnabled && splitOtherSessionId == id) splitOtherSessionId = previous
+                    }, onClose = { closeTabPending = it }, onMove = model::moveSession)
                     val primary = selectedSession ?: sessions.first()
                     val secondary = sessions.firstOrNull { it.id == splitOtherSessionId && it.id != primary.id }
                     if (splitEnabled && canSplit && secondary != null) {
@@ -384,6 +380,20 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                 }
             }
         }
+    }
+    closeTabPending?.let { session ->
+        val login = session.client == "ssh-login"
+        AlertDialog(
+            onDismissRequest = { closeTabPending = null },
+            title = { Text(if (login) "断开这台电脑？" else if (session.remoteTarget.isNotEmpty()) "断开此会话？" else "关闭此终端？") },
+            text = { Text(when {
+                login -> "将关闭平板上的电脑登录通道和此标签；电脑上运行中的任务会继续。"
+                session.remoteTarget.isNotEmpty() -> "将移除平板上的会话标签；电脑上的任务会继续运行。"
+                else -> "该标签中的 Agent 与 Shell 将停止。"
+            }) },
+            confirmButton = { TextButton(onClick = { closeTabPending = null; model.close(session.id) }) { Text(if (login || session.remoteTarget.isNotEmpty()) "断开" else "关闭终端") } },
+            dismissButton = { TextButton(onClick = { closeTabPending = null }) { Text("取消") } },
+        )
     }
     if (selectModel) ModelPicker(model, onDismiss = { selectModel = false })
     if (showHistory) HistoryPicker(model, allHistoryProjects, onDismiss = { showHistory = false }, onSelect = {
@@ -697,7 +707,7 @@ termux-reload-settings
             Text("SSH 电脑", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             TextButton(onClick = { addingComputer = true }) { Text("添加电脑") }
         }
-        Text("在电脑工作台打开「手机连接」，复制连接码到这里。手机可以连接局域网或可达的公网地址，也支持 Tailscale。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("在电脑工作台打开「手机连接」，复制连接码到这里。接续只支持局域网；两端一起更换 Wi-Fi 后会自动寻找原电脑，保留配对。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         model.sshTargets.forEach { target ->
             OutlinedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) {
                 Text(target.name, fontWeight = FontWeight.Medium)
@@ -783,13 +793,19 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
     var keyboardRequest by remember { mutableIntStateOf(0) }
     var scrollRequest by remember { mutableIntStateOf(0) }
     var bottomRequest by remember { mutableIntStateOf(0) }
+    var copyRequest by remember { mutableIntStateOf(0) }
+    var pasteRequest by remember { mutableIntStateOf(0) }
+    var copyText by remember { mutableStateOf<String?>(null) }
+    val clipboard = LocalClipboardManager.current
     Column(modifier.fillMaxSize()) {
         if (session.remoteTarget.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(if (session.canWrite) "控制电脑会话" else "只读 · 电脑已收回控制", style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
+            Text(session.input.control.label, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
             if (!session.canWrite) TextButton(onClick = { model.attachRemote(session.remoteId, session.remoteTarget) }) { Text("接续并控制") }
             TextButton(onClick = { attachmentTarget = session.id; attachmentPicker.launch(arrayOf("*/*")) }, enabled = session.canWrite && !model.busy) { Text("传文件/图片") }
-            TextButton(onClick = { terminating = true }) { Text("结束电脑任务") }
+            TextButton(onClick = { terminating = true }, enabled = session.canWrite) { Text("结束电脑任务") }
         }
+        if (session.input.error.isNotBlank()) Notice(session.input.error, true)
+        if (session.error.isNotBlank()) Notice(session.error, true)
         if (showTitle) {
             TextButton(onClick = { keyboardRequest++ }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
                 Column(Modifier.fillMaxWidth()) {
@@ -799,22 +815,42 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
             }
         }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            listOf("Esc" to "\u001b", "Tab" to "\t", "Ctrl+C" to "\u0003").forEach { (title, value) ->
-                TextButton(onClick = { model.send(session.id, value) }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text(title, fontSize = 11.sp) }
+            TextButton(onClick = { copyRequest++ }, contentPadding = PaddingValues(horizontal = 7.dp)) { Text("复制文本", fontSize = 11.sp) }
+            TextButton(onClick = { pasteRequest++ }, enabled = session.canWrite, contentPadding = PaddingValues(horizontal = 7.dp)) { Text("粘贴", fontSize = 11.sp) }
+            listOf("回车" to "\r", "↑" to "\u001b[A", "↓" to "\u001b[B", "←" to "\u001b[D", "→" to "\u001b[C", "Esc" to "\u001b", "Tab" to "\t", "Ctrl+C" to "\u0003").forEach { (title, value) ->
+                TextButton(onClick = { model.send(session.id, value) }, enabled = session.canWrite, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text(title, fontSize = 11.sp) }
             }
-            TextButton(onClick = { scrollRequest-- }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text("↑", fontSize = 11.sp) }
-            TextButton(onClick = { scrollRequest++ }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text("↓", fontSize = 11.sp) }
+            TextButton(onClick = { scrollRequest-- }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text("上翻", fontSize = 11.sp) }
+            TextButton(onClick = { scrollRequest++ }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text("下翻", fontSize = 11.sp) }
             TextButton(onClick = { bottomRequest++ }, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 48.dp)) { Text("底部", fontSize = 11.sp) }
-            TextButton(onClick = { keyboardRequest++ }, contentPadding = PaddingValues(2.dp), modifier = Modifier.widthIn(min = 40.dp)) { Text("键盘", fontSize = 11.sp) }
+            TextButton(onClick = { keyboardRequest++ }, enabled = session.canWrite, contentPadding = PaddingValues(2.dp), modifier = Modifier.widthIn(min = 40.dp)) { Text("键盘", fontSize = 11.sp) }
             Spacer(Modifier.width(8.dp))
             TextButton(onClick = { fontDelta++ }, contentPadding = PaddingValues(3.dp), modifier = Modifier.width(30.dp)) { Text("A+") }
             TextButton(onClick = { fontDelta-- }, contentPadding = PaddingValues(3.dp), modifier = Modifier.width(30.dp)) { Text("A−") }
             IconButton(onClick = { closing = true }, modifier = Modifier.width(34.dp)) { Icon(Icons.Outlined.Close, "关闭此终端") }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            TerminalSurface(model, session, fontDelta, keyboardRequest, scrollRequest, bottomRequest, Modifier.fillMaxSize())
+            TerminalSurface(model, session, fontDelta, keyboardRequest, scrollRequest, bottomRequest,
+                copyRequest, pasteRequest, { copyText = it }, Modifier.fillMaxSize())
         }
         if (session.exitCode != null) Text("终端已退出：${session.exitCode}", style = MaterialTheme.typography.labelSmall)
+    }
+    copyText?.let { snapshot ->
+        AlertDialog(onDismissRequest = { copyText = null }, title = { Text("复制终端文本") },
+            text = {
+                Column {
+                    Text("长按文字可选择并复制。这里只显示此终端已加载的内容，复制不会向电脑发送命令。", style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(8.dp))
+                    SelectionContainer {
+                        Text(snapshot.ifEmpty { "暂无可复制文本" }, fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp).verticalScroll(rememberScrollState()))
+                    }
+                }
+            },
+            confirmButton = { TextButton(enabled = snapshot.isNotEmpty(), onClick = {
+                clipboard.setText(AnnotatedString(snapshot)); model.message("已复制此终端文本"); copyText = null
+            }) { Text("复制全部") } },
+            dismissButton = { TextButton(onClick = { copyText = null }) { Text("关闭") } })
     }
     if (closing) AlertDialog(onDismissRequest = { closing = false }, title = { Text(if (session.remoteTarget.isEmpty()) "关闭此终端？" else "断开此会话？") },
         text = { Text(if (session.remoteTarget.isEmpty()) "该标签中的 Agent 与 Shell 将停止。关闭电脑登录标签只会断开 SSH，电脑任务继续。" else "移除手机标签，电脑上的任务继续运行，可以再次接续。") },
@@ -828,12 +864,14 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
 private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var scrollRequest: Int = 0, var bottomRequest: Int = 0)
 
 @SuppressLint("SetJavaScriptEnabled")
-@Composable private fun TerminalSurface(model: WorkbenchModel, session: TerminalSession, fontDelta: Int, keyboardRequest: Int, scrollRequest: Int, bottomRequest: Int, modifier: Modifier) {
+@Composable private fun TerminalSurface(model: WorkbenchModel, session: TerminalSession, fontDelta: Int, keyboardRequest: Int, scrollRequest: Int, bottomRequest: Int,
+    copyRequest: Int, pasteRequest: Int, onCopyText: (String) -> Unit, modifier: Modifier) {
     val context = LocalContext.current
     var ready by remember { mutableStateOf(false) }
     val cursor = remember { TerminalCursor() }
     val replayThrough = remember { session.after }
     val handler = remember { Handler(Looper.getMainLooper()) }
+    val clipboard = LocalClipboardManager.current
     val browser = remember {
         TerminalWebView(context) { model.send(session.id, it) }.apply {
             setOnFocusChangeListener { _, focused -> model.terminalFocusChanged(session.id, focused) }
@@ -862,13 +900,15 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
             loadUrl("https://workbench.local/terminal.html")
         }
     }
+    SideEffect { browser.onCopyText = onCopyText }
     DisposableEffect(browser) { onDispose {
         model.terminalFocusChanged(session.id, false)
         browser.setOnFocusChangeListener(null)
+        browser.onCopyText = null
         browser.removeJavascriptInterface("Workbench"); browser.destroy()
     } }
-    LaunchedEffect(ready) {
-        if (ready) {
+    LaunchedEffect(ready, session.canWrite) {
+        if (ready && session.canWrite) {
             browser.requestFocus()
             browser.evaluateJavascript("window.focusTerminal()", null)
             context.getSystemService(android.view.inputmethod.InputMethodManager::class.java).restartInput(browser)
@@ -877,9 +917,17 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
     LaunchedEffect(keyboardRequest) {
         if (keyboardRequest > 0) browser.showTerminalKeyboard()
     }
+    LaunchedEffect(copyRequest) {
+        if (copyRequest > 0) browser.requestCopyText()
+    }
+    LaunchedEffect(pasteRequest) {
+        if (pasteRequest > 0 && session.canWrite) clipboard.getText()?.text?.let { browser.pasteText(it) }
+    }
     Box(modifier) {
         AndroidView(factory = { browser }, modifier = Modifier.fillMaxSize(), update = { view ->
+            view.inputEnabled = session.canWrite
             if (ready) {
+                view.evaluateJavascript("window.setInputEnabled(${session.canWrite})", null)
                 session.output.filter { it.serial > cursor.serial }.forEach { chunk ->
                     view.evaluateJavascript("window.writeChunk(${JSONObject.quote(chunk.encoded)}, ${chunk.replay || chunk.serial <= replayThrough})", null)
                     cursor.serial = chunk.serial

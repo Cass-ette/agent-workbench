@@ -1,6 +1,7 @@
 import AppKit
 import SwiftTerm
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Accepts Finder file drops and inserts shell-safe paths into the active PTY.
 /// The trailing space lets the user keep composing the command without running it.
@@ -301,6 +302,27 @@ struct TerminalPanel: View {
                                                selected: model.selectedTerminalID == session.id,
                                                onSelect: { model.selectTerminal(session.id) },
                                                onClose: { model.closeSession(session) })
+                                .onDrag {
+                                    let provider = NSItemProvider()
+                                    let data = Data(session.id.uuidString.utf8)
+                                    provider.registerDataRepresentation(forTypeIdentifier: "com.cassette.workbench.terminal-tab", visibility: .ownProcess) { completion in
+                                        completion(data, nil)
+                                        return nil
+                                    }
+                                    return provider
+                                }
+                                .onDrop(of: [UTType(exportedAs: "com.cassette.workbench.terminal-tab")], isTargeted: nil) { providers in
+                                    guard let provider = providers.first else { return false }
+                                    provider.loadDataRepresentation(forTypeIdentifier: "com.cassette.workbench.terminal-tab") { data, _ in
+                                        guard let data, let id = UUID(uuidString: String(decoding: data, as: UTF8.self)) else { return }
+                                        Task { @MainActor in
+                                            guard model.terminalSessions.contains(where: { $0.id == id }),
+                                                  let index = model.terminalSessions.firstIndex(where: { $0.id == session.id }) else { return }
+                                            model.moveTerminal(id, to: index)
+                                        }
+                                    }
+                                    return true
+                                }
                         }
                     }
                     .padding(.horizontal, 8)

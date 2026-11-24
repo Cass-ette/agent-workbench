@@ -4,6 +4,45 @@ import SwiftTerm
 @testable import ClaudeCCHPManager
 
 final class RemoteWorkbenchTests: XCTestCase {
+    func testDiscoveryIdentityUsesThePublicKeyRatherThanTheChangingAddress() throws {
+        let key = "ssh-ed25519 " + Data((0..<51).map(UInt8.init)).base64EncodedString()
+        let fingerprint = try XCTUnwrap(RemoteDiscoveryIdentity.fingerprint(key))
+        XCTAssertEqual(fingerprint.count, 64)
+        XCTAssertEqual(fingerprint, RemoteDiscoveryIdentity.fingerprint(key + " ignored-comment"))
+        XCTAssertNil(RemoteDiscoveryIdentity.fingerprint("ssh-ed25519 invalid"))
+        XCTAssertNil(RemoteDiscoveryIdentity.fingerprint("ssh-rsa invalid"))
+    }
+
+    @MainActor
+    func testDiscoveryPublishesTheSshServiceAndWithdrawsIt() async throws {
+        let publisher = RemoteDiscoveryPublisher()
+        let key = "ssh-ed25519 " + Data((0..<51).map(UInt8.init)).base64EncodedString()
+        try publisher.start(publicKey: key, port: 2222)
+        try publisher.start(publicKey: key, port: 2222)
+        publisher.stop()
+        XCTAssertThrowsError(try publisher.start(publicKey: "invalid", port: 22))
+    }
+    func testControlStateDistinguishesExpiryTakeoverAndDetach() {
+        var now = Date()
+        let buffer = RemoteTerminalBuffer(now: { now })
+        func state(_ client: String = "phone") -> String { buffer.snapshot(after: 0, client: client)["control_state"] as? String ?? "" }
+        XCTAssertEqual(state(), "read_only")
+        buffer.claim("phone")
+        XCTAssertEqual(state(), "controlled")
+        now += 31
+        XCTAssertEqual(state(), "expired")
+        XCTAssertFalse(buffer.hasRemoteControl)
+        buffer.claim("phone")
+        buffer.release()
+        XCTAssertEqual(state(), "desktop")
+        buffer.claim("other")
+        XCTAssertEqual(state(), "other_device")
+        buffer.release("phone") // An old phone detaching must not revoke the new owner.
+        XCTAssertEqual(state("other"), "controlled")
+        buffer.release("other")
+        XCTAssertEqual(state("other"), "read_only")
+    }
+
     @MainActor
     func testRemoteInputAndReplayUseTheExistingDesktopPTY() async throws {
         let view = FileDropTerminalView(frame: CGRect(x: 0, y: 0, width: 640, height: 400), options: TerminalOptions())
@@ -59,6 +98,35 @@ final class RemoteWorkbenchTests: XCTestCase {
         buffer.release()
         XCTAssertThrowsError(try buffer.requireControl("phone", inputID: "2"))
         XCTAssertEqual(buffer.snapshot(after: 999999999, client: "phone")["after"] as? Int, 1_048_580)
+    }
+    func testReplayRetainsOnlyTheTailAfterManyOutputBatches() {
+        let buffer = RemoteTerminalBuffer()
+        let batch = Array(repeating: UInt8(65), count: 4096)
+        for _ in 0..<1024 { buffer.append(batch) }
+        let snapshot = buffer.snapshot(after: 0, client: "phone")
+        XCTAssertEqual(snapshot["truncated"] as? Bool, true)
+        XCTAssertEqual(snapshot["after"] as? Int, 3_211_264)
+        XCTAssertEqual(Data(base64Encoded: snapshot["data"] as? String ?? "")?.count, 65_536)
+    }
+
+    func testReplayPreservesByteOrderAcrossWrapAndOversizedBatch() throws {
+        let capacity = 1_048_576
+        let output = (0..<2_180_123).map { UInt8(truncatingIfNeeded: $0 * 17 + $0 / 256) }
+        let buffer = RemoteTerminalBuffer()
+        buffer.append(Array(output[..<(capacity - 13)]))
+        buffer.append(Array(output[(capacity - 13)..<(capacity + 28)]))
+        buffer.append(Array(output[(capacity + 28)...]))
+        var cursor = 0
+        var retained = Data()
+        for page in 0..<16 {
+            let snapshot = buffer.snapshot(after: cursor, client: "")
+            XCTAssertEqual(snapshot["truncated"] as? Bool, page == 0)
+            retained.append(try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(snapshot["data"] as? String))))
+            cursor = try XCTUnwrap(snapshot["after"] as? Int)
+        }
+        XCTAssertEqual(retained, Data(output.suffix(capacity)))
+        XCTAssertEqual(cursor, output.count)
+        XCTAssertEqual(buffer.snapshot(after: cursor, client: "")["data"] as? String, "")
     }
 
     func testHTTPRequiresPrivateTokenAndDoesNotExposeIt() async throws {

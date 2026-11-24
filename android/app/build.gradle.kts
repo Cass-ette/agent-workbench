@@ -17,8 +17,8 @@ android {
         applicationId = "com.cassette.workbench"
         minSdk = 26
         targetSdk = 34
-        versionCode = 21
-        versionName = "0.1.19"
+        versionCode = 53
+        versionName = "0.1.51"
         testInstrumentationRunner = "com.cassette.workbench.TerminalInputInstrumentation"
     }
     // CI must explicitly use the restored key instead of the runner's default debug key.

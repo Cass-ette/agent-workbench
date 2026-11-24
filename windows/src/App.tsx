@@ -33,6 +33,7 @@ import { SSHConnection } from "./SSHConnection";
 import { AgentPermissionDialog, permissionLabel, permissionStorageKey, readAgentPermissions } from "./AgentPermissions";
 import { ToolBridge } from "./ToolBridge";
 import { installImagePaste } from "./TerminalClipboard";
+import { reorderSessions } from "./SessionOrder";
 import type { AgentPermissions } from "./AgentPermissions";
 import type { UsageSnapshot } from "./UsagePanel";
 
@@ -139,6 +140,11 @@ function App() {
   const [historyError, setHistoryError] = useState("");
   const [selectedHistory, setSelectedHistory] = useState<LocalConversation | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const sessionsRef = useRef<Session[]>([]);
+  const [draggedSessionId, setDraggedSessionId] = useState("");
+  const [dropTargetId, setDropTargetId] = useState("");
+  const tabPointer = useRef<{ id: string; x: number; y: number; moving: boolean; target: string; after: boolean } | null>(null);
+  const suppressTabClick = useRef(false);
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const currentSessionId = useRef("");
   const [isStarting, setIsStarting] = useState(false);
@@ -161,6 +167,7 @@ function App() {
     () => config.profiles.find((profile) => profile.id === config.selected_profile_id),
     [config.profiles, config.selected_profile_id],
   );
+  sessionsRef.current = sessions;
 
   const matchingHistory = history.filter((entry) => [entry.title, entry.preview ?? "", entry.workspace, entry.client, entry.model, entry.profile_name].some(
     (value) => value.toLocaleLowerCase().includes(historyQuery.trim().toLocaleLowerCase()),
@@ -563,8 +570,12 @@ function App() {
         if (isTauri() && session.exitCode === null) {
           await invoke("stop_terminal", { sessionId: session.id });
         }
+        const closingWasSelected = currentSessionId.current === session.id;
         setSessions((current) => current.filter((item) => item.id !== session.id));
-        if (currentSessionId.current === session.id) selectSession("");
+        if (closingWasSelected) {
+          const remaining = sessionsRef.current.filter((item) => item.id !== session.id);
+          selectSession(remaining[remaining.length - 1]?.id ?? "");
+        }
         pendingOutput.current.delete(session.id);
         return true;
       } catch (cause) {
@@ -791,8 +802,41 @@ function App() {
             {sessions.length > 0 && (
               <div className="terminal-tabs" role="tablist">
                 {sessions.map((session) => (
-                  <div key={session.id} className={`terminal-tab ${session.id === selectedSessionId ? "active" : ""}`}>
-                    <button className="terminal-tab-select" role="tab" aria-selected={session.id === selectedSessionId} onClick={() => selectSession(session.id)}>
+                  <div key={session.id} data-session-id={session.id}
+                    className={`terminal-tab ${session.id === selectedSessionId ? "active" : ""} ${draggedSessionId === session.id ? "dragging" : ""} ${dropTargetId === session.id ? "drop-target" : ""}`}
+                    onPointerDown={(event) => {
+                      if (event.button !== 0 || (event.target as Element).closest(".tab-close")) return;
+                      suppressTabClick.current = false;
+                      tabPointer.current = { id: session.id, x: event.clientX, y: event.clientY, moving: false, target: "", after: false };
+                      event.currentTarget.setPointerCapture?.(event.pointerId);
+                    }}
+                    onPointerMove={(event) => {
+                      const drag = tabPointer.current;
+                      if (!drag) return;
+                      if (!drag.moving && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return;
+                      drag.moving = true;
+                      setDraggedSessionId(drag.id);
+                      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>(".terminal-tab");
+                      drag.target = target?.dataset.sessionId ?? "";
+                      drag.after = !!target && event.clientX >= target.getBoundingClientRect().left + target.getBoundingClientRect().width / 2;
+                      setDropTargetId(drag.target);
+                    }}
+                    onPointerUp={(event) => {
+                      const drag = tabPointer.current;
+                      tabPointer.current = null;
+                      if (drag?.moving) {
+                        suppressTabClick.current = true;
+                        setSessions((current) => reorderSessions(current, drag.id, drag.target, drag.after));
+                      }
+                      event.currentTarget.releasePointerCapture?.(event.pointerId);
+                      setDraggedSessionId("");
+                      setDropTargetId("");
+                    }}
+                    onPointerCancel={() => { tabPointer.current = null; setDraggedSessionId(""); setDropTargetId(""); }}>
+                    <button className="terminal-tab-select" role="tab" aria-selected={session.id === selectedSessionId} onClick={() => {
+                      if (suppressTabClick.current) { suppressTabClick.current = false; return; }
+                      selectSession(session.id);
+                    }}>
                       <span className={`tab-state ${session.exitCode === null ? "running" : "ended"}`} />
                       <span className="tab-label" title={`${session.title}\n${session.workspace}\n配置：${session.profileName}`}>
                         {session.client === "codex" ? "Codex" : "Claude Code"} · {modeLabel(session.mode)}

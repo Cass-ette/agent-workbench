@@ -369,6 +369,38 @@ fi
         finally:
             server.shutdown(); server.server_close()
 
+    def test_history_archive_http_round_trip_preserves_source(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(B.Path, "home", return_value=Path(temporary)):
+            root = Path(temporary)
+            session_id = "01a1ec86-bf14-70f2-8144-874b179beb72"
+            path = root / ".local/share/agent-workbench/codex/profile/sessions" / f"rollout-test-{session_id}.jsonl"
+            path.parent.mkdir(parents=True)
+            path.write_text("\n".join(map(json.dumps, [
+                {"type":"session_meta", "payload":{"id":session_id, "cwd":"/work/project"}},
+                {"type":"response_item", "payload":{"role":"user", "content":"Archive this"}},
+            ])))
+            original = path.read_bytes(), path.stat().st_mtime_ns
+            server = B.BridgeServer(("127.0.0.1", 0), "a" * 64)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            base = "http://127.0.0.1:" + str(server.server_port)
+            def call(route, payload=None):
+                request = Request(base + route, data=json.dumps(payload).encode() if payload is not None else None,
+                                  headers={"Authorization":"Bearer " + "a" * 64, "Content-Type":"application/json"})
+                with urlopen(request, timeout=3) as response:
+                    return json.load(response)
+            try:
+                row = call("/history?scope=all")["sessions"][0]
+                payload = {"history_ref":row["history_ref"], "history_id":session_id, "client":"codex", "archived":True}
+                self.assertTrue(call("/history/archive", payload)["archived"])
+                self.assertEqual(call("/history?scope=all")["sessions"], [])
+                self.assertTrue(call("/history?scope=all&archive=all")["sessions"][0]["archived"])
+                payload["archived"] = False
+                self.assertFalse(call("/history/archive", payload)["archived"])
+                self.assertEqual(call("/history?scope=all")["sessions"][0]["history_ref"], row["history_ref"])
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), original)
+            finally:
+                server.shutdown(); server.server_close()
+
     def test_closing_remote_login_removes_its_connection_and_stops_ssh(self):
         target_id, session_id = "12345678-1234-5678-1234-567812345678", "a" * 32
         server = B.BridgeServer(("127.0.0.1", 0), "a" * 64)

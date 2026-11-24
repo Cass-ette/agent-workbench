@@ -44,15 +44,17 @@ struct LocalHistoryEntry: Decodable, Identifiable, Equatable {
     let updated_at: Int
     let scope: String?
     let preview: String?
+    var archived: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "id"
-        case history_ref, client, title, workspace, model, configured_model, profile_id, profile_name, gateway, updated_at, scope, preview
+        case history_ref, client, title, workspace, model, configured_model, profile_id, profile_name, gateway, updated_at, scope, preview, archived
     }
 
     var id: String { history_ref }
     var clientKind: ClientKind { client == "codex" ? .codex : .claude }
     var isGlobal: Bool { scope == "global" }
+    var isArchived: Bool { archived ?? false }
     var updatedDate: Date { Date(timeIntervalSince1970: TimeInterval(updated_at)) }
 }
 
@@ -476,6 +478,7 @@ final class ManagerModel: ObservableObject {
     @Published var isLoadingHistory = false
     @Published var historySessions: [LocalHistoryEntry] = []
     @Published var selectedHistory: LocalHistoryEntry?
+    @Published var archivingHistoryRef = ""
     @Published var historyError = ""
     @Published var historyScope: String = "workspace"
     @Published var addProfileError = ""
@@ -571,7 +574,7 @@ final class ManagerModel: ObservableObject {
         if op == "ping" { return ["schema": 1] }
         guard let backend else { throw RemoteWorkbenchError.invalid("电脑工作台正在读取配置") }
         if op == "state" {
-            return ["schema": 1, "platform": "macos", "capabilities": ["sessions", "launch", "system-cli", "history", "models", "attachments"],
+            return ["schema": 1, "platform": "macos", "capabilities": ["sessions", "launch", "system-cli", "history", "history-archive", "models", "attachments"],
                     "profiles": profiles.map { ["id": $0.id, "name": $0.name, "gateway": $0.gateway ?? defaultGateway, "model_catalog_url": $0.model_catalog_url ?? ""] },
                     "workspace": workspace, "workspaces": workspaces, "client": activeClient.rawValue,
                     "profile_id": selectedProfileID, "model": selectedModel,
@@ -585,9 +588,15 @@ final class ManagerModel: ObservableObject {
         }
         if op == "history" {
             var args = ["history-list-global"]
+            if request["include_archived"] as? Bool == true { args += ["--include-archived"] }
             if !text("workspace").isEmpty { args += ["--workspace", text("workspace")] }
             if ["codex", "claude"].contains(text("client")) { args += ["--client", text("client")] }
             return try JSONSerialization.jsonObject(with: await backend.run(args))
+        }
+        if op == "history-archive" {
+            guard let archived = request["archived"] as? Bool else { throw RemoteWorkbenchError.invalid("归档状态无效") }
+            try await updateHistoryArchive(reference: text("history_ref"), sessionID: text("history_id"), client: text("client"), archived: archived)
+            return ["archived": archived]
         }
         if op == "launch" {
             guard !installingApplicationUpdate, let client = ClientKind(rawValue: text("client")) else { throw RemoteWorkbenchError.invalid("电脑正在更新或客户端无效") }
@@ -597,7 +606,9 @@ final class ManagerModel: ObservableObject {
             let previous = Set(terminalSessions.map(\.id))
             let action = text("history_action")
             if !action.isEmpty {
-                let data = try await backend.run(["history-list-global", "--workspace", directory, "--client", client.rawValue])
+                var historyArgs = ["history-list-global", "--workspace", directory, "--client", client.rawValue]
+                if action != "recent" { historyArgs += ["--include-archived"] }
+                let data = try await backend.run(historyArgs)
                 let rows = try JSONDecoder().decode(HistoryListResponse.self, from: data).sessions
                 let entry = action == "recent" ? rows.first : rows.first(where: { $0.history_ref == text("history_ref") })
                 guard let entry else { throw RemoteWorkbenchError.invalid("电脑当前项目找不到这条对话") }
@@ -1235,7 +1246,7 @@ final class ManagerModel: ObservableObject {
         isLoadingHistory = true
         historyError = ""
         do {
-            let data = try await backend.run(["history-list-global", "--workspace", workspace])
+            let data = try await backend.run(["history-list-global", "--workspace", workspace, "--include-archived"])
             historySessions = try JSONDecoder().decode(HistoryListResponse.self, from: data).sessions
         } catch {
             historyError = error.localizedDescription
@@ -1251,12 +1262,34 @@ final class ManagerModel: ObservableObject {
         isLoadingHistory = true
         historyError = ""
         do {
-            let data = try await backend.run(["history-list-global"])
+            let data = try await backend.run(["history-list-global", "--include-archived"])
             historySessions = try JSONDecoder().decode(HistoryListResponse.self, from: data).sessions
         } catch {
             historyError = error.localizedDescription
         }
         isLoadingHistory = false
+    }
+
+    private func updateHistoryArchive(reference: String, sessionID: String, client: String, archived: Bool) async throws {
+        guard let backend else { throw RemoteWorkbenchError.invalid("本机后端尚未就绪") }
+        let payload = try JSONSerialization.data(withJSONObject: ["history_ref": reference, "history_id": sessionID,
+                                                                 "client": client, "archived": archived])
+        _ = try await backend.run(["history-archive-stdin"], stdin: payload)
+        historySessions = historySessions.map { entry in
+            guard entry.history_ref == reference else { return entry }
+            var updated = entry; updated.archived = archived; return updated
+        }
+    }
+
+    func archiveHistory(_ entry: LocalHistoryEntry, archived: Bool) async {
+        guard archivingHistoryRef.isEmpty else { return }
+        archivingHistoryRef = entry.history_ref
+        defer { archivingHistoryRef = "" }
+        do {
+            try await updateHistoryArchive(reference: entry.history_ref, sessionID: entry.sessionID, client: entry.client, archived: archived)
+            statusMessage = archived ? "已归档；可在「已归档」中查找和取消归档。" : "已取消归档。"
+            isStatusError = false
+        } catch { setError(error.localizedDescription) }
     }
 
     func chooseHistory(_ entry: LocalHistoryEntry) {

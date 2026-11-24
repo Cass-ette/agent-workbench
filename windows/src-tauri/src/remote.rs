@@ -385,7 +385,7 @@ fn operation(app: &tauri::AppHandle, request: Value) -> Result<Value, String> {
             .cloned()
             .collect();
         return Ok(
-            json!({"schema":1,"platform":"windows","capabilities":["sessions","launch","system-cli","history","models","attachments"],
+            json!({"schema":1,"platform":"windows","capabilities":["sessions","launch","system-cli","history","history-archive","models","attachments"],
             "profiles":config.profiles,"workspace":config.workspace,"workspaces":[],"profile_id":config.selected_profile_id,
             "client":config.client,"model":config.model,"permissions":config.remote_permissions,"sessions":sessions}),
         );
@@ -400,8 +400,14 @@ fn operation(app: &tauri::AppHandle, request: Value) -> Result<Value, String> {
         let rows: Vec<_> = rows
             .into_iter()
             .filter(|r| text("client").is_empty() || r.client == text("client"))
+            .filter(|r| request["include_archived"] == true || !r.archived)
             .collect();
         return Ok(json!({"sessions":rows}));
+    }
+    if op == "history-archive" {
+        let archived = request["archived"].as_bool().ok_or("归档状态无效")?;
+        crate::history::set_archived(&root, text("history_ref"), text("history_id"), text("client"), archived)?;
+        return Ok(json!({"archived":archived}));
     }
     if op == "models" {
         let models = tauri::async_runtime::block_on(crate::models_for_profile(
@@ -423,7 +429,7 @@ fn operation(app: &tauri::AppHandle, request: Value) -> Result<Value, String> {
                 crate::history::scan_project(&root, &PathBuf::from(&workspace))
             };
             let source = rows.into_iter().find(|r| {
-                r.client == client && (action == "recent" || r.history_ref == text("history_ref"))
+                r.client == client && (if action == "recent" { !r.archived } else { r.history_ref == text("history_ref") })
             });
             if !action.is_empty() && source.is_none() {
                 return Err("电脑当前项目找不到这条会话".into());

@@ -233,6 +233,9 @@ button { color: inherit; }
 .history-list button:hover { background: #eaf0f4; }
 .history-list :is(strong, small) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-list small { color: #545e68; }
+.history-row { display: flex; align-items: center; gap: 8px; }
+.history-row > button:first-child { flex: 1; min-width: 0; }
+.history-list .history-archive-button { display: block; width: auto; flex-shrink: 0; white-space: nowrap; }
 .primary-button, .secondary-button { height: 33px; padding: 0 13px; border: 1px solid #d7dce0; border-radius: 4px; background: #fff; font-size: 10px; font-weight: 600; cursor: pointer; }
 .primary-button { color: #fff; border-color: var(--accent); background: var(--accent); }
 .primary-button:hover:not(:disabled) { background: var(--accent-dark); }

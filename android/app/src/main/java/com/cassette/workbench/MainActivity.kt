@@ -425,10 +425,11 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
 
 @Composable private fun HistoryPicker(model: WorkbenchModel, allProjects: Boolean, onDismiss: () -> Unit, onSelect: (LocalConversation) -> Unit) {
     var query by remember { mutableStateOf("") }
+    var showArchived by remember { mutableStateOf(false) }
     var directory by remember { mutableStateOf<List<String>?>(null) }
     fun parts(row: LocalConversation) = row.workspace.replace('\\', '/').split('/').filter(String::isNotBlank)
     val matches = model.history.filter { row ->
-        listOf(row.title, row.preview, row.workspace, row.model, row.client)
+        row.archived == showArchived && listOf(row.title, row.preview, row.workspace, row.model, row.client)
             .any { it.contains(query.trim(), ignoreCase = true) }
     }
     val prefix = directory
@@ -443,12 +444,16 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
         Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(if (allProjects) "恢复最近对话" else "从当前项目的历史创建分支", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-                TextButton(onClick = { model.refreshHistory(allProjects) }, enabled = !model.historyLoading) { Text("刷新") }
+                TextButton(onClick = { model.refreshHistory(allProjects) }, enabled = !model.historyLoading && model.historyArchiving.isEmpty()) { Text("刷新") }
                 TextButton(onClick = onDismiss) { Text("关闭") }
             }
             Text((if (model.localExecution) "手机本地" else "电脑 · ${model.executionName}") + " · " +
                 if (allProjects) "选择对话后用原配置恢复" else "${model.historyWorkspace}\n分支使用当前选择的配置和模型",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if(model.canArchiveHistory) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = !showArchived, onClick = { showArchived = false }, label = { Text("未归档") })
+                FilterChip(selected = showArchived, onClick = { showArchived = true }, label = { Text("已归档") })
+            } else Text("对话归档需要更新电脑工作台", style = MaterialTheme.typography.labelSmall)
             if (allProjects) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(selected = prefix == null, onClick = { directory = null }, label = { Text("最近") })
                 FilterChip(selected = prefix != null, onClick = { directory = emptyList() }, label = { Text("按目录") })
@@ -485,6 +490,9 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                             Text(row.workspace, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             Text(java.text.DateFormat.getDateTimeInstance().format(java.util.Date(row.updatedAt * 1000)),
                                 style = MaterialTheme.typography.labelSmall)
+                            if(model.canArchiveHistory) TextButton(onClick = { model.archiveHistory(row) }, enabled = model.historyArchiving.isEmpty()) {
+                                Text(if(row.archived) "取消归档" else "归档")
+                            }
                         }
                     }
                 }

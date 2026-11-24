@@ -15,6 +15,7 @@ data class RemoteWorkbench(
     val workspace: String, val profile: String, val client: String, val model: String,
     val codexPermission: String, val claudePermission: String,
     val workspaces: List<String> = emptyList(),
+    val capabilities: List<String> = emptyList(),
 ) {
     companion object {
         fun parse(value: JSONObject): RemoteWorkbench {
@@ -29,7 +30,7 @@ data class RemoteWorkbench(
             }, value.optString("workspace"), value.optString("profile_id"), value.optString("client", "codex"), value.optString("model"),
                 value.optJSONObject("permissions")?.optString("codex", "unreviewed") ?: "unreviewed",
                 value.optJSONObject("permissions")?.optString("claude", "unreviewed") ?: "unreviewed",
-                value.optJSONArray("workspaces").strings())
+                value.optJSONArray("workspaces").strings(), value.optJSONArray("capabilities").strings())
         }
     }
 }

@@ -69,6 +69,31 @@ class GatewayProfileTests(unittest.TestCase):
         self.assertEqual(profiles[0]["gateway"], "https://default.example.test")
         self.assertEqual(profiles[0]["model_catalog_url"], "")
 
+    def test_history_archive_api_defaults_to_active_but_keeps_archived_resolvable(self):
+        session_id = "01a1ec86-bf14-70f2-8144-874b179beb72"
+        path = BACKEND.CODEX_HOME_ROOT / "p-history/sessions" / f"rollout-test-{session_id}.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text("\n".join(map(json.dumps, [
+            {"type": "session_meta", "payload": {"id": session_id, "cwd": "/work/project"}},
+            {"type": "response_item", "payload": {"role": "user", "content": "archive me"}},
+        ])))
+        def listing(**kwargs):
+            with patch("sys.stdout", io.StringIO()) as output:
+                BACKEND.history_list(**kwargs)
+            return json.loads(output.getvalue())["sessions"]
+        row = listing()[0]
+        payload = {"history_ref": row["history_ref"], "history_id": session_id, "client": "codex", "archived": True}
+        with patch.object(BACKEND, "global_history_roots", return_value=([], [])), \
+                patch("sys.stdin", io.StringIO(json.dumps(payload))), patch("sys.stdout", io.StringIO()):
+            BACKEND.archive_history_from_stdin()
+        self.assertEqual(listing(), [])
+        self.assertTrue(listing(include_archived=True)[0]["archived"])
+        self.assertTrue(path.is_file())
+        payload["history_id"] = "8123cb5e-1984-435a-9803-976796d3075c"
+        with patch.object(BACKEND, "global_history_roots", return_value=([], [])), \
+                patch("sys.stdin", io.StringIO(json.dumps(payload))), self.assertRaises(ValueError):
+            BACKEND.archive_history_from_stdin()
+
     def test_independent_catalog_is_saved_used_for_refresh_and_not_written_to_codex_route(self):
         gateway = "https://gateway.test/api/v1"
         catalog_url = "https://gateway.test/api/paas/v4/models"

@@ -25,6 +25,7 @@ pub struct Conversation {
     pub gateway: String,
     pub updated_at: u64,
     pub scope: String,
+    pub archived: bool,
     #[serde(skip)]
     pub home: PathBuf,
     #[serde(skip)]
@@ -109,7 +110,7 @@ fn read(client: &str, home: PathBuf, path: &Path, updated: SystemTime,
         gateway: text(&manifest["gateway"]).into(),
         updated_at: updated.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(), home,
         source: path.to_owned(),
-        scope: scope.into(),
+        scope: scope.into(), archived: false,
         key_fingerprint: text(&manifest["key_fingerprint"]).into(),
         configured_model: text(&manifest["model"]).into(),
     };
@@ -336,14 +337,46 @@ pub fn scan_all(root: &Path) -> Vec<Conversation> {
     let mut rows = scan(root);
     rows.extend(scan_global());
     rows.sort_unstable_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.source.cmp(&b.source)));
-    rows.into_iter().take(1000).collect()
+    annotate_archives(root, rows.into_iter().take(1000).collect())
 }
 
 pub fn scan_project(root: &Path, workspace: &Path) -> Vec<Conversation> {
     let mut rows = scan_workspace(root, workspace);
     rows.extend(scan_global_matching(Some(workspace)));
     rows.sort_unstable_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.source.cmp(&b.source)));
+    annotate_archives(root, rows)
+}
+
+fn archive_marker(root: &Path, row: &Conversation) -> PathBuf {
+    let identity = format!("{}\0{}", row.client, row.source.to_string_lossy());
+    root.join("history-archive").join(format!("{:x}.json", Sha256::digest(identity.as_bytes())))
+}
+
+fn annotate_archives(root: &Path, mut rows: Vec<Conversation>) -> Vec<Conversation> {
+    for row in &mut rows {
+        let marker = archive_marker(root, row);
+        row.archived = !marker.is_symlink() && marker.is_file();
+    }
     rows
+}
+
+pub fn set_archived(root: &Path, reference: &str, id: &str, client: &str, archived: bool) -> Result<(), String> {
+    let row = scan_all(root).into_iter().find(|row| row.history_ref == reference && row.id == id && row.client == client)
+        .ok_or("找不到这条对话，请刷新历史列表")?;
+    let marker = archive_marker(root, &row);
+    let directory = marker.parent().ok_or("归档路径无效")?;
+    if directory.is_symlink() || marker.is_symlink() { return Err("归档状态路径无效".into()); }
+    if archived {
+        fs::create_dir_all(directory).map_err(|_| "无法创建归档状态目录")?;
+        fs::write(&marker, b"{\"version\":1}").map_err(|_| "无法保存归档状态")?;
+    } else {
+        match fs::remove_file(marker) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(_) => return Err("无法取消归档".into()),
+        }
+    }
+    Ok(())
 }
 
 pub fn scan_workspace(root: &Path, workspace: &Path) -> Vec<Conversation> {
@@ -425,7 +458,7 @@ mod tests {
             id: Uuid::new_v4().to_string(), history_ref: "ref".into(), client: "codex".into(),
             title: "title".into(), preview: "preview".into(), workspace: "/work/project".into(),
             model: "model-a".into(), profile_id: "p-one".into(), profile_name: "One".into(),
-            gateway: "https://gateway.test".into(), updated_at: 0, scope: "workbench".into(),
+            gateway: "https://gateway.test".into(), updated_at: 0, scope: "workbench".into(), archived: false,
             home: PathBuf::from("original/branch-home"), source: PathBuf::new(), key_fingerprint: "key-one".into(),
             configured_model: "model-a".into(),
         };
@@ -483,6 +516,35 @@ mod tests {
         assert_eq!(PathBuf::from(&rows[0].workspace), selected);
         assert_eq!(rows[0].title, "first request");
         assert_eq!(rows[0].preview, "latest request");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn archiving_persists_without_changing_transcript_or_resume_identity() {
+        let root = std::env::temp_dir().join(format!("history-archive-{}", Uuid::new_v4()));
+        let config = root.join("workbench");
+        let workspace = root.join("project");
+        fs::create_dir_all(&workspace).unwrap();
+        let id = Uuid::new_v4().to_string();
+        let path = config.join(format!("codex/profile/sessions/2026/11/24/rollout-test-{id}.jsonl"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let transcript = [json!({"type":"session_meta","payload":{"id":id,"cwd":workspace}}),
+            json!({"type":"response_item","payload":{"role":"user","content":"archive me"}})]
+            .iter().map(|row| row.to_string()).collect::<Vec<_>>().join("\n");
+        fs::write(&path, &transcript).unwrap();
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+        let row = super::scan_project(&config, &workspace).remove(0);
+        assert!(!row.archived);
+        super::set_archived(&config, &row.history_ref, &id, "codex", true).unwrap();
+        let archived = super::scan_project(&config, &workspace).remove(0);
+        assert!(archived.archived);
+        assert_eq!(archived.history_ref, row.history_ref);
+        assert_eq!(archived.home, row.home);
+        assert!(super::set_archived(&config, &row.history_ref, &Uuid::new_v4().to_string(), "codex", false).is_err());
+        super::set_archived(&config, &row.history_ref, &id, "codex", false).unwrap();
+        assert!(!super::scan_project(&config, &workspace).remove(0).archived);
+        assert_eq!(fs::read_to_string(&path).unwrap(), transcript);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -238,7 +238,7 @@ describe("工作会话配置", () => {
     await openApp();
     const restore = async () => {
       fireEvent.click(screen.getByRole("button", { name: "恢复最近对话" }));
-      fireEvent.click(await screen.findByRole("button", { name: /测试 Codex 历史/ }));
+      fireEvent.click(await screen.findByRole("button", { name: /^测试 Codex 历史/ }));
     };
 
     await restore();
@@ -287,6 +287,50 @@ describe("工作会话配置", () => {
     fireEvent.change(screen.getByLabelText("会话"), { target: { value: "resume" } });
     await screen.findByText("最后一条用户消息");
     expect(invoke).toHaveBeenCalledWith("list_history", { workspace: "C:\\test-project" });
+  });
+
+  it("归档和取消归档持久化到后端，不触发对话启动", async () => {
+    const row = { id: "session", history_ref: "archive-ref", client: "claude", title: "需要收起的对话",
+      workspace: "C:\\test-project", model: "test-model", profile_id: "fixture-profile", profile_name: "测试配置", updated_at: 1 };
+    let archived = false;
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: { archived?: boolean }) => {
+      if(command === "list_all_history") return [{ ...row, archived }];
+      if(command === "set_history_archived") { archived = Boolean(args.archived); return; }
+      return normalInvoke(command, args);
+    });
+    await openApp();
+    fireEvent.click(screen.getByRole("button", { name: "恢复最近对话" }));
+    fireEvent.click(await screen.findByRole("button", { name: "归档对话：需要收起的对话" }));
+    await waitFor(() => expect(screen.queryByText(row.title)).toBeNull());
+    expect(invoke).toHaveBeenCalledWith("set_history_archived", { historyRef: row.history_ref, historyId: row.id, client: row.client, archived: true });
+    fireEvent.click(screen.getByRole("button", { name: "已归档", exact: true }));
+    expect(await screen.findByText(row.title)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "关闭", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "恢复最近对话" }));
+    await screen.findByText("暂无可恢复的本地对话。");
+    fireEvent.click(screen.getByRole("button", { name: "已归档", exact: true }));
+    fireEvent.click(await screen.findByRole("button", { name: "取消归档对话：需要收起的对话" }));
+    await waitFor(() => expect(screen.queryByText(row.title)).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "未归档", exact: true }));
+    expect(await screen.findByText(row.title)).toBeTruthy();
+    expect(invoke.mock.calls.some(([command]) => command === "start_terminal")).toBe(false);
+  });
+
+  it("项目恢复最近对话会跳过归档项", async () => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    const row = { id: "active-session", history_ref: "active-ref", client: "claude", title: "未归档的会话",
+      workspace: "C:\\test-project", model: "test-model", profile_id: "fixture-profile", profile_name: "测试配置", updated_at: 1 };
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if(command === "list_history") return [{ ...row, id: "archived-session", history_ref: "archived-ref", archived: true }, row];
+      if(command === "start_terminal") return { id: "resumed", title: row.title, workspace: row.workspace };
+      return normalInvoke(command, args);
+    });
+    await openApp();
+    fireEvent.change(screen.getByLabelText("会话"), { target: { value: "continue" } });
+    await waitFor(() => expect(invoke.mock.calls.find(([command]) => command === "start_terminal")?.[1].request)
+      .toMatchObject({ history_ref: row.history_ref, history_id: row.id, history_action: "original" }));
   });
 
   it("未添加工作台 Key 时，仍可用同一个启动按钮运行所选的系统客户端", async () => {

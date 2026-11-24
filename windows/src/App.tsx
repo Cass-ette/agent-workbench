@@ -83,6 +83,7 @@ interface LocalConversation {
   profile_name: string;
   updated_at: number;
   scope?: "local" | "workbench" | "global";
+  archived?: boolean;
 }
 
 interface Session extends TerminalInfo {
@@ -138,6 +139,8 @@ function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyError, setHistoryError] = useState("");
+  const [historyArchived, setHistoryArchived] = useState(false);
+  const [historyArchiveBusy, setHistoryArchiveBusy] = useState("");
   const [selectedHistory, setSelectedHistory] = useState<LocalConversation | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const sessionsRef = useRef<Session[]>([]);
@@ -171,7 +174,7 @@ function App() {
   );
   sessionsRef.current = sessions;
 
-  const matchingHistory = history.filter((entry) => [entry.title, entry.preview ?? "", entry.workspace, entry.client, entry.model, entry.profile_name].some(
+  const matchingHistory = history.filter((entry) => Boolean(entry.archived) === historyArchived && [entry.title, entry.preview ?? "", entry.workspace, entry.client, entry.model, entry.profile_name].some(
     (value) => value.toLocaleLowerCase().includes(historyQuery.trim().toLocaleLowerCase()),
   ));
 
@@ -526,6 +529,7 @@ function App() {
     if (scope === "workspace" && !config.workspace.trim()) { setError("请先选择项目目录。"); return; }
     setHistoryScope(scope);
     setHistoryByDirectory(false);
+    setHistoryArchived(false);
     setHistoryQuery("");
     setHistoryOpen(true);
     setHistoryLoading(true);
@@ -546,12 +550,23 @@ function App() {
     if (isStarting || !config.workspace.trim()) { setError("请先选择项目目录。"); return; }
     try {
       const rows = await invoke<LocalConversation[]>("list_history", { workspace: config.workspace });
-      const latest = rows.find((entry) => entry.client === config.client);
+      const latest = rows.find((entry) => entry.client === config.client && !entry.archived);
       if (!latest) { setError("当前项目暂无该客户端的对话可恢复。"); return; }
       await startSession("resume", latest);
     } catch (cause) {
       setError(errorMessage(cause));
     }
+  }
+
+  async function archiveHistory(entry: LocalConversation) {
+    if (historyArchiveBusy) return;
+    setHistoryArchiveBusy(entry.history_ref);
+    try {
+      await invoke("set_history_archived", { historyRef: entry.history_ref, historyId: entry.id, client: entry.client, archived: !entry.archived });
+      setHistory((rows) => rows.map((row) => row.history_ref === entry.history_ref ? { ...row, archived: !entry.archived } : row));
+      setNotice(entry.archived ? "已取消归档。" : "已归档；可在「已归档」中查找和取消归档。");
+    } catch (cause) { setHistoryError(errorMessage(cause)); }
+    finally { setHistoryArchiveBusy(""); }
   }
 
   function selectHistory(entry: LocalConversation) {
@@ -922,6 +937,10 @@ function App() {
                 <small>{historyScope === "workspace" ? config.workspace + " · 分支使用当前调用配置与模型" : "点击任意对话，用原配置恢复。"}</small>
               </div>
             </div>
+            <div className="segmented-control history-view-switch" role="group" aria-label="归档状态">
+              <button aria-pressed={!historyArchived} onClick={() => setHistoryArchived(false)}>未归档</button>
+              <button aria-pressed={historyArchived} onClick={() => setHistoryArchived(true)}>已归档</button>
+            </div>
             {historyScope === "global" && <div className="segmented-control history-view-switch" role="group" aria-label="浏览方式">
               <button aria-pressed={!historyByDirectory} onClick={() => setHistoryByDirectory(false)}>最近</button>
               <button aria-pressed={historyByDirectory} onClick={() => setHistoryByDirectory(true)}>按目录</button>
@@ -937,6 +956,8 @@ function App() {
                     rows={matchingHistory.map((entry) => ({ entry, path: historyByDirectory ? historyPathParts(entry.workspace) : [] }))}
                     profiles={config.profiles}
                     onSelect={selectHistory}
+                    onArchive={(entry) => void archiveHistory(entry)}
+                    archiving={Boolean(historyArchiveBusy)}
                   />}
               {!historyLoading && !historyError && !matchingHistory.length && <p>暂无可恢复的本地对话。</p>}
             </div>
@@ -993,10 +1014,12 @@ function historyPathParts(workspace: string): string[] {
   return unc && parts.length >= 2 ? ["\\\\" + parts[0] + "\\" + parts[1], ...parts.slice(2)] : parts;
 }
 
-function HistoryOutline({ rows, profiles, onSelect }: {
+function HistoryOutline({ rows, profiles, onSelect, onArchive, archiving }: {
   rows: { entry: LocalConversation; path: string[] }[];
   profiles: KeyProfile[];
   onSelect: (entry: LocalConversation) => void;
+  onArchive: (entry: LocalConversation) => void;
+  archiving: boolean;
 }) {
   const folders = new Map<string, typeof rows>();
   for (const row of rows) {
@@ -1018,17 +1041,20 @@ function HistoryOutline({ rows, profiles, onSelect }: {
         <summary title={label}><FolderOpen size={16} /> <strong>{label}</strong></summary>
         <div className="history-directory-children">
           <HistoryOutline rows={group.map((row) => ({ ...row, path: row.path.slice(parts.length) }))}
-            profiles={profiles} onSelect={onSelect} />
+            profiles={profiles} onSelect={onSelect} onArchive={onArchive} archiving={archiving} />
         </div>
       </details>;
     })}
     {rows.filter((row) => !row.path.length).map(({ entry }) => (
-      <button key={entry.history_ref} onClick={() => onSelect(entry)}>
+      <div className="history-row" key={entry.history_ref}><button onClick={() => onSelect(entry)}>
         <strong>{entry.title}</strong>
         <small>{entry.client === "codex" ? "Codex" : "Claude"} · {entry.model || "模型未知"} · {entry.scope === "global" ? "系统 CLI" : (profiles.find((profile) => profile.id === entry.profile_id)?.name ?? (entry.profile_name || "来源配置未知"))} · {new Date(entry.updated_at * 1000).toLocaleString()}</small>
         {entry.preview && <small>{entry.preview}</small>}
         <small title={entry.workspace}>{entry.workspace || "项目目录未知"}</small>
       </button>
+      <button className="history-archive-button" disabled={archiving} onClick={() => onArchive(entry)}
+        aria-label={`${entry.archived ? "取消归档" : "归档"}对话：${entry.title}`}
+        title="只改变历史列表显示，保留对话、原配置和运行终端">{entry.archived ? "取消归档" : "归档"}</button></div>
     ))}
   </>;
 }

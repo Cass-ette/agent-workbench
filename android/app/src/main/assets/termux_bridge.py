@@ -516,7 +516,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.command == "GET" and uri.path == "/health":
                 return self.reply(200, {"service": "agent-workbench-termux", "version": self.server.version,
-                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "ssh-address-verification", "remote-workbench", "remote-connection-state", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions", "tool-bridge"]})
+                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "ssh-address-verification", "remote-workbench", "remote-connection-state", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions", "history-archive", "tool-bridge"]})
             if self.command == "GET" and uri.path == "/usage":
                 return self.reply(200, usage_snapshot())
             if self.command == "GET" and uri.path == "/tools":
@@ -537,6 +537,8 @@ class Handler(BaseHTTPRequestHandler):
                 selected_client = query.get("client", [None])[0]
                 rows = history.scan_history(codex_homes, claude_homes, limit=500,
                                             workspace=selected_workspace, client=selected_client)
+                rows = history.archive_rows(rows, Path.home() / ".local/share/agent-workbench/history-archive",
+                                            include_archived=query.get("archive") == ["all"])
                 return self.reply(200, {"sessions": history.public_rows(
                     history.mark_scope(rows, "workbench"))})
             payload = {}
@@ -546,6 +548,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not 0 <= length <= limit: return self.reply(413, {"error": "请求过大"})
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 if not isinstance(payload, dict): raise ValueError("请求格式错误")
+            if self.command == "POST" and uri.path == "/history/archive":
+                history, codex_homes, claude_homes = history_context(Path.home())
+                row = history.resolve_history(payload.get("history_ref"), payload.get("history_id"), payload.get("client"),
+                                              codex_homes, claude_homes)
+                history.set_archived(row, Path.home() / ".local/share/agent-workbench/history-archive", payload.get("archived"))
+                return self.reply(200, {"archived": payload["archived"]})
             if self.command == "POST" and uri.path == "/remote/verify-address":
                 from remote_workbench import verify_ssh_address
                 return self.reply(200, verify_ssh_address(payload.get("ssh", {}), payload.get("host"), payload.get("port", 22)))

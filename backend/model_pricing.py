@@ -309,3 +309,53 @@ def apply_usage_pricing(snapshot, resolve):
               else "catalog_estimate" if "catalog" in sources else "client_estimate")
     snapshot["pricing_status"] = (("partial_" if unpriced else "") + status) if costs else "pending_price"
     return snapshot
+
+
+def apply_upstream_usage(snapshot):
+    """Only explicit upstream USD cost/rates; do not substitute external prices."""
+    from usage_records import timeline
+    for session in snapshot["sessions"]:
+        records = session.pop("_pricing_records", [])
+        session.pop("_pricing_contexts", None)
+        session.pop("_pricing_remainder", None)
+        if not records:
+            records = [{**session, "date": "", "context_known": False}]
+        for row in records:
+            reported = number(row.get("upstream_cost_usd"))
+            row["cost_source"] = "upstream" if reported is not None else "unavailable"
+            cost = reported
+            if cost is None and row.get("unit_prices"):
+                quote = row["unit_prices"][0]
+                rates = quote.get("charges") or {}
+                # Require each used category's explicit rate, including cache.
+                categories = (("prompt", (row.get("input_tokens") or 0) - (row.get("cached_input_tokens") or 0) - (row.get("cache_creation_input_tokens") or 0)),
+                              ("completion", row.get("output_tokens") or 0),
+                              ("cache_read", row.get("cached_input_tokens") or 0),
+                              ("cache_write", row.get("cache_creation_input_tokens") or 0))
+                if row.get("input_tokens") is not None and row.get("output_tokens") is not None and all(n >= 0 and (not n or number(rates.get(key)) is not None) for key, n in categories):
+                    cost = sum((Decimal(n) * number(rates[key]) / 1_000_000 for key, n in categories if n), Decimal(0))
+                    row["cost_source"] = "upstream_rates"
+            row["estimated_cost"] = float(cost) if cost is not None else None
+            row["unpriced_records"] = int(cost is None)
+        session["timeline"] = timeline(records, by_model=True)
+        session["usage_records"] = records
+        costs = [r["estimated_cost"] for r in records if r["estimated_cost"] is not None]
+        sources = {r["cost_source"] for r in records if r["estimated_cost"] is not None}
+        source = "upstream_rates" if "upstream_rates" in sources else "upstream"
+        missing = sum(r["unpriced_records"] for r in records)
+        session.update(estimated_cost=sum(costs) if costs else None, estimated_cost_upper=None,
+                       cost_source=("partial_" if missing else "") + source if costs else "unavailable",
+                       unpriced_records=missing,
+                       pricing_note="只显示上游明确提供的费用或单价；没有则显示未提供")
+    snapshot["timeline"] = timeline(r for s in snapshot["sessions"] for r in s["timeline"])
+    snapshot["usage_records"] = [r for s in snapshot["sessions"] for r in s["usage_records"]]
+    snapshot["schema_version"] = 2
+    costs = [s["estimated_cost"] for s in snapshot["sessions"] if s["estimated_cost"] is not None]
+    missing = sum(s["unpriced_records"] for s in snapshot["sessions"])
+    source = "upstream_rates" if any("rates" in s["cost_source"] for s in snapshot["sessions"]) else "upstream"
+    snapshot.update(estimated_cost=sum(costs) if costs else None, estimated_cost_upper=None,
+                    pricing_status=("partial_" if missing else "") + source if costs else "unavailable",
+                    priced_sessions=sum(s["unpriced_records"] == 0 for s in snapshot["sessions"]),
+                    unpriced_sessions=sum(s["unpriced_records"] > 0 for s in snapshot["sessions"]),
+                    pricing_notice="费用只显示日志明确保留的上游 USD 金额，或按上游明确单价计算；未提供不套参考价。CLI 未保留的信息无法追溯。日期按 UTC，日期未知仅纳入全部。缓存／推理已含在输入／输出中。")
+    return snapshot

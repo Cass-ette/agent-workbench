@@ -733,3 +733,54 @@ mod tests {
         assert!(quote(&c, "deepseek-chat").is_none());
     }
 }
+
+pub fn apply_upstream_usage(mut usage: Value) -> Value {
+    let mut all = Vec::new();
+    let mut complete = 0; let mut missing_sessions = 0;
+    for session in usage["sessions"].as_array_mut().into_iter().flatten() {
+        let mut records = session["_pricing_records"].as_array().cloned().unwrap_or_default();
+        if records.is_empty() { let mut r = session.clone(); r["date"] = json!(""); records.push(r); }
+        let mut missing = 0;
+        for record in &mut records {
+            let reported = num(&record["upstream_cost_usd"]);
+            let cost = reported.or_else(|| {
+                let quote = record["unit_prices"].as_array()?.first()?;
+                let incoming = num(&record["input_tokens"])?;
+                let outgoing = num(&record["output_tokens"])?;
+                let cached = num(&record["cached_input_tokens"]).unwrap_or(0.0);
+                let created = num(&record["cache_creation_input_tokens"]).unwrap_or(0.0);
+                if cached + created > incoming { return None; }
+                let mut cost = 0.0;
+                for (key, quantity) in [("prompt",incoming-cached-created),("completion",outgoing),("cache_read",cached),("cache_write",created)] {
+                    if quantity > 0.0 { cost += num(&quote["charges"][key])? * quantity / 1_000_000.0; }
+                }
+                Some(cost)
+            });
+            record["cost_source"] = json!(if reported.is_some() { "upstream" } else if cost.is_some() { "upstream_rates" } else { "unavailable" });
+            missing += usize::from(cost.is_none());
+            record["estimated_cost"] = cost.map(|c| json!(c)).unwrap_or(Value::Null);
+            record["unpriced_records"] = json!(usize::from(cost.is_none()));
+        }
+        let costs: Vec<_> = records.iter().filter_map(|r| r["estimated_cost"].as_f64()).collect();
+        session["estimated_cost"] = if costs.is_empty() { Value::Null } else { json!(costs.iter().sum::<f64>()) };
+        let source = if records.iter().any(|r| r["cost_source"] == "upstream_rates") { "upstream_rates" } else { "upstream" };
+        session["cost_source"] = json!(if costs.is_empty() { "unavailable".to_string() } else { format!("{}{source}", if missing > 0 { "partial_" } else { "" }) });
+        session["unpriced_records"] = json!(missing);
+        session["pricing_note"] = json!(if missing > 0 { "部分记录缺少费用或单价" } else { "只显示上游提供的费用或单价" });
+        session["timeline"] = json!(crate::usage::daily(&records));
+        session["usage_records"] = json!(records);
+        if missing == 0 { complete += 1; } else { missing_sessions += 1; }
+        all.extend(records);
+        if let Some(row) = session.as_object_mut() { row.remove("_pricing_records"); row.remove("_pricing_contexts"); row.remove("_pricing_remainder"); }
+    }
+    let costs: Vec<_> = all.iter().filter_map(|r| r["estimated_cost"].as_f64()).collect();
+    usage["estimated_cost"] = if costs.is_empty() { Value::Null } else { json!(costs.iter().sum::<f64>()) };
+    let source = if all.iter().any(|r| r["cost_source"] == "upstream_rates") { "upstream_rates" } else { "upstream" };
+    usage["pricing_status"] = json!(if costs.is_empty() { "unavailable".to_string() } else { format!("{}{source}", if missing_sessions > 0 { "partial_" } else { "" }) });
+    usage["priced_sessions"] = json!(complete); usage["unpriced_sessions"] = json!(missing_sessions);
+    usage["timeline"] = json!(crate::usage::daily(&all));
+    usage["usage_records"] = json!(all);
+    usage["schema_version"] = json!(2);
+    usage["pricing_notice"] = json!("费用仅显示日志明确提供的上游 USD 金额，或按上游单价计算；未提供不套参考价。CLI 未保留的信息无法追溯。日期按 UTC，日期未知仅纳入全部；缓存／推理已含在输入／输出中。");
+    usage
+}

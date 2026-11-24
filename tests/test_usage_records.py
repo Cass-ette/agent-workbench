@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 SPEC = importlib.util.spec_from_file_location("usage_records", Path(__file__).resolve().parents[1] / "backend/usage_records.py")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 USAGE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(USAGE)
 
@@ -110,7 +111,7 @@ from pathlib import Path
 sys.dont_write_bytecode = False
 scan = runpy.run_path(sys.argv[1])["usage_snapshot"]
 root = Path(sys.argv[1]).parent
-scan.__globals__.update(CONFIG_DIR=root, CODEX_HOME_ROOT=root, CLAUDE_BRANCH_ROOT=root / "branches")
+scan.__globals__.update(CONFIG_DIR=root, CODEX_HOME_ROOT=root, CLAUDE_BRANCH_ROOT=root / "branches", TEST_ROOT=root / "data")
 scan()
 """, str(self.root / "claude-cchp-test.py")], capture_output=True, text=True, check=True)
         self.assertEqual(json.loads(result.stdout)["sessions"], [])

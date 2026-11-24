@@ -337,17 +337,21 @@ def profile_models(profile_id, gateway_value=None):
 
 
 def usage_snapshot():
-    """Read isolated records; estimate from cached public prices, without network."""
+    """Read isolated records and explicitly retained upstream costs, without network."""
     # Importing a bundled helper must not add files to the signed application.
     sys.dont_write_bytecode = True
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from usage_records import scan_usage
-    from model_pricing import apply_usage_pricing
-    service = pricing_service()
+    from usage_records import scan_cached
+    from model_pricing import apply_upstream_usage
     branches = (home for home in CLAUDE_BRANCH_ROOT.glob("*")
                 if home.name.startswith(("branch-", "scope-")) and not home.is_symlink())
-    snapshot = scan_usage(CONFIG_DIR / "projects", CODEX_HOME_ROOT, include_pricing=True, claude_branches=branches)
-    print(json.dumps(apply_usage_pricing(snapshot, service.resolve), ensure_ascii=False))
+    snapshot = scan_cached(CONFIG_DIR / "projects", CODEX_HOME_ROOT, TEST_ROOT / "usage", claude_branches=branches)
+    names = {p["id"]: p["name"] for p in load_profiles()}
+    for session in snapshot["sessions"]:
+        session["profile_name"] = session.get("profile_name") or names.get(session.get("profile_id"), "")
+        for record in session.get("_pricing_records", []):
+            record["profile_name"] = record.get("profile_name") or names.get(record.get("profile_id"), "")
+    print(json.dumps(apply_upstream_usage(snapshot), ensure_ascii=False))
 
 
 def pricing_service(online=False, force=False):

@@ -263,3 +263,8 @@ button { color: inherit; }
 
 .manual-model { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .manual-model input { flex: 1; min-width: 0; padding: 7px; }
+.usage-filters { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+.usage-filters label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; min-width: 110px; max-width: 100%; }
+.usage-filters select, .usage-filters input { background: #fff; color: inherit; border: 1px solid #d7dce0; border-radius: 6px; padding: 7px; max-width: 500px; }
+.usage-chart { overflow-x: auto; margin-top: 12px; }
+.usage-chart svg { display: block; }

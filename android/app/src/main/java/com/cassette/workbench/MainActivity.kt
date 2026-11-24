@@ -570,19 +570,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                 }
             }
             if (model.account.isNotBlank()) item { Text(model.account, style = MaterialTheme.typography.bodySmall) }
-            item {
-                Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("本机用量", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                            TextButton(onClick = model::refreshUsage, enabled = model.connected && !model.usageLoading) { Text(if (model.usageLoading) "读取中…" else "刷新") }
-                        }
-                        Text("输入 ${usageNumber(model.usage.inputTokens)} · 输出 ${usageNumber(model.usage.outputTokens)} · 请求 ${model.usage.requests}", style = MaterialTheme.typography.bodySmall)
-                        Text(if (model.usage.estimatedCost != null) "费用：客户端估算 $${String.format(Locale.US, "%.4f", model.usage.estimatedCost)}" else "费用：未提供", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
-                        Text(model.usage.note, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
+            item { UsagePanel(model) }
             item { Spacer(Modifier.height(16.dp)) }
         }
     }

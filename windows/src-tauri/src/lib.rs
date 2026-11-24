@@ -235,21 +235,18 @@ async fn usage_snapshot(
         .path()
         .app_config_dir()
         .map_err(|error| error.to_string())?;
-    let profiles = state
-        .config
-        .lock()
-        .map_err(|_| "配置锁异常")?
-        .profiles
-        .clone();
+    let config = state.config.lock().map_err(|_| "配置锁异常")?.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let contexts: Vec<_> = profiles
-            .iter()
-            .map(|p| pricing::cached(&root.join("pricing"), &p.id, &p.gateway))
-            .collect();
-        pricing::apply_usage(
-            usage::scan_for_pricing(&root.join("claude"), &root.join("codex")),
-            &contexts,
-        )
+        let mut snapshot = usage::scan_cached(&root.join("claude"), &root.join("codex"), &root.join("usage"));
+        for session in snapshot["sessions"].as_array_mut().into_iter().flatten() {
+            if let Some(profile) = config.profiles.iter().find(|p| session["profile_id"] == p.id) {
+                session["profile_name"] = serde_json::json!(profile.name);
+            }
+            for record in session["_pricing_records"].as_array_mut().into_iter().flatten() {
+                if let Some(profile) = config.profiles.iter().find(|p| record["profile_id"] == p.id) { record["profile_name"] = serde_json::json!(profile.name); }
+            }
+        }
+        pricing::apply_upstream_usage(snapshot)
     })
     .await
     .map_err(|error| format!("读取本地用量失败：{error}"))

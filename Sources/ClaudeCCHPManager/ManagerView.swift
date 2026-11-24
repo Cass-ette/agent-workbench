@@ -42,7 +42,6 @@ struct ManagerView: View {
                 do { try await Task.sleep(for: .seconds(15)) } catch { return }
                 await model.refreshUsage()
                 await model.refreshGatewayUsage()
-                await model.refreshPricing()
             }
         }
         .sheet(isPresented: $isAddProfilePresented) {
@@ -658,71 +657,15 @@ private struct HistoryPickerSheet: View {
 private struct UsageDetailsView: View {
     @ObservedObject var model: ManagerModel
     @State private var page = 0
-
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Picker("统计来源", selection: $page) {
-                Text("网关余额与账单").tag(0)
-                Text("本地 Token 记录").tag(1)
-                Text("网关售价").tag(2)
+            Picker("统计内容", selection: $page) {
+                Text("用量与费用").tag(0)
+                Text("账户账单（可选）").tag(1)
             }.pickerStyle(.segmented)
-            if page == 0 { GatewayBillingPanel(model: model) }
-            else if page == 1 { localUsage }
-            else { ModelPricingPanel(model: model) }
-        }.padding(18).frame(width: 580)
-            .task { await model.refreshGatewayUsage() }
-    }
-
-    private var localUsage: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Token 与费用").font(.headline)
-                Spacer()
-                Button("刷新") { Task { await model.refreshUsage() } }
-                    .disabled(model.isLoadingUsage)
-            }
-            Text("隔离会话历史累计 · 恢复会话包含恢复前的记录")
-                .font(.subheadline).foregroundStyle(.secondary)
-            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 6) {
-                GridRow { Text("输入（含缓存）"); Text(usageCount(model.usage.inputTokens)) }
-                GridRow { Text("输出"); Text(usageCount(model.usage.outputTokens)) }
-                GridRow { Text("缓存读取"); Text(usageCount(model.usage.cachedInputTokens)) }
-                GridRow { Text("缓存写入"); Text(usageCount(model.usage.cacheCreationInputTokens)) }
-                GridRow { Text("推理输出"); Text(usageCount(model.usage.reasoningOutputTokens)) }
-            }.font(.system(size: 12, design: .monospaced))
-            Text(model.usage.costLabel).font(.system(size: 12, weight: .medium))
-            Text(model.usage.pricingNotice ?? "缓存是输入的细分，推理是输出的细分，无需重复相加。按当前单价估算，实际扣费以网关账单为准。")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if let priced = model.usage.pricedSessions {
-                Text("已计算 \(priced)／\(model.usage.sessions.count) 个会话\((model.usage.unpricedSessions ?? 0) > 0 ? " · 其余待匹配单价" : "")")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if !model.usageError.isEmpty { Text(model.usageError).font(.caption).foregroundStyle(.orange) }
-            if model.usage.unreadableFiles > 0 {
-                Text("\(model.usage.unreadableFiles) 个记录文件无法读取，统计可能不完整。")
-                    .font(.caption).foregroundStyle(.orange)
-            }
-            Divider()
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    if model.usage.sessions.isEmpty { Text("尚无可用的本地用量记录").foregroundStyle(.secondary) }
-                    ForEach(model.usage.sessions) { session in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("\(session.client == "codex" ? "Codex" : "Claude") · \(session.model.isEmpty ? "模型未记录" : session.model)")
-                                .font(.system(size: 12, weight: .semibold))
-                            Text(session.workspace.isEmpty ? "项目未记录" : session.workspace)
-                                .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                            Text(String(session.id.suffix(36))).font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
-                            Text("输入 \(usageCount(session.input_tokens)) · 输出 \(usageCount(session.output_tokens)) · 缓存读 \(usageCount(session.cached_input_tokens)) / 写 \(usageCount(session.cache_creation_input_tokens)) · 推理 \(usageCount(session.reasoning_output_tokens))")
-                                .font(.system(size: 10, design: .monospaced)).fixedSize(horizontal: false, vertical: true)
-                            Text(session.costLabel)
-                                .font(.caption).foregroundStyle(.secondary)
-                            if let note = session.pricing_note { Text(note).font(.caption2).foregroundStyle(.secondary) }
-                        }
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }.frame(maxHeight: 260)
-        }
+            if page == 0 { ScrollView { UsageAnalyticsView(model: model) }.frame(maxHeight: 640) }
+            else { GatewayBillingPanel(model: model) }
+        }.padding(18).frame(width: 620)
     }
 }
 

@@ -34,123 +34,16 @@ SENSITIVE_ENV = ("WORKBENCH_GATEWAY_KEY", "CCH_API_KEY", "OPENAI_API_KEY", "ANTH
                  "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
                  "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
                  "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "DISABLE_AUTOUPDATER", "CLAUDE_CODE_SIMPLE")
-USAGE_COUNTERS = ("input_tokens", "output_tokens", "cached_input_tokens",
-                  "cache_creation_input_tokens", "reasoning_output_tokens")
-
-
-def _count(value):
-    return value if type(value) is int and 0 <= value <= 2 ** 53 - 1 else None
-
-
-def _usage(value, client):
-    if not isinstance(value, dict):
-        return None
-    incoming, outgoing = _count(value.get("input_tokens")), _count(value.get("output_tokens"))
-    if incoming is None or outgoing is None:
-        return None
-    cached = _count(value.get("cache_read_input_tokens" if client == "claude" else "cached_input_tokens"))
-    created = _count(value.get("cache_creation_input_tokens" if client == "claude" else "cache_write_input_tokens"))
-    if client == "claude":
-        incoming += (cached or 0) + (created or 0)
-    return dict(zip(USAGE_COUNTERS, (incoming, outgoing, cached, created,
-                                     _count(value.get("reasoning_output_tokens")))))
-
-
-def _merge_usage(previous, current):
-    if previous is None:
-        return current
-    return {key: (max(a, b) if a is not None and b is not None else
-                  a if b is None else b) for key in USAGE_COUNTERS
-            for a, b in [(previous.get(key), current.get(key))]}
-
-
-def _sum_usage(rows):
-    rows = list(rows)
-    return {key: (sum(values) if values else None) for key in USAGE_COUNTERS
-            for values in [[row.get(key) for row in rows if row.get(key) is not None]]}
-
-
 def usage_snapshot(home=None):
-    """Read only usage fields from local CLI JSONL logs; never returns message text or keys."""
+    """One shared scanner for all local clients; no API/admin key is needed."""
+    from usage_records import scan_cached
+    from model_pricing import apply_upstream_usage
     root = Path(home or Path.home()) / ".local/share/agent-workbench"
-    totals = {key: None for key in USAGE_COUNTERS}
-    requests = 0
-    estimated_cost = 0.0
-    cost_records = 0
-    files = 0
-    if not root.is_dir():
-        return {**totals, "requests": 0, "estimated_cost": None,
-                "pricing_status": "unavailable", "note": "尚无本地用量记录"}
-    for path in root.rglob("*.jsonl"):
-        if files >= 200 or path.is_symlink():
-            continue
-        try:
-            parts = path.relative_to(root).parts
-            inherited_through = ""
-            if len(parts) >= 3 and parts[1].startswith("branch-"):
-                from session_history import branch_usage_context
-                imported, manifest = branch_usage_context(root / parts[0] / parts[1], path)
-                if imported:
-                    continue
-                inherited_through = str(manifest.get("inherited_through") or "")
-            if path.stat().st_size > 16 * 1024 * 1024:
-                continue
-            files += 1
-            client = "claude" if "claude" in path.parts else "codex"
-            records, cumulative, reported = {}, None, None
-            with path.open(encoding="utf-8", errors="replace") as stream:
-                for ordinal, line in enumerate(stream):
-                    try:
-                        row = json.loads(line)
-                    except (ValueError, TypeError):
-                        continue
-                    if not isinstance(row, dict):
-                        continue
-                    if inherited_through and str(row.get("timestamp") or "") <= inherited_through:
-                        continue
-                    kind = row.get("type")
-                    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-                    message = row.get("message") if isinstance(row.get("message"), dict) else {}
-                    value = None
-                    identity = str(row.get("uuid") or ordinal)
-                    if client == "claude" and kind == "assistant":
-                        value = _usage(message.get("usage"), client)
-                        identity = str(message.get("id") or identity)
-                    elif client == "codex" and kind == "token_usage_record":
-                        value = _usage(payload.get("usage"), client)
-                        identity = str(payload.get("response_id") or identity)
-                    elif client == "codex" and kind == "event_msg" and payload.get("type") == "token_count":
-                        info = payload.get("info")
-                        value = _usage(info.get("total_token_usage"), client) if isinstance(info, dict) else None
-                        if value:
-                            cumulative = _merge_usage(cumulative, value)
-                    if value:
-                        records[identity] = _merge_usage(records.get(identity), value)
-                    cost = row.get("total_cost_usd")
-                    if type(cost) in (int, float) and 0 <= cost < 1e9:
-                        reported = max(reported or 0.0, float(cost))
-            detail = _sum_usage(records.values())
-            if cumulative:
-                detail = _merge_usage(detail, cumulative)
-            if any(value is not None for value in detail.values()):
-                if records:
-                    totals = {key: ((totals.get(key) or 0) + (detail.get(key) or 0)
-                                    if detail.get(key) is not None else totals.get(key))
-                              for key in USAGE_COUNTERS}
-                else:
-                    totals = _merge_usage(totals, detail)
-                requests += len(records) or 1
-            if reported is not None:
-                estimated_cost += reported
-                cost_records += 1
-        except (OSError, ValueError):
-            continue
-    return {**totals, "requests": requests,
-            "estimated_cost": estimated_cost if cost_records else None,
-            "pricing_status": "client_estimate" if cost_records else "unavailable",
-            "note": ("费用来自 CLI 记录的客户端估算，实际扣费以网关账单为准"
-                     if cost_records else "网关/CLI 未返回费用；这里仅显示本地 Token 记录"),
-            "scanned_files": files, "scanned_at": int(time.time())}
+    snapshot = scan_cached(root / "claude", root / "codex", root / "usage")
+    result = apply_upstream_usage(snapshot)
+    result["note"] = result["pricing_notice"]
+    result["scope_note"] = "本机共享目录中的 CLI 日志；SSH 电脑与未同步的 Linux 虚拟机日志不计入本机统计。"
+    return result
 
 
 def private_write(path, text):

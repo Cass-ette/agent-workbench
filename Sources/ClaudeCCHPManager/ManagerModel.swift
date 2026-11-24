@@ -59,6 +59,34 @@ private struct HistoryListResponse: Decodable {
     let sessions: [LocalHistoryEntry]
 }
 
+struct UsageUnitPrice: Decodable, Equatable, Hashable {
+    let model: String
+    let currency: String
+    let unit: String
+    let charges: [String: Double]
+}
+
+struct UsagePoint: Decodable, Equatable, Identifiable {
+    let date: String
+    var model: String? = nil
+    let input_tokens: Int?
+    let output_tokens: Int?
+    let cached_input_tokens: Int?
+    let cache_creation_input_tokens: Int?
+    let reasoning_output_tokens: Int?
+    let estimated_cost: Double?
+    let unpriced_records: Int?
+    var unit_prices: [UsageUnitPrice]? = nil
+    var record_id: String? = nil
+    var timestamp: String? = nil
+    var session_id: String? = nil
+    var client: String? = nil
+    var project_path: String? = nil
+    var profile_id: String? = nil
+    var profile_name: String? = nil
+    var id: String { record_id ?? date + ":" + (model ?? "") }
+}
+
 struct UsageSession: Decodable, Identifiable, Equatable {
     let id: String
     let client: String
@@ -73,8 +101,12 @@ struct UsageSession: Decodable, Identifiable, Equatable {
     let estimated_cost_upper: Double?
     let pricing_note: String?
     let cost_source: String?
+    var timeline: [UsagePoint]? = nil
+    var usage_records: [UsagePoint]? = nil
+    var profile_id: String? = nil
+    var profile_name: String? = nil
 
-    var costLabel: String { usageCostLabel(estimated_cost, upper: estimated_cost_upper, label: cost_source == "client" ? "客户端估算" : cost_source == "reference" ? "参考估算" : "网关单价估算") }
+    var costLabel: String { usageCostLabel(estimated_cost, upper: estimated_cost_upper, label: cost_source?.contains("rates") == true ? "按上游单价计算" : "上游报告费用") }
 }
 
 struct UsageSnapshot: Decodable, Equatable {
@@ -119,15 +151,14 @@ struct UsageSnapshot: Decodable, Equatable {
                                      estimatedCost: nil, sessions: [], unreadableFiles: 0)
 
     var costLabel: String {
-        let label = pricingStatus.contains("partial") ? "部分会话估算" : pricingStatus.contains("reference") ? "含参考值估算" : pricingStatus.contains("mixed") ? "混合来源估算" : pricingStatus.contains("catalog") ? "网关单价估算" : "客户端估算"
-        return usageCostLabel(estimatedCost, upper: estimatedCostUpper, label: label)
+        return usageCostLabel(estimatedCost, upper: estimatedCostUpper, label: pricingStatus.contains("partial") ? "已提供部分费用" : pricingStatus.contains("rates") ? "按上游单价计算" : "上游报告费用")
     }
 }
 
 func usageCount(_ value: Int?) -> String { value.map { $0.formatted() } ?? "—" }
 
 func usageCostLabel(_ cost: Double?, upper: Double?, label: String) -> String {
-    guard let cost else { return "待匹配单价 · 可在网关售价中设置来源" }
+    guard let cost else { return "费用未提供" }
     if let upper, upper > cost + 0.00000001 { return String(format: "%@ $%.4f–$%.4f", label, cost, upper) }
     if cost > 0 && cost < 0.0001 { return label + " <$0.0001" }
     return String(format: "%@ $%.4f", label, cost)
@@ -993,7 +1024,7 @@ final class ManagerModel: ObservableObject {
             isLoadingModels = false
             statusMessage = modelLoadError.isEmpty ? "\(models.count) 个可用模型" : modelLoadError
             isStatusError = false
-            await refreshPricing()
+            await refreshUsage()
         } catch {
             guard modelRequestID == requestID, selectedProfileID == profileID, gateway == requestGateway else { return }
             modelLoadError = error.localizedDescription

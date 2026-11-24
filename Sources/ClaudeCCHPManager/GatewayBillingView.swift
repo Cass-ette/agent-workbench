@@ -45,7 +45,7 @@ struct GatewayBillingPanel: View {
             } else if !model.isLoadingGatewayUsage {
                 Text("尚未获取账户信息").font(.caption).foregroundStyle(.secondary)
             }
-            Text("余额可能由多把 Key 共用，不等于当前会话的花费。网关售价可在“网关售价”页查看，本地计算仍标为估算。")
+            Text("余额可能由多把 Key 共用，不等于当前会话的花费。用量小窗仅显示日志保留的上游费用或单价，未提供时不推算。")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Divider()
             HStack {
@@ -53,7 +53,7 @@ struct GatewayBillingPanel: View {
                 Spacer()
             }
             if model.gatewayBilling?.scope_label == nil {
-                Text("当前未接入实扣明细；请在 CCHP 控制台核对实际账单。本地 Token 费用标为估算，价格来源见各会话说明。余额可能由多把 Key 共用。")
+                Text("当前未接入账户实扣明细；请在服务提供方控制台核对实际账单。用量统计与账户账单互相独立，余额可能由多把 Key 共用。")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if let url = consoleURL { Link("打开 CCHP 控制台查看实扣", destination: url).font(.caption) }

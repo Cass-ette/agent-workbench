@@ -38,6 +38,8 @@ data class UsageSummary(
     val estimatedCost: Double? = null,
     val pricingStatus: String = "unavailable",
     val note: String = "网关/CLI 未返回费用；这里仅显示本地 Token 记录",
+    val sessions: List<UsageConversation> = emptyList(),
+    val scopeNote: String = "",
 )
 
 private fun JSONObject.longOrNull(name: String): Long? =
@@ -440,6 +442,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     var account by mutableStateOf(""); private set
     var usage by mutableStateOf(UsageSummary()); private set
     var usageLoading by mutableStateOf(false); private set
+    var usageError by mutableStateOf(""); private set
     var environmentRevision by mutableStateOf(0); private set
     var runtimeStage by mutableStateOf("尚未检查本地 Agent 环境"); private set
     var runtimeLog by mutableStateOf(""); private set
@@ -741,8 +744,12 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                         estimatedCost = if (data.has("estimated_cost") && !data.isNull("estimated_cost")) data.optDouble("estimated_cost").takeIf { it >= 0 } else null,
                         pricingStatus = data.optString("pricing_status", "unavailable"),
                         note = data.optString("note", "网关/CLI 未返回费用；这里仅显示本地 Token 记录"),
+                        sessions = parseUsageConversations(data).map { s -> s.copy(profileName = profiles.find { it.id == s.profileId }?.name ?: s.profileName, days = s.days.map { r -> r.copy(profileName = profiles.find { it.id == (r.profileId ?: s.profileId) }?.name ?: r.profileName) }) },
+                        scopeNote = data.optString("scope_note"),
                     )
+                    usageError = ""
                 }
+                result.onFailure { usageError = "用量读取失败，保留上次结果：" + safeError(it as? Exception ?: Exception("读取异常")) }
                 usageLoading = false
             }
         }

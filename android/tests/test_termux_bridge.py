@@ -410,7 +410,9 @@ fi
             self.assertEqual(result["input_tokens"], 115)
             self.assertEqual(result["output_tokens"], 25)
             self.assertEqual(result["requests"], 1)
-            self.assertEqual(result["estimated_cost"], 0.0125)
+            self.assertIsNone(result["estimated_cost"])
+            self.assertEqual(result["pricing_status"], "unavailable")
+            self.assertEqual(result["sessions"][0]["timeline"][0]["date"], "")
             self.assertNotIn("secret_prompt", json.dumps(result))
 
     def test_real_pty_echoes_and_interrupt_returns_to_shell(self):

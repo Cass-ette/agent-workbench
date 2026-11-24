@@ -26,6 +26,7 @@ private struct GatewayState: Decodable {
 struct ModelResponse: Decodable, Sendable {
     let models: [String]
     let gateway: String?
+    var catalog_notice: String? = nil
 }
 
 struct LocalHistoryEntry: Decodable, Identifiable, Equatable {
@@ -137,6 +138,8 @@ private struct AddedProfile: Decodable {
     let name: String
     let gateway: String
     let model_count: Int
+    let models: [String]
+    let catalog_notice: String?
 }
 
 private struct RemovedProfile: Decodable {
@@ -979,16 +982,16 @@ final class ManagerModel: ObservableObject {
             }
             guard modelRequestID == requestID, selectedProfileID == profileID, gateway == requestGateway else { return }
             let fetched = Array(Set(response.models.filter { !$0.isEmpty })).sorted()
-            guard !fetched.isEmpty else { throw BackendError(message: "网关未返回可用模型。") }
-            models = fetched
+            if !fetched.isEmpty { models = fetched }
+            modelLoadError = response.catalog_notice ?? (fetched.isEmpty ? "网关返回了空模型列表；可手动填写模型 ID。" : "")
             if let responseGateway = response.gateway { gateway = responseGateway }
-            if !models.contains(selectedModel) {
+            if selectedModel.isEmpty {
                 selectedModel = models.first ?? ""
             }
             modelCatalog.remember(profile: profileID, gateway: gateway, selected: selectedModel, models: models)
-            isUsingCachedModels = false
+            isUsingCachedModels = fetched.isEmpty && !models.isEmpty
             isLoadingModels = false
-            statusMessage = "\(models.count) 个可用模型"
+            statusMessage = modelLoadError.isEmpty ? "\(models.count) 个可用模型" : modelLoadError
             isStatusError = false
             await refreshPricing()
         } catch {
@@ -999,27 +1002,30 @@ final class ManagerModel: ObservableObject {
         }
     }
 
-    func addProfile(name: String, key: String, gateway profileGateway: String) async -> Bool {
+    func addProfile(name: String, key: String, gateway profileGateway: String, readModels: Bool = true) async -> Bool {
         guard let backend else {
             addProfileError = "本机后端尚未就绪。"
             return false
         }
         isAddingProfile = true
         addProfileError = ""
-        addProfileStatus = "正在仅查询模型白名单…"
+        addProfileStatus = readModels ? "正在读取模型列表…" : "正在保存配置…"
         do {
-            let payload = try JSONSerialization.data(withJSONObject: ["name": name, "key": key, "gateway": profileGateway])
+            let payload = try JSONSerialization.data(withJSONObject: ["name": name, "key": key, "gateway": profileGateway, "read_models": readModels])
             let data = try await backend.run(["add-profile-stdin"], stdin: payload)
             let added = try JSONDecoder().decode(AddedProfile.self, from: data)
             try await refreshProfiles()
             selectedProfileID = added.id
             gateway = added.gateway
-            selectedModel = ""
-            models = []
+            models = added.models
+            selectedModel = models.first ?? ""
+            modelLoadError = added.catalog_notice ?? ""
+            isUsingCachedModels = false
+            modelCatalog.remember(profile: added.id, gateway: gateway, selected: selectedModel, models: models)
             resetGatewayUsage()
-            await loadModels(for: added.id)
-            await refreshGatewayUsage()
-            addProfileStatus = "已保存；找到 \(added.model_count) 个模型，未发起推理。"
+            addProfileStatus = "已保存；" + (modelLoadError.isEmpty ? "找到 \(added.model_count) 个模型，未发起推理。" : modelLoadError)
+            statusMessage = addProfileStatus
+            isStatusError = false
             isAddingProfile = false
             return true
         } catch {

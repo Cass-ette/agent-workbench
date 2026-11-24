@@ -142,6 +142,64 @@ class GatewayProfileTests(unittest.TestCase):
             self.assertEqual(BACKEND.fetch_models("test-key", "https://api.example.test"), ["model-a"])
             self.assertEqual(opener.open.call_count, 2)
 
+    def test_generic_api_prefixes_are_preserved_for_client_endpoints(self):
+        for path in ("", "/v1", "/proxy/v1", "/api/paas/v4", "/tenant/anthropic", "/v2%2Ftenant/v1"):
+            with self.subTest(path=path):
+                base = "https://gateway.test" + path
+                normalized = BACKEND.normalize_gateway(base + "/")
+                expected = "https://gateway.test" if path == "/v1" else base
+                self.assertEqual(normalized, expected)
+                api = base if path else base + "/v1"
+                self.assertEqual(BACKEND.gateway_api_base(normalized), api)
+                _, env = BACKEND.build_launch("dummy", "manual-model", gateway=normalized)
+                self.assertEqual(env["ANTHROPIC_BASE_URL"], api[:-3] if api.endswith("/v1") else api)
+                home = BACKEND.codex_config("test", "manual-model", normalized)
+                self.assertIn('base_url = ' + json.dumps(api), (home / "config.toml").read_text())
+        for url in ("https://gateway.test:0/api", "https://gateway.test:99999/api", "https://gateway.test/api?q=x", "https://gateway.test/api#x"):
+            with self.subTest(url=url), self.assertRaises((RuntimeError, ValueError)):
+                BACKEND.normalize_gateway(url)
+
+    def test_catalog_uses_custom_path_and_only_falls_back_when_unsupported(self):
+        requests = []
+        def respond(request, **kwargs):
+            requests.append(request.full_url)
+            if "/v1/models" not in request.full_url:
+                raise HTTPError(request.full_url, 404, "not supported", {}, None)
+            return io.BytesIO(b'{"models":[{"name":"manual-model"}]}')
+        with patch.object(BACKEND, "build_opener") as build:
+            build.return_value.open.side_effect = respond
+            self.assertEqual(BACKEND.fetch_models("dummy", "https://gateway.test/custom"), ["manual-model"])
+        self.assertEqual(requests, ["https://gateway.test/custom/models?limit=1000", "https://gateway.test/custom/v1/models?limit=1000"])
+
+    def test_missing_catalog_allows_save_but_auth_redirect_and_network_failures_stay_visible(self):
+        with patch.object(BACKEND, "build_opener") as build:
+            build.return_value.open.side_effect = lambda req, **kw: (_ for _ in ()).throw(HTTPError(req.full_url, 404, "missing", {}, None))
+            saved = BACKEND.save_profile_key("Manual gateway", "local-key", "https://gateway.test/custom")
+        self.assertEqual(saved["models"], [])
+        self.assertIn("尚未验证", saved["catalog_notice"])
+        self.assertEqual(BACKEND.read_profile_key(next(p for p in BACKEND.load_profiles() if p["id"] == saved["id"])), "local-key")
+        for status in (401, 403, 302, 500):
+            with self.subTest(status=status), patch.object(BACKEND, "build_opener") as build:
+                build.return_value.open.side_effect = lambda req, **kw: (_ for _ in ()).throw(HTTPError(req.full_url, status, "private-key", {}, None))
+                with self.assertRaises(RuntimeError) as error:
+                    BACKEND.model_catalog("private-key", "https://gateway.test/custom")
+                self.assertNotIn("private-key", str(error.exception))
+        with patch.object(BACKEND, "fetch_models", side_effect=OSError("offline")):
+            with self.assertRaises(OSError):
+                BACKEND.model_catalog("dummy", "https://gateway.test")
+
+    def test_explicit_skip_sends_no_metadata_request_and_manual_launch_does_not_require_catalog(self):
+        with patch.object(BACKEND, "fetch_models", side_effect=AssertionError("must not read metadata")):
+            saved = BACKEND.save_profile_key("Offline", "dummy", "https://gateway.test/proxy/v1", read_models=False)
+            self.assertIn("已跳过", saved["catalog_notice"])
+            executable = BACKEND.TEST_ROOT / "fake-codex"
+            executable.write_text("")
+            BACKEND.WORKSPACE.mkdir(exist_ok=True)
+            with patch.object(BACKEND, "CODEX", executable), patch.object(BACKEND.os, "chdir"), patch.object(BACKEND.os, "execve") as launch:
+                BACKEND.launch_codex_profile(saved["id"], "unlisted-model", str(BACKEND.WORKSPACE), "new")
+            self.assertTrue(launch.called)
+            self.assertIn('base_url = "https://gateway.test/proxy/v1"', next(BACKEND.CODEX_HOME_ROOT.glob("**/config.toml")).read_text())
+
     def test_usage_snapshot_aggregates_client_records_without_duplicate_assistant_rows(self):
         claude_file = BACKEND.CONFIG_DIR / "projects" / "demo" / "session.jsonl"
         claude_file.parent.mkdir(parents=True)

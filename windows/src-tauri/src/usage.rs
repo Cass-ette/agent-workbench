@@ -311,11 +311,11 @@ pub fn scan(claude_root: &Path, codex_root: &Path) -> UsageSnapshot {
                             if let Some((name, value)) = line.split_once('=') {
                                 if name.trim() == "base_url" {
                                     if let Ok(url) = serde_json::from_str::<String>(value.trim()) {
-                                        route["gateway"] = Value::String(
-                                            url.trim_end_matches("/v1")
-                                                .trim_end_matches('/')
-                                                .into(),
-                                        );
+                                        if route.get("gateway").is_none() {
+                                            let base = url.trim_end_matches('/');
+                                            let root_v1 = reqwest::Url::parse(base).map(|u| u.path() == "/v1").unwrap_or(false);
+                                            route["gateway"] = Value::String(if root_v1 { base.trim_end_matches("/v1") } else { base }.into());
+                                        }
                                     }
                                 }
                             }

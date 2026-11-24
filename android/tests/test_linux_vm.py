@@ -139,7 +139,7 @@ class VMTests(unittest.TestCase):
                 payload_file.write_text(json.dumps({
                     "client": client, "mode": "new", "scope": "a" * 24,
                     "workspace": str(workspace), "model": "test-model",
-                    "gateway": "https://gateway.test", "key": "private-test-key",
+                    "gateway": "https://gateway.test/tenant/v1", "key": "private-test-key",
                 }))
                 script = V.AGENT_RUNNER.replace('Path("/projects")', "Path(" + repr(str(projects)) + ")")
                 captured = {}
@@ -172,7 +172,9 @@ class VMTests(unittest.TestCase):
                 self.assertIn("danger-full-access", codex["args"])
                 self.assertIn("on-request", codex["args"])
                 self.assertNotIn("private-test-key", (Path(codex["env"]["CODEX_HOME"]) / "config.toml").read_text())
+                self.assertIn('base_url = "https://gateway.test/tenant/v1"', (Path(codex["env"]["CODEX_HOME"]) / "config.toml").read_text())
                 claude = run("claude")
+                self.assertEqual(claude["env"]["ANTHROPIC_BASE_URL"], "https://gateway.test/tenant")
                 self.assertIn("default", claude["args"])
                 settings = Path(claude["env"]["CLAUDE_CONFIG_DIR"]) / "settings.json"
                 self.assertEqual(json.loads(settings.read_text()), {})

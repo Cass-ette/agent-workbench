@@ -60,10 +60,8 @@ interface AppStateResponse {
   config_path: string;
 }
 
-interface AddProfileResponse {
-  profile: KeyProfile;
-  models: string[];
-}
+interface ModelCatalog { models: string[]; catalog_notice?: string; }
+interface AddProfileResponse extends ModelCatalog { profile: KeyProfile; }
 
 interface TerminalInfo {
   id: string;
@@ -125,6 +123,7 @@ function App() {
   const [modelQuery, setModelQuery] = useState("");
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [modelLoadError, setModelLoadError] = useState("");
+  const [catalogNotice, setCatalogNotice] = useState("");
   const [modelReload, setModelReload] = useState(0);
   const [sessionMode, setSessionMode] = useState<SessionMode>("new");
   const [launchScope, setLaunchScope] = useState<LaunchScope>(() =>
@@ -161,6 +160,7 @@ function App() {
   const usageBusy = useRef(false);
   const terminalRefs = useRef(new Map<string, Terminal>());
   const pendingOutput = useRef(new Map<string, Uint8Array[]>());
+  const addedCatalog = useRef<{ id: string; reload: number; catalog: ModelCatalog } | null>(null);
   const pendingExits = useRef(new Map<string, number>());
 
   const selectedProfile = useMemo(
@@ -328,19 +328,29 @@ function App() {
     if (!loaded || launchScope === "system" || !selectedProfile || !isTauri()) {
       setModels([]);
       setIsLoadingModels(false);
+      setModelLoadError(""); setCatalogNotice("");
+      return;
+    }
+    const added = addedCatalog.current;
+    if (added?.id === selectedProfile.id && added.reload === modelReload) {
+      setModels(added.catalog.models);
+      setCatalogNotice(added.catalog.catalog_notice ?? "");
       setModelLoadError("");
+      setIsLoadingModels(false);
       return;
     }
     let cancelled = false;
     setIsLoadingModels(true);
-    setModelLoadError("");
-    invoke<string[]>("models_for_profile", { profileId: selectedProfile.id })
-      .then((items) => {
+    setModelLoadError(""); setCatalogNotice("");
+    invoke<ModelCatalog>("models_for_profile", { profileId: selectedProfile.id })
+      .then((catalog) => {
         if (cancelled) return;
-        setModels(items);
+        const items = catalog.models;
+        setCatalogNotice(catalog.catalog_notice ?? "");
+        setModels((previous) => items.length ? items : previous);
         setConfig((current) => ({
           ...current,
-          model: !items.length || items.includes(current.model) ? current.model : items[0],
+          model: current.model || items[0] || "",
         }));
       })
       .catch((cause: unknown) => {
@@ -375,7 +385,7 @@ function App() {
     setError("");
     setModelQuery("");
     setModels([]);
-    setModelLoadError("");
+    setModelLoadError(""); setCatalogNotice("");
     setConfig((current) => ({ ...current, selected_profile_id: profile.id, model: "" }));
     try {
       await invoke("select_profile", { profileId: profile.id });
@@ -710,7 +720,7 @@ function App() {
                   <div className="model-picker">
                     <div className="search-box">
                       <Search size={14} />
-                      <input id="model-query" value={modelQuery} onChange={(event) => setModelQuery(event.currentTarget.value)} placeholder="搜索模型" disabled={!models.length} />
+                      <input id="model-query" value={modelQuery} onChange={(event) => setModelQuery(event.currentTarget.value)} placeholder="搜索模型" />
                     </div>
                     <div className="model-select-wrap">
                       <select aria-label="选择模型" value={config.model} onChange={(event) => {
@@ -730,8 +740,17 @@ function App() {
                       <RefreshCw size={14} className={isLoadingModels ? "spinning" : ""} />
                     </button>
                   </div>
+                  <div className="manual-model">
+                    <label htmlFor="manual-model-id">模型 ID（可手动填写）</label>
+                    <input id="manual-model-id" value={config.model} maxLength={250} disabled={!selectedProfile} placeholder="输入网关支持的模型 ID" onChange={(event) => {
+                      const model = event.currentTarget.value.trim();
+                      setConfig((current) => ({ ...current, model }));
+                    }} />
+                  </div>
                   {modelLoadError && <span className="model-load-error" role="status">模型列表读取失败：{modelLoadError}</span>}
-                  {!modelLoadError && !isLoadingModels && selectedProfile && !models.length && <span className="model-load-note">网关未返回可用模型</span>}
+                  <span className="model-load-note">Claude 需 Messages，Codex 需 Responses；仅支持 Chat Completions 的网关不能直接供 Codex 使用。</span>
+                  {catalogNotice && <span className="model-load-note" role="status">{catalogNotice}</span>}
+                  {!catalogNotice && !modelLoadError && !isLoadingModels && selectedProfile && !models.length && <span className="model-load-note">网关未返回可用模型</span>}
                 </div>
               )}
 
@@ -926,9 +945,10 @@ function App() {
       {showProfileDialog && (
         <ProfileDialog
           onClose={() => setShowProfileDialog(false)}
-          onSave={async (name, gateway, key) => {
+          onSave={async (name, gateway, key, read_models) => {
             setError("");
-            const response = await invoke<AddProfileResponse>("add_profile", { request: { name, gateway, key } });
+            const response = await invoke<AddProfileResponse>("add_profile", { request: { name, gateway, key, read_models } });
+            addedCatalog.current = { id: response.profile.id, reload: modelReload, catalog: response };
             setConfig((current) => ({
               ...current,
               profiles: [...current.profiles, response.profile],
@@ -936,9 +956,10 @@ function App() {
               model: response.models[0] ?? "",
             }));
             setModels(response.models);
+            setCatalogNotice(response.catalog_notice ?? "");
             setModelQuery("");
             setShowProfileDialog(false);
-            setNotice(`已保存调用配置，读取到 ${response.models.length} 个模型；未发起推理。`);
+            setNotice(response.catalog_notice || `已保存调用配置，读取到 ${response.models.length} 个模型；未发起推理。`);
           }}
           onError={(message) => setError(message)}
         />
@@ -1110,12 +1131,13 @@ function ProfileDialog({
   onError,
 }: {
   onClose: () => void;
-  onSave: (name: string, gateway: string, key: string) => Promise<void>;
+  onSave: (name: string, gateway: string, key: string, readModels: boolean) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [name, setName] = useState("");
   const [gateway, setGateway] = useState("http://127.0.0.1:8081");
   const [key, setKey] = useState("");
+  const [readModels, setReadModels] = useState(true);
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState("");
 
@@ -1124,7 +1146,7 @@ function ProfileDialog({
     setBusy(true);
     setDialogError("");
     try {
-      await onSave(name.trim(), gateway.trim(), key.trim());
+      await onSave(name.trim(), gateway.trim(), key.trim(), readModels);
     } catch (cause) {
       const message = errorMessage(cause);
       setDialogError(message);
@@ -1139,15 +1161,17 @@ function ProfileDialog({
       <form className="profile-dialog" onSubmit={submit}>
         <div className="dialog-header">
           <div className="dialog-icon"><KeyRound size={18} /></div>
-          <div><h2>添加调用配置</h2><p>使用本机网关创建一个可复用的 Key 配置。</p></div>
+          <div><h2>添加调用配置</h2><p>使用兼容网关创建可复用的调用配置。</p></div>
           <button type="button" className="icon-button" title="关闭" onClick={onClose} disabled={busy}><X size={17} /></button>
         </div>
         <label className="dialog-field">配置名称<input autoFocus value={name} onChange={(event) => setName(event.currentTarget.value)} placeholder="例如：AutoBits 免费" maxLength={80} required /></label>
-        <label className="dialog-field">本机或远程网关<input value={gateway} onChange={(event) => setGateway(event.currentTarget.value)} placeholder="http://127.0.0.1:8081" required /></label>
+        <label className="dialog-field">API 基础地址（可含路径）<input value={gateway} onChange={(event) => setGateway(event.currentTarget.value)} placeholder="http://127.0.0.1:8081" required /></label>
         <label className="dialog-field">下游调用 Key<input type="password" value={key} onChange={(event) => setKey(event.currentTarget.value)} autoComplete="new-password" placeholder="不会写入普通配置文件" required /></label>
+        <label><input type="checkbox" checked={readModels} onChange={(event) => setReadModels(event.currentTarget.checked)} />保存时读取模型列表</label>
+        <p>支持 /proxy/v1 等 API 前缀；未提供模型列表时可手动填写模型 ID。取消读取时不校验 Key。</p>
         {dialogError && <div className="dialog-error" role="alert">{dialogError}</div>}
-        <div className="dialog-security"><KeyRound size={14} />Key 将保存到 Windows 凭据管理器。添加时只读取模型列表，不发起推理。</div>
-        <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="primary-button" disabled={busy || !name.trim() || key.trim().length < 20}>{busy ? "校验并保存…" : "校验并保存"}</button></div>
+        <div className="dialog-security"><KeyRound size={14} />Key 将保存到 Windows 凭据管理器。可选读取模型列表，不发起推理。</div>
+        <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="primary-button" disabled={busy || !name.trim() || !key.trim()}>{busy ? "保存中…" : "保存配置"}</button></div>
       </form>
     </div>
   );

@@ -28,6 +28,14 @@ class UsageTests(unittest.TestCase):
     def scan(self):
         return USAGE.scan_usage(self.claude, self.codex)
 
+    def test_route_context_preserves_custom_api_path_and_model_id(self):
+        for suffix in ("/v1", "/proxy/v1", "/api/paas/v4"):
+            path = self.write("codex/p/sessions/one.jsonl", {})
+            (self.codex / "p/config.toml").write_text('base_url = "https://gateway.test' + suffix + '"\nmodel = "model/v1"\n')
+            context = USAGE._context(path, self.codex, "codex")
+            self.assertEqual(context["gateway"], "https://gateway.test" + ("" if suffix == "/v1" else suffix))
+            self.assertEqual(context["model"], "model/v1")
+
     def test_claude_stream_chunks_and_copied_files_count_one_response_with_final_usage(self):
         first = {"type": "assistant", "sessionId": "session-a", "uuid": "first", "message": {
             "id": "response-a", "usage": {"input_tokens": 10, "output_tokens": 2,

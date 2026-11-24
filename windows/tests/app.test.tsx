@@ -43,7 +43,7 @@ beforeEach(() => {
         config_path: "test-settings.json",
       };
     }
-    if (command === "models_for_profile") return models;
+    if (command === "models_for_profile") return { models };
     if (command === "list_history" || command === "list_all_history") return [];
     return undefined;
   });
@@ -344,12 +344,51 @@ describe("工作会话配置", () => {
   it("网关返回空列表时提示无模型，并保留已保存的模型", async () => {
     const normalInvoke = invoke.getMockImplementation()!;
     invoke.mockImplementation(async (command: string, args: unknown) =>
-      command === "models_for_profile" ? [] : normalInvoke(command, args));
+      command === "models_for_profile" ? { models: [] } : normalInvoke(command, args));
     render(<StrictMode><App /></StrictMode>);
 
     await screen.findByText("网关未返回可用模型");
     expect(screen.queryByRole("option", { name: "先添加调用配置" })).toBeNull();
     expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "选择模型" }).value).toBe(models[0]);
+  });
+
+  it("取消读取列表后保存配置不会再次自动请求模型目录", async () => {
+    await openApp();
+    fireEvent.click(screen.getByTitle("添加调用配置"));
+    fireEvent.change(screen.getByLabelText("配置名称"), { target: { value: "Manual gateway" } });
+    fireEvent.change(screen.getByLabelText("API 基础地址（可含路径）"), { target: { value: "https://gateway.test/custom/v1" } });
+    fireEvent.change(screen.getByLabelText("下游调用 Key"), { target: { value: "local-key" } });
+    fireEvent.click(screen.getByLabelText("保存时读取模型列表"));
+    const normal = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "add_profile") return { profile: { id: "manual", name: "Manual gateway", gateway: "https://gateway.test/custom/v1" }, models: [], catalog_notice: "已跳过模型列表读取" };
+      return normal(command, args);
+    });
+    const requests = invoke.mock.calls.filter(([command]) => command === "models_for_profile").length;
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    await screen.findAllByText("已跳过模型列表读取");
+    expect(invoke).toHaveBeenCalledWith("add_profile", { request: { name: "Manual gateway", gateway: "https://gateway.test/custom/v1", key: "local-key", read_models: false } });
+    expect(invoke.mock.calls.filter(([command]) => command === "models_for_profile")).toHaveLength(requests);
+    fireEvent.change(screen.getByLabelText("模型 ID（可手动填写）"), { target: { value: "manual-model" } });
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "新建会话" }).disabled).toBe(false);
+  });
+
+  it("兼容网关没有模型目录时可以手填，刷新不覆盖手填 ID", async () => {
+    const normalInvoke = invoke.getMockImplementation()!;
+    let available = false;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === "models_for_profile") return { models: available ? models : [], catalog_notice: available ? "" : "网关未提供模型列表接口；Key 尚未验证" };
+      return normalInvoke(command, args);
+    });
+    render(<StrictMode><App /></StrictMode>);
+    await screen.findByText("网关未提供模型列表接口；Key 尚未验证");
+    const manual = screen.getByLabelText<HTMLInputElement>("模型 ID（可手动填写）");
+    fireEvent.change(manual, { target: { value: "unlisted-model" } });
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "新建会话" }).disabled).toBe(false);
+    available = true;
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
+    await screen.findByText("430 个可用");
+    expect(manual.value).toBe("unlisted-model");
   });
 
   it("刷新失败时保留上次成功读取的列表与当前选择", async () => {

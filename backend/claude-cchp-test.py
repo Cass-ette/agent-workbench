@@ -47,18 +47,64 @@ def normalize_gateway(value):
         raise RuntimeError("网关地址必须是完整的 http:// 或 https:// 地址。")
     if parsed.query or parsed.fragment or "@" in parsed.netloc:
         raise RuntimeError("网关地址不能包含查询参数、片段或账号密码。")
-    if parsed.path not in {"", "/", "/v1"}:
-        raise RuntimeError("网关地址填写服务根地址即可，例如 https://gateway.example.com。")
+    try:
+        port = parsed.port
+    except ValueError:
+        raise RuntimeError("网关端口无效。") from None
+    if not parsed.hostname or port == 0 or any(c.isspace() or ord(c) < 32 for c in value) or "\\" in value:
+        raise RuntimeError("网关地址格式无效。")
+    path = parsed.path.rstrip("/")
     host = (parsed.hostname or "").lower()
     loopback = host == "localhost"
     try:
         loopback = loopback or ipaddress.ip_address(host).is_loopback
     except ValueError:
-        loopback = False
+        ...
     if parsed.scheme == "http" and not loopback:
         raise RuntimeError("远程网关必须使用 HTTPS，避免下游调用 Key 明文传输。")
-    value = value[:-3] if value.endswith("/v1") else value
+    if path == "/v1":
+        value = value[:-3]
     return value
+
+
+def gateway_api_base(gateway):
+    """Use an explicit API prefix as-is; only bare hosts get the OpenAI /v1 default."""
+    parsed = urlparse(gateway)
+    return gateway.rstrip("/") if parsed.path.rstrip("/") else gateway.rstrip("/") + "/v1"
+
+
+def gateway_claude_base(gateway):
+    # Claude's SDK appends /v1/messages itself.
+    gateway = gateway.rstrip("/")
+    return gateway[:-3] if gateway.endswith("/v1") else gateway
+
+
+def gateway_model_urls(gateway):
+    gateway = gateway.rstrip("/")
+    urls = [gateway_api_base(gateway) + "/models"]
+    path = urlparse(gateway).path
+    if path and not path.endswith("/v1"):
+        urls.append(gateway + "/v1/models")
+    return urls
+
+
+class ModelCatalogUnavailable(RuntimeError):
+    ...
+
+
+def model_catalog(key, gateway, read_models=True):
+    if not read_models:
+        return {"models": [], "catalog_notice": "已跳过模型列表读取；Key 和模型尚未验证，请手动填写模型 ID。"}
+    try:
+        models = fetch_models(key, gateway)
+        return {"models": models, "catalog_notice": "" if models else "网关返回了空模型列表，请手动填写模型 ID；实际可用性由客户端请求确认。"}
+    except ModelCatalogUnavailable:
+        return {"models": [], "catalog_notice": "网关未提供模型列表接口；Key 尚未验证，请手动填写模型 ID。"}
+
+
+def validate_model_id(model):
+    if not isinstance(model, str) or not model.strip() or len(model) > 250 or any(c in model for c in "\0\r\n"):
+        raise RuntimeError("请选择或填写有效模型 ID。")
 
 
 def gateway_url():
@@ -138,7 +184,7 @@ def read_key():
     if KEY_FILE.is_symlink() or KEY_FILE.stat().st_mode & 0o077:
         raise RuntimeError("密钥文件权限不符合要求；请重新运行 setup。")
     value = KEY_FILE.read_text().strip()
-    if len(value) < 20 or any(c.isspace() for c in value):
+    if not value or len(value) > 4096 or any(c.isspace() for c in value):
         raise RuntimeError("本机密钥文件格式不正确，请重新运行 setup。")
     return value
 
@@ -180,12 +226,12 @@ def read_profile_key(profile):
     if path.is_symlink() or path.stat().st_mode & 0o077:
         raise RuntimeError("密钥文件权限不符合要求，请重新保存该 Key。")
     value = path.read_text().strip()
-    if len(value) < 20 or any(c.isspace() for c in value):
+    if not value or len(value) > 4096 or any(c.isspace() for c in value):
         raise RuntimeError("本机密钥文件格式不正确，请重新保存该 Key。")
     return value
 
 
-def save_profile_key(label, key, gateway=None):
+def save_profile_key(label, key, gateway=None, read_models=True):
     label = label.strip()
     if not label or len(label) > 80:
         raise RuntimeError("名称不能为空，且最多 80 个字符。")
@@ -193,10 +239,10 @@ def save_profile_key(label, key, gateway=None):
     if any(profile["name"] == label for profile in profiles):
         raise RuntimeError("已有同名 Key 配置；请换一个名称，避免意外覆盖。")
     key = key.strip()
-    if len(key) < 20 or any(c.isspace() for c in key) or key[:1] in {"'", '"'}:
+    if not key or len(key) > 4096 or any(c.isspace() for c in key) or key[:1] in {"'", '"'}:
         raise RuntimeError("格式不正确；请粘贴完整 Key，不带引号、空格或换行。")
     gateway = normalize_gateway(gateway) if gateway else gateway_url()
-    models = fetch_models(key, gateway)
+    catalog = model_catalog(key, gateway, read_models)
     prepare_isolated_config()
     KEY_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(KEY_DIR, 0o700)
@@ -210,7 +256,7 @@ def save_profile_key(label, key, gateway=None):
     index[profile_id] = {"name": label, "gateway": gateway}
     private_write(KEY_DIR / (profile_id + ".key"), key + "\n")
     private_write(PROFILE_INDEX, json.dumps(index, ensure_ascii=False, indent=2) + "\n")
-    return {"id": profile_id, "name": label, "gateway": gateway, "model_count": len(models)}
+    return {"id": profile_id, "name": label, "gateway": gateway, "model_count": len(catalog["models"]), **catalog}
 
 
 def add_profile_key():
@@ -227,9 +273,8 @@ def add_profile_from_stdin():
     payload = json.load(sys.stdin)
     if not isinstance(payload, dict) or not isinstance(payload.get("name"), str) or not isinstance(payload.get("key"), str):
         raise RuntimeError("新增 Key 请求格式不正确。")
-    profile = save_profile_key(payload["name"], payload["key"], payload.get("gateway"))
-    print(json.dumps({"id": profile["id"], "name": profile["name"], "gateway": profile["gateway"],
-                      "model_count": profile["model_count"]}, ensure_ascii=False))
+    profile = save_profile_key(payload["name"], payload["key"], payload.get("gateway"), payload.get("read_models", True) is not False)
+    print(json.dumps(profile, ensure_ascii=False))
 
 
 def remove_profile_key(profile_id):
@@ -288,7 +333,7 @@ def profile_models(profile_id, gateway_value=None):
         raise RuntimeError("找不到所选调用 Key；请刷新列表。")
     gateway = normalize_gateway(gateway_value) if gateway_value else profile["gateway"]
     print(json.dumps({"profile_id": profile_id, "gateway": gateway,
-                      "models": fetch_models(read_profile_key(profile), gateway)}, ensure_ascii=False))
+                      **model_catalog(read_profile_key(profile), gateway)}, ensure_ascii=False))
 
 
 def usage_snapshot():
@@ -439,11 +484,11 @@ def set_profile_gateway_from_stdin(profile_id):
     if not isinstance(payload, dict) or not isinstance(payload.get("url"), str):
         raise RuntimeError("网关配置请求格式不正确。")
     gateway = normalize_gateway(payload["url"])
-    models = fetch_models(read_profile_key(profile), gateway)
+    catalog = model_catalog(read_profile_key(profile), gateway)
     data = json.loads(PROFILE_INDEX.read_text())
     data[profile_id] = {"name": profile["name"], "gateway": gateway}
     private_write(PROFILE_INDEX, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    print(json.dumps({"profile_id": profile_id, "gateway": gateway, "model_count": len(models)}, ensure_ascii=False))
+    print(json.dumps({"profile_id": profile_id, "gateway": gateway, "model_count": len(catalog["models"]), **catalog}, ensure_ascii=False))
 
 
 def launch_profile(profile_id, model, workspace_value, session_mode, gateway_value=None, permission_mode="restricted"):
@@ -461,8 +506,7 @@ def launch_profile(profile_id, model, workspace_value, session_mode, gateway_val
         raise RuntimeError("会话方式无效。")
     key = read_profile_key(profile)
     gateway = normalize_gateway(gateway_value) if gateway_value else profile["gateway"]
-    if model not in fetch_models(key, gateway):
-        raise RuntimeError("此 Key 不允许所选模型；没有启动 Claude。")
+    validate_model_id(model)
     remember_workspace(workspace)
     save_last_launch(profile, model, workspace, session_mode, "claude", MANAGER_LAST_LAUNCH)
     prepare_isolated_config()
@@ -499,7 +543,7 @@ def codex_config(profile_id, model, gateway=None, workspace=None, branch_home=No
         'disable_response_storage = true\n\n'
         '[model_providers.cchp_local]\n'
         'name = "cchp_local"\n'
-        'base_url = ' + json.dumps((gateway or gateway_url()) + "/v1", ensure_ascii=False) + '\n'
+        'base_url = ' + json.dumps(gateway_api_base(gateway or gateway_url()), ensure_ascii=False) + '\n'
         'wire_api = "responses"\n'
         'env_key = "CCH_API_KEY"\n'
     )
@@ -640,8 +684,7 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
     if gateway_value and normalize_gateway(gateway_value) != gateway:
         raise RuntimeError("目标网关已变更；请刷新配置后重新确认。")
     key = read_profile_key(profile)
-    if not original and model not in fetch_models(key, gateway):
-        raise RuntimeError("目标调用配置不允许此模型；没有启动恢复会话。")
+
     executable = CODEX if client == "codex" else CLAUDE
     if not executable.is_file():
         raise RuntimeError("未找到对应客户端；没有恢复会话。")
@@ -705,8 +748,7 @@ def launch_codex_profile(profile_id, model, workspace_value, session_mode, gatew
         raise RuntimeError("会话方式无效。")
     key = read_profile_key(profile)
     gateway = normalize_gateway(gateway_value) if gateway_value else profile["gateway"]
-    if model not in fetch_models(key, gateway):
-        raise RuntimeError("此 Key 不允许所选模型；没有启动 Codex。")
+    validate_model_id(model)
     if not CODEX.is_file():
         raise RuntimeError("未找到原有 Codex 可执行文件；没有修改原入口。")
     codex_home = codex_config(profile_id, model, gateway, workspace,
@@ -744,8 +786,13 @@ def choose_profile():
 
 def choose_model(profile):
     key = read_profile_key(profile)
-    models = fetch_models(key)
-    print("\n" + profile["name"] + " 可用模型（只显示此 Key 的白名单）：")
+    models = model_catalog(key, profile["gateway"])["models"]
+    if not models:
+        model = input("此网关未提供模型目录，请输入模型 ID：").strip()
+        if not model or len(model) > 250 or any(c in model for c in "\0\r\n"):
+            raise RuntimeError("模型 ID 无效。")
+        return key, model
+    print("\n" + profile["name"] + " 可用模型（网关返回的模型目录）：")
     for number, model in enumerate(models, 1):
         print(str(number) + ". " + model)
     choice = input("输入模型编号或完整模型名：").strip()
@@ -856,8 +903,7 @@ def quick_launch():
         workspace = Path(previous["workspace"])
         if profile and workspace.is_dir():
             key = read_profile_key(profile)
-            models = fetch_models(key)
-            if previous["model"] in models:
+            if previous["model"]:
                 mode_label = {"new": "新会话", "continue": "继续最近会话", "resume": "打开会话选择器"}[previous["session_mode"]]
                 print("\n上次配置：" + profile["name"] + " / " + previous["model"])
                 print("工作目录：" + str(workspace))
@@ -873,12 +919,12 @@ def quick_launch():
                             print("已取消；没有启动 Claude。")
                             return 0
                     return launch(previous["model"], selected_key=key, selected_name=profile["name"],
-                                  workspace=workspace, session_mode=previous["session_mode"])
+                                  workspace=workspace, session_mode=previous["session_mode"], gateway=profile["gateway"])
                 if choice != "c":
                     print("请输入回车、c 或 q。")
                     return 0
             else:
-                print("上次模型已不在此 Key 的白名单中，请重新选择。")
+                print("上次没有记录模型 ID，请重新选择。")
         else:
             print("上次 Key 或工作目录不可用，请重新选择。")
     profile = choose_profile()
@@ -887,7 +933,7 @@ def quick_launch():
     session_mode = choose_session_mode()
     save_last_launch(profile, model, workspace, session_mode)
     return launch(model, selected_key=key, selected_name=profile["name"],
-                  workspace=workspace, session_mode=session_mode)
+                  workspace=workspace, session_mode=session_mode, gateway=profile["gateway"])
 
 
 class NoModelListRedirect(HTTPRedirectHandler):
@@ -903,42 +949,39 @@ def close_http_error(exc):
 
 def fetch_models(key, gateway=None):
     gateway = gateway or gateway_url()
-    url = gateway + "/v1/models"
-    headers = {"User-Agent": "claude-cchp-test-metadata/1.0"}
-    request = Request(
-        url + "?limit=1000",
-        headers={
-            **headers,
-            "x-api-key": key,
-            "anthropic-version": "2023-06-01",
-        },
-    )
-    # Keep credentials on the configured host and preserve existing x-api-key routes.
+    headers = {"User-Agent": "agent-workbench-metadata/1.0"}
     opener = build_opener(ProxyHandler({}), NoModelListRedirect())
-    try:
+    for url in gateway_model_urls(gateway):
         try:
-            response = opener.open(request, timeout=12)
+            try:
+                response = opener.open(Request(url + "?limit=1000", headers={
+                    **headers, "x-api-key": key, "anthropic-version": "2023-06-01",
+                }), timeout=12)
+            except HTTPError as exc:
+                if exc.code not in (401, 403):
+                    raise
+                close_http_error(exc)
+                response = opener.open(Request(url, headers={**headers, "Authorization": "Bearer " + key}), timeout=12)
+            with response:
+                payload = json.load(response)
         except HTTPError as exc:
-            if exc.code not in (401, 403):
-                raise
             close_http_error(exc)
-            response = opener.open(Request(url, headers={**headers, "Authorization": "Bearer " + key}), timeout=12)
-        with response:
-            payload = json.load(response)
-    except HTTPError as exc:
-        close_http_error(exc)
-        if 300 <= exc.code < 400:
-            raise RuntimeError("模型列表接口要求重定向，请填写服务的最终地址。") from None
-        raise RuntimeError("网关模型列表校验失败：HTTP " + str(exc.code)) from None
-    except (URLError, TimeoutError, OSError):
-        raise RuntimeError("无法连接网关 " + gateway + "，请先确认网关服务已启动。") from None
-    except (ValueError, TypeError):
-        raise RuntimeError("模型列表不是预期的 JSON，请检查网关地址。") from None
-    rows = payload.get("data", []) if isinstance(payload, dict) else []
-    models = sorted({row["id"] for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)})
-    if not models:
-        raise RuntimeError("此 Key 未返回可用模型；未启动客户端，也不会回退其他来源。")
-    return models
+            if exc.code in (404, 405, 501):
+                continue
+            if 300 <= exc.code < 400:
+                raise RuntimeError("模型列表接口要求重定向，请填写服务的最终地址。") from None
+            raise RuntimeError("网关模型列表读取失败：HTTP " + str(exc.code)) from None
+        except (URLError, TimeoutError, OSError):
+            raise RuntimeError("无法连接网关，请检查地址、网络和服务状态。") from None
+        except (ValueError, TypeError):
+            raise RuntimeError("模型列表不是预期的 JSON，请检查网关地址。") from None
+        rows = payload.get("data", payload.get("models")) if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise RuntimeError("网关没有返回有效模型列表；可取消读取列表后保存并手动填写模型 ID。")
+        return sorted({row.get("id") or row.get("name") for row in rows
+                       if isinstance(row, dict) and isinstance(row.get("id") or row.get("name"), str)
+                       and (row.get("id") or row.get("name")).strip()})
+    raise ModelCatalogUnavailable("网关未提供模型列表接口。")
 
 
 def setup_key():
@@ -947,7 +990,7 @@ def setup_key():
     print("只填本机 CCHP 创建的「本机自用 · AutoBits 免费」完整调用 Key。")
     print("输入不显示，不要填上游 Key；本步骤仅查询模型列表，不调用模型。")
     key = getpass.getpass("本机免费调用 Key：").strip()
-    if len(key) < 20 or any(c.isspace() for c in key) or key[:1] in {"'", '"'}:
+    if not key or len(key) > 4096 or any(c.isspace() for c in key) or key[:1] in {"'", '"'}:
         raise RuntimeError("格式不正确；请粘贴完整 Key，不带引号、空格或换行。")
     models = fetch_models(key)
     if DEFAULT_MODEL not in models:
@@ -974,7 +1017,7 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new", ga
     bypass = local_network_bypass(environment)
     environment.update({
         "CLAUDE_CONFIG_DIR": str(config_dir or CONFIG_DIR),
-        "ANTHROPIC_BASE_URL": gateway,
+        "ANTHROPIC_BASE_URL": gateway_claude_base(gateway),
         # Installed Claude's --bare mode reads API_KEY, not AUTH_TOKEN/OAuth/keychain.
         "ANTHROPIC_API_KEY": key,
         "ANTHROPIC_MODEL": model,
@@ -1016,8 +1059,7 @@ def launch(model, smoke=False, selected_key=None, selected_name=None, workspace=
         raise RuntimeError("未找到原有 Claude 可执行文件；没有修改原入口。")
     key = selected_key if selected_key is not None else read_key()
     gateway = normalize_gateway(gateway) if gateway else gateway_url()
-    if model not in fetch_models(key, gateway):
-        raise RuntimeError("此调用 Key 不允许模型 " + model + "；已停止，不会回退。")
+    validate_model_id(model)
     prepare_isolated_config()
     cwd = workspace or WORKSPACE
     command, environment = build_launch(key, model, smoke, cwd, session_mode, gateway,
@@ -1098,10 +1140,10 @@ def menu():
             elif choice == "4":
                 profile = choose_profile()
                 key, model = choose_model(profile)
-                launch(model, True, selected_key=key, selected_name=profile["name"])
+                launch(model, True, selected_key=key, selected_name=profile["name"], gateway=profile["gateway"])
             elif choice == "5":
                 profile = choose_profile()
-                print("\n".join(fetch_models(read_profile_key(profile))))
+                print("\n".join(fetch_models(read_profile_key(profile), profile["gateway"])))
             elif choice == "6": add_profile_key()
             else: print("请输入 0 至 6。")
         except (RuntimeError, ValueError, OSError) as exc:

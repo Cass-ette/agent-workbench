@@ -142,6 +142,17 @@ class BridgeTests(unittest.TestCase):
             self.assertIn("linux_vm.py", args[-1])
             self.assertIn("; unset", args[-1])
 
+    def test_custom_api_prefix_is_used_by_both_clients(self):
+        with tempfile.TemporaryDirectory() as home, patch.object(B.shutil, "which", side_effect=lambda name, **kw: "/bin/" + name):
+            for path in ("", "/proxy/v1", "/api/paas/v4", "/tenant/anthropic"):
+                gateway = "https://gateway.test" + path
+                payload = dict(mode="new", profile_id="manual", model="manual-model", key="dummy", gateway=gateway)
+                _, codex, _ = B.launch_spec({**payload, "client": "codex"}, home)
+                config = (Path(codex["CODEX_HOME"]) / "config.toml").read_text()
+                self.assertIn('base_url = ' + json.dumps(gateway if path else gateway + "/v1"), config)
+                _, claude, _ = B.launch_spec({**payload, "client": "claude"}, home)
+                self.assertEqual(claude["ANTHROPIC_BASE_URL"], gateway[:-3] if path.endswith("/v1") else gateway)
+
     def test_key_is_only_in_child_environment_and_configs_are_isolated(self):
         with tempfile.TemporaryDirectory() as home:
             payload = dict(client="codex", mode="new", profile_id="one", model="model; echo wrong", key="test-private-value",

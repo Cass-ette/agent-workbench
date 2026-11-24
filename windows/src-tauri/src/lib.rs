@@ -71,12 +71,23 @@ struct AddProfileRequest {
     name: String,
     gateway: String,
     key: String,
+    #[serde(default = "default_read_models")]
+    read_models: bool,
 }
+
+fn default_read_models() -> bool { true }
 
 #[derive(Serialize)]
 struct AddProfileResponse {
     profile: KeyProfile,
     models: Vec<String>,
+    catalog_notice: String,
+}
+
+#[derive(Serialize)]
+struct ModelCatalog {
+    models: Vec<String>,
+    catalog_notice: String,
 }
 
 #[derive(Deserialize)]
@@ -347,70 +358,75 @@ fn normalize_gateway(value: &str) -> Result<String, String> {
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err("网关必须是无凭据的 HTTP(S) 根地址".into());
+        return Err("网关必须是无凭据、无查询参数的 HTTP(S) API 基础地址".into());
     }
-    if !matches!(url.path(), "" | "/" | "/v1") {
-        return Err("网关地址只填写服务根地址".into());
+    if value.trim().chars().any(|c| c.is_whitespace() || c.is_control()) || value.contains('\\') || url.port() == Some(0) {
+        return Err("网关地址格式无效".into());
     }
     let host = url.host_str().unwrap_or_default();
     let loopback = host.eq_ignore_ascii_case("localhost")
         || host
+            .trim_matches(['[', ']'])
             .parse::<IpAddr>()
             .map(|address| address.is_loopback())
             .unwrap_or(false);
     if url.scheme() == "http" && !loopback {
         return Err("远程网关必须使用 HTTPS".into());
     }
-    url.set_path("");
+    let path = url.path().trim_end_matches('/').to_string();
+    if path == "/v1" { url.set_path(""); }
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
-async fn fetch_models(gateway: &str, key: &str) -> Result<Vec<String>, String> {
-    let url = format!("{}/v1/models", gateway.trim_end_matches('/'));
+fn gateway_api_base(gateway: &str) -> String {
+    let base = gateway.trim_end_matches('/');
+    if Url::parse(base).map(|url| url.path().is_empty() || url.path() == "/").unwrap_or(false) {
+        format!("{base}/v1")
+    } else { base.to_string() }
+}
+
+fn gateway_claude_base(gateway: &str) -> &str {
+    gateway.trim_end_matches('/').strip_suffix("/v1").unwrap_or(gateway.trim_end_matches('/'))
+}
+
+async fn fetch_model_catalog(gateway: &str, key: &str) -> Result<ModelCatalog, String> {
+    let base = gateway.trim_end_matches('/');
+    let mut urls = vec![format!("{}/models", gateway_api_base(base))];
+    if Url::parse(base).map(|url| url.path() != "/" && !url.path().is_empty()).unwrap_or(false) && !base.ends_with("/v1") {
+        urls.push(format!("{base}/v1/models"));
+    }
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("agent-workbench/0.1")
         .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|_| "无法创建网关连接".to_string())?;
-    let mut response = client
-        .get(format!("{url}?limit=1000"))
-        .header("x-api-key", key)
-        .header("anthropic-version", "2023-06-01")
-        .send()
-        .await
-        .map_err(|error| format!("连接网关失败：{error}"))?;
-    if matches!(response.status().as_u16(), 401 | 403) {
-        response = client
-            .get(url)
-            .bearer_auth(key)
-            .send()
-            .await
-            .map_err(|error| format!("连接网关失败：{error}"))?;
+        .build().map_err(|_| "无法创建网关连接".to_string())?;
+    for url in urls {
+        let mut response = client.get(format!("{url}?limit=1000"))
+            .header("x-api-key", key).header("anthropic-version", "2023-06-01")
+            .send().await.map_err(|_| "连接网关失败，请检查地址、网络和服务状态".to_string())?;
+        if matches!(response.status().as_u16(), 401 | 403) {
+            response = client.get(&url).bearer_auth(key).send().await
+                .map_err(|_| "连接网关失败，请检查地址、网络和服务状态".to_string())?;
+        }
+        let status = response.status();
+        if matches!(status.as_u16(), 404 | 405 | 501) { continue; }
+        if status.is_redirection() { return Err("模型列表接口要求重定向，请填写服务的最终地址。".into()); }
+        if !status.is_success() { return Err(format!("网关模型列表读取失败：HTTP {}", status.as_u16())); }
+        let body: Value = response.json().await.map_err(|_| "模型列表响应不是有效 JSON".to_string())?;
+        let rows = body["data"].as_array().or_else(|| body["models"].as_array())
+            .ok_or("网关没有返回有效模型列表；可取消读取列表后保存并手动填写模型 ID。")?;
+        let mut models: Vec<String> = rows.iter()
+            .filter_map(|row| row["id"].as_str().or_else(|| row["name"].as_str()))
+            .filter(|id| !id.trim().is_empty()).map(str::to_string).collect();
+        models.sort_unstable(); models.dedup();
+        let catalog_notice = if models.is_empty() { "网关返回了空模型列表，请手动填写模型 ID；实际可用性由客户端请求确认。" } else { "" }.into();
+        return Ok(ModelCatalog { models, catalog_notice });
     }
-    let status = response.status();
-    if status.is_redirection() {
-        return Err("模型列表接口要求重定向，请填写服务的最终地址。".into());
-    }
-    if !status.is_success() {
-        return Err(format!("网关模型列表校验失败：HTTP {}", status.as_u16()));
-    }
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|error| format!("模型列表响应无效：{error}"))?;
-    let rows = body["data"]
-        .as_array()
-        .or_else(|| body["models"].as_array())
-        .ok_or("网关没有返回模型列表")?;
-    let mut models: Vec<String> = rows
-        .iter()
-        .filter_map(|row| row["id"].as_str().or_else(|| row["name"].as_str()))
-        .map(str::to_string)
-        .collect();
-    models.sort_unstable();
-    models.dedup();
-    Ok(models)
+    Ok(ModelCatalog { models: vec![], catalog_notice: "网关未提供模型列表接口；Key 尚未验证，请手动填写模型 ID。".into() })
+}
+
+async fn fetch_models(gateway: &str, key: &str) -> Result<Vec<String>, String> {
+    Ok(fetch_model_catalog(gateway, key).await?.models)
 }
 
 fn key_entry(profile_id: &str) -> Result<Entry, String> {
@@ -432,11 +448,12 @@ async fn add_profile(
     state: State<'_, AppState>,
 ) -> Result<AddProfileResponse, String> {
     let name = request.name.trim();
-    if name.is_empty() || name.len() > 80 || request.key.trim().len() < 20 {
+    if name.is_empty() || name.len() > 80 || request.key.trim().is_empty() || request.key.len() > 4096 || request.key.trim().chars().any(char::is_whitespace) {
         return Err("请填写名称和完整的下游调用 Key".into());
     }
     let gateway = normalize_gateway(&request.gateway)?;
-    let models = fetch_models(&gateway, request.key.trim()).await?;
+    let catalog = if request.read_models { fetch_model_catalog(&gateway, request.key.trim()).await? }
+        else { ModelCatalog { models: vec![], catalog_notice: "已跳过模型列表读取；Key 和模型尚未验证，请手动填写模型 ID。".into() } };
     let profile = KeyProfile {
         id: Uuid::new_v4().to_string(),
         name: name.to_string(),
@@ -456,14 +473,14 @@ async fn add_profile(
         *config = original;
         return Err(error);
     }
-    Ok(AddProfileResponse { profile, models })
+    Ok(AddProfileResponse { profile, models: catalog.models, catalog_notice: catalog.catalog_notice })
 }
 
 #[tauri::command]
 async fn models_for_profile(
     profile_id: String,
     state: State<'_, AppState>,
-) -> Result<Vec<String>, String> {
+) -> Result<ModelCatalog, String> {
     let profile = {
         let config = state.config.lock().map_err(|_| "配置锁异常")?;
         config
@@ -476,7 +493,7 @@ async fn models_for_profile(
     let key = key_entry(&profile.id)?
         .get_password()
         .map_err(|_| "Windows 凭据管理器中没有这把 Key".to_string())?;
-    fetch_models(&profile.gateway, &key).await
+    fetch_model_catalog(&profile.gateway, &key).await
 }
 
 #[tauri::command]
@@ -685,7 +702,7 @@ fn start_terminal(
         let config_text = format!(
             "model = {}\nmodel_provider = \"cchp_local\"\nmodel_reasoning_effort = \"medium\"\nsandbox_mode = \"workspace-write\"\ndisable_response_storage = true\n\n[model_providers.cchp_local]\nname = \"cchp_local\"\nbase_url = {}\nwire_api = \"responses\"\nenv_key = \"CCH_API_KEY\"\n",
             serde_json::to_string(&request.model).map_err(|error| error.to_string())?,
-            serde_json::to_string(&format!("{}/v1", profile.gateway))
+            serde_json::to_string(&gateway_api_base(&profile.gateway))
                 .map_err(|error| error.to_string())?,
         );
         if source.is_none() || branch.is_some() {
@@ -741,7 +758,7 @@ fn start_terminal(
         fs::create_dir_all(&claude_home)
             .map_err(|error| format!("创建隔离 Claude 配置失败：{error}"))?;
         shell.env("CLAUDE_CONFIG_DIR", claude_home);
-        shell.env("ANTHROPIC_BASE_URL", &profile.gateway);
+        shell.env("ANTHROPIC_BASE_URL", gateway_claude_base(&profile.gateway));
         shell.env("ANTHROPIC_API_KEY", &key);
         let mut args = vec![
             "--model".to_string(),
@@ -1293,17 +1310,71 @@ mod tests {
     }
 
     #[test]
-    fn gateway_rejects_credentials_and_extra_paths() {
+    fn gateway_rejects_credentials_and_keeps_api_prefixes() {
         assert!(normalize_gateway("https://user:example@gateway.example.com").is_err());
-        assert!(normalize_gateway("https://gateway.example.com/proxy/v1").is_err());
+        assert_eq!(normalize_gateway("https://gateway.example.com/proxy/v1/").unwrap(), "https://gateway.example.com/proxy/v1");
         assert!(normalize_gateway("https://gateway.example.com/v1?key=value").is_err());
+    }
+
+    #[test]
+    fn explicit_prefixes_build_correct_client_bases() {
+        for prefix in ["/proxy/v1", "/api/paas/v4", "/tenant/anthropic", "/v2%2Ftenant/v1"] {
+            let base = format!("https://gateway.test{prefix}");
+            assert_eq!(super::gateway_api_base(&base), base);
+            assert_eq!(super::gateway_claude_base(&base), base.strip_suffix("/v1").unwrap_or(&base));
+        }
+        assert_eq!(super::gateway_api_base("https://gateway.test"), "https://gateway.test/v1");
+    }
+
+    fn catalog_fixture(statuses: Vec<(&'static str, &'static str)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/custom", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut paths = vec![];
+            for (status, body) in statuses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                paths.push(first);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" { break; }
+                }
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            paths
+        });
+        (url, server)
+    }
+
+    #[test]
+    fn missing_catalog_is_distinct_from_auth_redirect_and_empty_results() {
+        let (url, server) = catalog_fixture(vec![("404 Not Found", ""), ("405 Method Not Allowed", "")]);
+        let catalog = tauri::async_runtime::block_on(super::fetch_model_catalog(&url, "dummy")).unwrap();
+        assert!(catalog.models.is_empty());
+        assert!(catalog.catalog_notice.contains("尚未验证"));
+        let paths = server.join().unwrap();
+        assert!(paths[0].starts_with("GET /custom/models?limit=1000 "));
+        assert!(paths[1].starts_with("GET /custom/v1/models?limit=1000 "));
+        for statuses in [vec![("401 Unauthorized", ""), ("403 Forbidden", "")], vec![("302 Found", "")], vec![("500 Internal Server Error", "")]] {
+            let (url, server) = catalog_fixture(statuses);
+            let error = tauri::async_runtime::block_on(super::fetch_model_catalog(&url, "dummy")).err().unwrap();
+            assert!(!error.contains("dummy"));
+            server.join().unwrap();
+        }
+        let (url, server) = catalog_fixture(vec![("200 OK", r#"{"data":[]}"#)]);
+        let catalog = tauri::async_runtime::block_on(super::fetch_model_catalog(&url, "dummy")).unwrap();
+        assert!(catalog.catalog_notice.contains("空模型列表"));
+        server.join().unwrap();
     }
 
     #[test]
     fn model_list_works_with_a_bearer_only_api() {
         use std::io::{BufRead, BufReader, Write};
         use std::net::TcpListener;
-        use std::time::Duration;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1311,7 +1382,7 @@ mod tests {
             for attempt in 0..2 {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
                 let mut request = String::new();
                 let mut reader = BufReader::new(&stream);

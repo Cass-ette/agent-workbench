@@ -598,12 +598,12 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
     AlertDialog(onDismissRequest = { if (!model.busy) dismiss() }, title = { Text("添加调用配置") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             OutlinedTextField(name, { name = it }, label = { Text("配置名称") }, singleLine = true)
-            OutlinedTextField(gateway, { gateway = it }, label = { Text("网关根地址") }, singleLine = true)
+            OutlinedTextField(gateway, { gateway = it }, label = { Text("API 基础地址（可含路径）") }, singleLine = true)
             OutlinedTextField(key, { key = it }, label = { Text("网关签发的调用 Key") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
             Text("127.0.0.1 指这部手机。电脑上的本机网关需要另外提供可访问地址或安全隧道。", style = MaterialTheme.typography.labelSmall)
             Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(validate, { validate = it }); Text("保存时读取模型列表", style = MaterialTheme.typography.bodySmall) }
             Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(allowInsecureLan, { allowInsecureLan = it }); Text("允许可信局域网 HTTP（Key 会在局域网明文传输）", style = MaterialTheme.typography.bodySmall) }
-            Text("读取列表只发送 GET，不调用模型。", style = MaterialTheme.typography.labelSmall)
+            Text("可填写 /proxy/v1 等 API 前缀。Claude 需 Messages 接口，Codex 需 Responses 接口；仅支持 Chat Completions 的网关不能直接供 Codex 使用。读取列表只发送 GET，不调用模型。", style = MaterialTheme.typography.labelSmall)
             if (model.error.isNotBlank()) Text(model.error, color = MaterialTheme.colorScheme.error)
         }
     }, confirmButton = { TextButton(onClick = { model.saveProfile(name, gateway, key, validate, allowInsecureLan) { key = ""; dismiss() } }, enabled = !model.busy && name.isNotBlank() && key.isNotBlank()) { Text(if (model.busy) "保存中…" else "保存") } },

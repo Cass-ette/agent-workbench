@@ -727,6 +727,7 @@ private struct UsageDetailsView: View {
 }
 
 private struct ModelPickerSheet: View {
+    @State private var manualModel = ""
     @ObservedObject var model: ManagerModel
     @Environment(\.dismiss) private var dismiss
 
@@ -753,12 +754,24 @@ private struct ModelPickerSheet: View {
             .padding(18)
 
             if !model.modelLoadError.isEmpty {
-                Text(model.modelLoadError + (model.isUsingCachedModels ? "\n已保留上次模型选择，仍可尝试启动；实际连接情况由终端报告。" : "\n请刷新重试，或关闭后选择其他调用配置。"))
+                Text(model.modelLoadError + (model.isUsingCachedModels ? "\n已保留上次模型选择，仍可尝试启动；实际连接情况由终端报告。" : "\n可手动填写模型 ID；实际可用性由客户端请求确认。"))
                     .font(.system(size: 11)).foregroundStyle(.orange)
                     .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 18).padding(.bottom, 8)
             }
 
+            HStack {
+                TextField("手动填写模型 ID", text: $manualModel)
+                    .textFieldStyle(.roundedBorder)
+                Button("使用此 ID") {
+                    model.selectedModel = manualModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                    dismiss()
+                }
+                .disabled(manualModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || manualModel.count > 250 || manualModel.contains(where: { $0.isNewline || $0 == "\0" }))
+            }.padding(.horizontal, 18).padding(.bottom, 10)
+            Text("Claude 需要 Anthropic Messages，Codex 需要 OpenAI Responses；只支持 Chat Completions 的网关不能直接供 Codex 使用。")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+                .padding(.horizontal, 18).padding(.bottom, 10)
             TextField("搜索模型名称", text: $model.modelSearch)
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal, 18)
@@ -840,8 +853,8 @@ private struct GatewaySettingsSheet: View {
                     .help("关闭")
             }
             Text(model.selectedProfile == nil || model.selectedProfile?.id == "free"
-                 ? "设置新 Key 使用的默认服务根地址。无需使用 CCHP；Claude 需要 Anthropic Messages 兼容接口，Codex 需要 OpenAI Responses 兼容接口。远程地址必须使用 HTTPS。"
-                 : "修改当前 Key 对应的网关服务根地址。远程地址必须使用 HTTPS。其他 Key 配置和已运行的终端不会改变。")
+                 ? "设置新 Key 使用的默认 API 基础地址（支持自定义路径）。无需使用 CCHP；Claude 需要 Anthropic Messages 兼容接口，Codex 需要 OpenAI Responses 兼容接口。远程地址必须使用 HTTPS。"
+                 : "修改当前 Key 对应的网关 API 基础地址（支持自定义路径）。远程地址必须使用 HTTPS。其他 Key 配置和已运行的终端不会改变。")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -959,6 +972,7 @@ private struct AddProfileSheet: View {
     @State private var name = ""
     @State private var key = ""
     @State private var gateway = ""
+    @State private var readModels = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -991,7 +1005,7 @@ private struct AddProfileSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("网关地址")
+                Text("API 基础地址（可含路径）")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 TextField("http://127.0.0.1:8081", text: $gateway)
@@ -999,7 +1013,10 @@ private struct AddProfileSheet: View {
                     .font(.system(size: 12, design: .monospaced))
             }
 
-            Label("只查询当前网关的模型列表；不会发起推理。Key 以权限 600 保存于本机。",
+            Toggle("保存时读取模型列表", isOn: $readModels)
+            Text("支持 /proxy/v1 等 API 前缀；未提供模型列表的网关可手动填写模型 ID。Claude 需 Messages 接口，Codex 需 Responses 接口。")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            Label("读取列表不会发起推理；取消读取时不校验 Key。Key 以权限 600 保存于本机。",
                   systemImage: "lock.shield")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -1022,7 +1039,7 @@ private struct AddProfileSheet: View {
                 Spacer()
                 Button {
                     Task {
-                        if await model.addProfile(name: name, key: key, gateway: gateway) {
+                        if await model.addProfile(name: name, key: key, gateway: gateway, readModels: readModels) {
                             key = ""
                             dismiss()
                         }
@@ -1031,7 +1048,7 @@ private struct AddProfileSheet: View {
                     if model.isAddingProfile {
                         ProgressView().controlSize(.small)
                     } else {
-                        Text("验证并保存")
+                        Text("保存配置")
                     }
                 }
                 .buttonStyle(.borderedProminent)

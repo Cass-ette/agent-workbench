@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+from urllib.parse import urlsplit
 from typing import Iterable
 from uuid import UUID, uuid4
 
@@ -15,6 +16,11 @@ try:
     import tomllib
 except ModuleNotFoundError:
     tomllib = None
+
+def gateway_from_api_base(base):
+    base = base.rstrip("/")
+    return base[:-3] if urlsplit(base).path == "/v1" else base
+
 
 MAX_SESSION_FILE_BYTES = 64 * 1024 * 1024
 MAX_SESSION_ROWS = 2000
@@ -127,7 +133,7 @@ def _read_codex(path: Path, home: Path, profile_id: str, profile_name: str) -> d
             provider_config = providers.get(provider, {}) if isinstance(providers, dict) else {}
             base_url = provider_config.get("base_url", "") if isinstance(provider_config, dict) else ""
             if isinstance(base_url, str):
-                gateway = base_url.removesuffix("/v1").rstrip("/")
+                gateway = gateway_from_api_base(base_url)
         except (OSError, ValueError, TypeError):
             pass
     if (not _valid_id(session_id) or _is_imported(manifest, session_id)

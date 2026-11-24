@@ -479,6 +479,27 @@ final class ManagerModel: ObservableObject {
     @Published var historySessions: [LocalHistoryEntry] = []
     @Published var selectedHistory: LocalHistoryEntry?
     @Published var archivingHistoryRef = ""
+    @Published private var reasoningPreferences: [String: String] = [:]
+    private var reasoningDefaults = UserDefaults.standard
+    var selectedReasoningEffort: String {
+        get { reasoningEffort(client: activeClient, profile: selectedProfileID, model: selectedModel) }
+        set {
+            guard ReasoningEffort.levels.contains(newValue) else { return }
+            reasoningPreferences[ReasoningEffort.key(client: activeClient, profile: selectedProfileID, model: selectedModel)] = newValue
+            reasoningDefaults.set(reasoningPreferences, forKey: "reasoning.preferences")
+        }
+    }
+    private func reasoningEffort(client: ClientKind, profile: String, model: String) -> String {
+        let value = reasoningPreferences[ReasoningEffort.key(client: client, profile: profile, model: model)] ?? "default"
+        return ReasoningEffort.levels.contains(value) ? value : "default"
+    }
+    func insertReasoningCommand(sessionID: UUID, level: String) {
+        guard selectedTerminalID == sessionID, let session = selectedTerminal, session.isRunning,
+              let command = ReasoningEffort.command(client: session.client, level: level),
+              session.control.insertNativeCommand(command) else { setError("请选择仍在运行的目标终端。"); return }
+        statusMessage = "已填入 \(command)；请确认输入框内容后按回车，生效情况由 CLI 确认。"
+        isStatusError = false
+    }
     @Published var historyError = ""
     @Published var historyScope: String = "workspace"
     @Published var addProfileError = ""
@@ -574,7 +595,7 @@ final class ManagerModel: ObservableObject {
         if op == "ping" { return ["schema": 1] }
         guard let backend else { throw RemoteWorkbenchError.invalid("电脑工作台正在读取配置") }
         if op == "state" {
-            return ["schema": 1, "platform": "macos", "capabilities": ["sessions", "launch", "system-cli", "history", "history-archive", "models", "attachments"],
+            return ["schema": 1, "platform": "macos", "capabilities": ["sessions", "launch", "system-cli", "history", "history-archive", "reasoning-effort", "models", "attachments"],
                     "profiles": profiles.map { ["id": $0.id, "name": $0.name, "gateway": $0.gateway ?? defaultGateway, "model_catalog_url": $0.model_catalog_url ?? ""] },
                     "workspace": workspace, "workspaces": workspaces, "client": activeClient.rawValue,
                     "profile_id": selectedProfileID, "model": selectedModel,
@@ -599,6 +620,10 @@ final class ManagerModel: ObservableObject {
             return ["archived": archived]
         }
         if op == "launch" {
+            let requestedEffort = request["reasoning_effort"] as? String
+            if request["reasoning_effort"] != nil && (requestedEffort == nil || !ReasoningEffort.levels.contains(requestedEffort!)) {
+                throw RemoteWorkbenchError.invalid("思考强度无效")
+            }
             guard !installingApplicationUpdate, let client = ClientKind(rawValue: text("client")) else { throw RemoteWorkbenchError.invalid("电脑正在更新或客户端无效") }
             let directory = text("workspace")
             var isDirectory: ObjCBool = false
@@ -617,16 +642,16 @@ final class ManagerModel: ObservableObject {
                     if !running.contains(where: { $0.sourceHistoryRef == entry.history_ref }), running.contains(where: { $0.sourceHistoryRef == nil }) {
                         throw RemoteWorkbenchError.invalid("此项目有正在运行的会话，请从电脑运行列表接续；要恢复其他历史，请先确认原会话已结束")
                     }
-                    restoreOriginal(entry)
+                    restoreOriginal(entry, reasoningEffort: requestedEffort)
                 }
                 else if action == "fork" {
                     guard ensureAgentPermissions(), let profile = profiles.first(where: { $0.id == text("profile_id") }), !text("model").isEmpty else { throw RemoteWorkbenchError.invalid("请先在电脑确认权限并选择调用配置、模型") }
-                    launchWorkbench(client: client, profile: profile, model: text("model"), directory: directory, targetGateway: profile.gateway ?? defaultGateway, mode: .resume, history: entry)
+                    launchWorkbench(client: client, profile: profile, model: text("model"), directory: directory, targetGateway: profile.gateway ?? defaultGateway, mode: .resume, history: entry, effort: requestedEffort)
                 } else { throw RemoteWorkbenchError.invalid("历史操作无效") }
             } else if text("scope") == "system" { launchGlobal(client: client, directory: directory) }
             else {
                 guard ensureAgentPermissions(), let profile = profiles.first(where: { $0.id == text("profile_id") }), !text("model").isEmpty else { throw RemoteWorkbenchError.invalid("请先在电脑确认权限并选择调用配置、模型") }
-                launchWorkbench(client: client, profile: profile, model: text("model"), directory: directory, targetGateway: profile.gateway ?? defaultGateway, mode: .new, history: nil)
+                launchWorkbench(client: client, profile: profile, model: text("model"), directory: directory, targetGateway: profile.gateway ?? defaultGateway, mode: .new, history: nil, effort: requestedEffort)
             }
             guard !isStatusError, let session = terminalSessions.first(where: { !previous.contains($0.id) }) ?? selectedTerminal else { throw RemoteWorkbenchError.invalid(statusMessage) }
             return remoteSessionRow(session)
@@ -680,6 +705,8 @@ final class ManagerModel: ObservableObject {
     init(modelDefaults: UserDefaults = .standard,
          modelLoader: (@Sendable (String) async throws -> ModelResponse)? = nil) {
         modelCatalog = ModelCatalogCache(defaults: modelDefaults)
+        reasoningDefaults = modelDefaults
+        reasoningPreferences = modelDefaults.dictionary(forKey: "reasoning.preferences") as? [String: String] ?? [:]
         self.modelLoader = modelLoader
         activeClient = ClientKind(rawValue: UserDefaults.standard.string(forKey: "client.kind") ?? "") ?? .claude
         launchScope = LaunchScope(rawValue: UserDefaults.standard.string(forKey: "launch.scope") ?? "") ?? .workbench
@@ -1304,7 +1331,7 @@ final class ManagerModel: ObservableObject {
         isHistoryPresented = false
     }
 
-    private func restoreOriginal(_ entry: LocalHistoryEntry) {
+    private func restoreOriginal(_ entry: LocalHistoryEntry, reasoningEffort: String? = nil) {
         guard !installingApplicationUpdate else { return }
         var isDirectory: ObjCBool = false
         guard !entry.workspace.isEmpty, FileManager.default.fileExists(atPath: entry.workspace, isDirectory: &isDirectory),
@@ -1328,7 +1355,7 @@ final class ManagerModel: ObservableObject {
         }
         launchWorkbench(client: entry.clientKind, profile: originalProfile,
                         model: entry.configured_model ?? entry.model, directory: entry.workspace,
-                        targetGateway: entry.gateway, mode: .resume, history: entry, original: true)
+                        targetGateway: entry.gateway, mode: .resume, history: entry, original: true, effort: reasoningEffort)
     }
 
     func launchConfirmed() {
@@ -1347,7 +1374,7 @@ final class ManagerModel: ObservableObject {
 
     private func launchWorkbench(client: ClientKind, profile: KeyProfile, model: String, directory: String,
                                  targetGateway: String, mode: SessionMode, history: LocalHistoryEntry?,
-                                 original: Bool = false) {
+                                 original: Bool = false, effort: String? = nil) {
         guard let backend, let agentPermissions else { return }
         let action: String
         if original { action = "history-resume-original" }
@@ -1359,6 +1386,8 @@ final class ManagerModel: ObservableObject {
         let permissions = agentPermissions.mode(for: client)
         var backendArguments = [backend.scriptURL.path, action, "--workspace", directory,
                                 "--permission-mode", permissions.rawValue]
+        let requestedEffort = effort ?? reasoningEffort(client: client, profile: profile.id, model: model)
+        if requestedEffort != "default" { backendArguments += ["--reasoning-effort", requestedEffort] }
         if !original {
             backendArguments += ["--profile-id", profile.id, "--model", model,
                                  "--session-mode", mode.rawValue, "--gateway-url", targetGateway]

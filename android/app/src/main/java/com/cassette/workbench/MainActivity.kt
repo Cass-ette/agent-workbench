@@ -240,6 +240,8 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                 }
                 OutlinedTextField(value = model.options.workspace, onValueChange = { model.updateOptions(model.options.copy(workspace = it)) }, label = { Text("手机项目目录") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) model.terminalFocusChanged("", true) })
+                ReasoningEffortSlider(model.startupReasoningEffort, model::setStartupReasoningEffort, "启动默认思考强度")
+                Text("按客户端、调用配置和模型分别保存；当前会话使用终端旁的入口调整。", style = MaterialTheme.typography.labelSmall)
                 if (model.options.client == "codex" && model.runtimeEnvironment == "debian") Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = model.options.codexCompatibility, onCheckedChange = { enabled ->
                         if (enabled) confirmCompatibility = true else model.updateOptions(model.options.copy(codexCompatibility = false))
@@ -795,6 +797,8 @@ private fun usageNumber(value: Long?): String = value?.toString() ?: "未提供"
 private fun usageCompact(value: UsageSummary): String = if (value.inputTokens == null && value.outputTokens == null) "Token 未提供" else "Token ${usageNumber(value.inputTokens)} / ${usageNumber(value.outputTokens)}"
 
 @Composable private fun TerminalPanel(model: WorkbenchModel, session: TerminalSession, modifier: Modifier = Modifier, showTitle: Boolean = false) {
+    var reasoningOpen by remember(session.id) { mutableStateOf(false) }
+    var effort by remember(session.id) { mutableStateOf("high") }
     var closing by remember { mutableStateOf(false) }
     var terminating by remember { mutableStateOf(false) }
     var attachmentTarget by remember { mutableStateOf("") }
@@ -809,6 +813,16 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
     var pasteRequest by remember { mutableIntStateOf(0) }
     var copyText by remember { mutableStateOf<String?>(null) }
     val clipboard = LocalClipboardManager.current
+    if(reasoningOpen) AlertDialog(onDismissRequest = { reasoningOpen = false }, title = { Text("当前会话思考强度") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            ReasoningEffortSlider(effort, { effort = it }, "选择思考强度")
+            Text("明确档位只调整强度，保留模型；客户端默认会打开原生设置。填入后请在 CLI 输入框确认并按回车；由客户端确认生效。", style = MaterialTheme.typography.bodySmall)
+            Text(ReasoningEffort.command(session.client, effort).orEmpty(), style = MaterialTheme.typography.labelMedium)
+            if(session.client == "codex") Text("Codex 原生目录未收录的第三方模型可能拒绝 /model。若提示 Model unavailable，请设置启动默认强度，再自行结束并按原配置恢复对话；无需创建分支。", style = MaterialTheme.typography.bodySmall)
+            if(session.client == "claude") Text("Claude 可能把 /effort 选择保存为其默认值；系统 CLI 会话也遵循客户端自身规则。", style = MaterialTheme.typography.bodySmall)
+        }
+    }, confirmButton = { TextButton(onClick = { if(model.insertReasoningCommand(session.id, effort)) { reasoningOpen = false; keyboardRequest++ } }) { Text("填入当前终端") } },
+        dismissButton = { TextButton(onClick = { reasoningOpen = false }) { Text("取消") } })
     Column(modifier.fillMaxSize()) {
         if (session.remoteTarget.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(session.input.control.label, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
@@ -827,6 +841,7 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
             }
         }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            if(session.client in listOf("codex", "claude")) TextButton(onClick = { model.selectedSession = session.id; reasoningOpen = true }, enabled = session.canWrite && session.exitCode == null) { Text("思考强度", fontSize = 11.sp) }
             TextButton(onClick = { copyRequest++ }, contentPadding = PaddingValues(horizontal = 7.dp)) { Text("复制文本", fontSize = 11.sp) }
             TextButton(onClick = { pasteRequest++ }, enabled = session.canWrite, contentPadding = PaddingValues(horizontal = 7.dp)) { Text("粘贴", fontSize = 11.sp) }
             listOf("回车" to "\r", "↑" to "\u001b[A", "↓" to "\u001b[B", "←" to "\u001b[D", "→" to "\u001b[C", "Esc" to "\u001b", "Tab" to "\t", "Ctrl+C" to "\u0003").forEach { (title, value) ->

@@ -233,6 +233,14 @@ button { color: inherit; }
 .history-list button:hover { background: #eaf0f4; }
 .history-list :is(strong, small) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-list small { color: #545e68; }
+.startup-reasoning { margin: 10px 0; max-width: 460px; }
+.reasoning-control { display: grid; gap: 8px; }
+.reasoning-control > label { display: flex; justify-content: space-between; gap: 16px; font-size: 12px; }
+.reasoning-control input[type="range"] { width: 100%; accent-color: #287498; }
+.reasoning-control small, .startup-reasoning > small { color: #5a6671; font-size: 11px; }
+.reasoning-ticks { display: flex; justify-content: space-between; gap: 4px; }
+.reasoning-ticks button { flex: 1; border: 0; border-radius: 4px; padding: 4px; background: transparent; font-size: 11px; cursor: pointer; }
+.reasoning-ticks button[aria-pressed="true"] { background: #dfedf3; color: #1b5e7c; }
 .history-row { display: flex; align-items: center; gap: 8px; }
 .history-row > button:first-child { flex: 1; min-width: 0; }
 .history-list .history-archive-button { display: block; width: auto; flex-shrink: 0; white-space: nowrap; }

@@ -27,7 +27,7 @@ MAX_OUTPUT = 1024 * 1024
 MAX_REQUEST = 64 * 1024
 NETWORK_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
                "NO_PROXY", "no_proxy")
-SENSITIVE_ENV = ("WORKBENCH_GATEWAY_KEY", "CCH_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+SENSITIVE_ENV = ("MAX_THINKING_TOKENS", "CLAUDE_CODE_EFFORT_LEVEL", "WORKBENCH_GATEWAY_KEY", "CCH_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
                  "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
                  "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
                  "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
@@ -174,6 +174,8 @@ def local_network_bypass(environment):
 
 
 def launch_spec(payload, home=None, bundle=None):
+    import agent_reasoning
+    effort = agent_reasoning.normalize(payload.get("reasoning_effort"))
     home = Path(home or Path.home())
     client = payload.get("client", "shell")
     if client not in ("shell", "debian-shell", "vm-shell", "claude", "codex", "ssh"):
@@ -291,6 +293,7 @@ def launch_spec(payload, home=None, bundle=None):
             "model": model, "gateway": gateway, "key": key,
             "workspace": str(workspace.resolve()), "codex_compatibility": payload.get("codex_compatibility") is True,
             "permission_mode": payload.get("permission_mode", "standard"),
+            "reasoning_effort": effort,
         }, ensure_ascii=False))
         vm_script = shlex.join([sys.executable, str(Path(__file__).with_name("linux_vm.py")), "agent", str(launch_file)])
         vm_script += "; result=$?; rm -f -- " + shlex.quote(str(launch_file))
@@ -332,7 +335,8 @@ def launch_spec(payload, home=None, bundle=None):
     env.update(NO_PROXY=bypass, no_proxy=bypass)
     if client == "codex":
         if not same_config or not (config / "config.toml").is_file():
-            private_write(config / "config.toml", "model = " + json.dumps(model) + '\nmodel_provider = "workbench_gateway"\nsandbox_mode = "workspace-write"\n\n[model_providers.workbench_gateway]\nname = "Workbench gateway"\nwire_api = "responses"\nenv_key = "WORKBENCH_GATEWAY_KEY"\nbase_url = ' + json.dumps(gateway if uri.path else gateway + "/v1") + "\n")
+            previous = (config / "config.toml").read_text() if (config / "config.toml").is_file() else ""
+            private_write(config / "config.toml", "model = " + json.dumps(model) + '\nmodel_provider = "workbench_gateway"\n' + agent_reasoning.config_line(effort, previous) + 'sandbox_mode = "workspace-write"\n\n[model_providers.workbench_gateway]\nname = "Workbench gateway"\nwire_api = "responses"\nenv_key = "WORKBENCH_GATEWAY_KEY"\nbase_url = ' + json.dumps(gateway if uri.path else gateway + "/v1") + "\n")
         env["WORKBENCH_GATEWAY_KEY"] = key
         env["CODEX_HOME"] = str(config)
         args = command
@@ -346,7 +350,7 @@ def launch_spec(payload, home=None, bundle=None):
         elif mode != "new":
             args += ["resume"] + (["--last"] if mode == "continue" else [])
         args += ["--model", model, "--cd", str(workspace), "--no-alt-screen"]
-        args += agent_permission_args("codex", permission_mode)
+        args += agent_permission_args("codex", permission_mode) + agent_reasoning.arguments("codex", effort)
     else:
         if not (config / "settings.json").exists():
             private_write(config / "settings.json", "{}\n")
@@ -363,7 +367,8 @@ def launch_spec(payload, home=None, bundle=None):
         args = command + ["--bare", "--add-dir", str(workspace), "--model", model,
                           "--settings", str(config / "settings.json"),
                           "--append-system-prompt", "全程使用简体中文。",
-                          *agent_permission_args("claude", payload.get("permission_mode", "standard"))]
+                          *agent_permission_args("claude", payload.get("permission_mode", "standard")),
+                          *agent_reasoning.arguments("claude", effort)]
         if mode == "continue": args += ["--continue"]
         if mode == "resume":
             args += ["--resume"]

@@ -65,6 +65,7 @@ AGENT_RUNNER = r'''from urllib.parse import urlsplit
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -94,7 +95,7 @@ env = {key: value for key, value in os.environ.items()
                       "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
                       "CODEX_HOME", "CLAUDE_CONFIG_DIR", "ANTHROPIC_MODEL",
                       "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-                      "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL")}
+                      "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "MAX_THINKING_TOKENS", "CLAUDE_CODE_EFFORT_LEVEL")}
 env.update(TERM="xterm-256color", COLORTERM="truecolor")
 env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
 os.chdir(workspace)
@@ -103,12 +104,25 @@ model = data["model"]
 gateway = data["gateway"].rstrip("/")
 key = data["key"]
 mode = data.get("mode", "new")
+effort = data.get("reasoning_effort") or ""
+if effort not in ("", "default", "low", "medium", "high", "xhigh", "max"):
+    raise SystemExit("思考强度无效")
+if effort == "default": effort = ""
 if client == "codex":
     config = home / ".local/share/agent-workbench/codex" / scope
     config.mkdir(parents=True, exist_ok=True, mode=0o700)
     config.chmod(0o700)
+    previous = (config / "config.toml").read_text() if (config / "config.toml").exists() else ""
+    saved = re.search(r'(?m)^model_reasoning_effort\s*=\s*("[^"\n]*")\s*$', previous)
+    chosen = effort
+    if not chosen and saved:
+        try:
+            candidate = json.loads(saved[1])
+            if isinstance(candidate, str) and candidate and len(candidate) <= 80 and not any(ord(char) < 32 for char in candidate): chosen = candidate
+        except ValueError: chosen = ""
     (config / "config.toml").write_text(
         "model = " + json.dumps(model) + '\nmodel_provider = "workbench_gateway"\n'
+        + ("model_reasoning_effort = " + json.dumps(chosen) + "\n" if chosen else "") +
         'sandbox_mode = "workspace-write"\n\n[model_providers.workbench_gateway]\n'
         'name = "Workbench gateway"\nwire_api = "responses"\n'
         'env_key = "WORKBENCH_GATEWAY_KEY"\nbase_url = '
@@ -131,6 +145,7 @@ if client == "codex":
     else:
         args += ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]
     args += ["--model", model, "--cd", str(workspace), "--no-alt-screen"]
+    if effort: args += ["-c", "model_reasoning_effort=" + json.dumps(effort)]
 else:
     config = home / ".local/share/agent-workbench/claude" / scope
     config.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -152,6 +167,7 @@ else:
         raise SystemExit("VM 中未安装 Claude，请到运行环境安装 / 检查 Linux VM")
     args = [executable, "--bare", "--add-dir", str(workspace), "--model", model,
             "--settings", str(settings), "--append-system-prompt", "全程使用简体中文。"]
+    if effort: args += ["--effort", effort]
     if data.get("permission_mode") == "dangerous":
         args += ["--dangerously-skip-permissions"]
     else:
@@ -551,6 +567,8 @@ class LinuxVM:
         key = str(payload.get("key") or "")
         gateway = str(payload.get("gateway") or "").rstrip("/")
         mode = payload.get("mode", "new")
+        import agent_reasoning
+        effort = agent_reasoning.normalize(payload.get("reasoning_effort"))
         if payload.get("permission_mode", "standard") not in {"restricted", "standard", "full", "dangerous"}:
             raise ValueError("权限模式无效，请重新设置")
         if not model or not key or mode not in ("new", "continue", "resume"):
@@ -560,7 +578,7 @@ class LinuxVM:
         data = {"client": client, "model": model, "key": key, "gateway": gateway,
                 "workspace": str(guest_workspace), "scope": scope, "mode": mode,
                 "codex_compatibility": payload.get("codex_compatibility") is True,
-                "permission_mode": payload.get("permission_mode", "standard")}
+                "permission_mode": payload.get("permission_mode", "standard"), "reasoning_effort": effort}
         self.start()
         self.wait_ready()
         # Update only the guest launcher and bridge for new sessions; do not

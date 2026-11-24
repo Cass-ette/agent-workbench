@@ -139,6 +139,7 @@ class VMTests(unittest.TestCase):
                 payload_file.write_text(json.dumps({
                     "client": client, "mode": "new", "scope": "a" * 24,
                     "workspace": str(workspace), "model": "test-model",
+                    "reasoning_effort": "high",
                     "gateway": "https://gateway.test/tenant/v1", "key": "private-test-key",
                 }))
                 script = V.AGENT_RUNNER.replace('Path("/projects")', "Path(" + repr(str(projects)) + ")")
@@ -171,11 +172,13 @@ class VMTests(unittest.TestCase):
                 codex = run("codex")
                 self.assertIn("danger-full-access", codex["args"])
                 self.assertIn("on-request", codex["args"])
+                self.assertIn('model_reasoning_effort="high"', codex["args"])
                 self.assertNotIn("private-test-key", (Path(codex["env"]["CODEX_HOME"]) / "config.toml").read_text())
                 self.assertIn('base_url = "https://gateway.test/tenant/v1"', (Path(codex["env"]["CODEX_HOME"]) / "config.toml").read_text())
                 claude = run("claude")
                 self.assertEqual(claude["env"]["ANTHROPIC_BASE_URL"], "https://gateway.test/tenant")
                 self.assertIn("default", claude["args"])
+                self.assertEqual(claude["args"][claude["args"].index("--effort") + 1], "high")
                 settings = Path(claude["env"]["CLAUDE_CONFIG_DIR"]) / "settings.json"
                 self.assertEqual(json.loads(settings.read_text()), {})
                 self.assertEqual(settings.read_text(), "{}\n")

@@ -5,6 +5,7 @@ plugins {
 
 val historyAssetsDirectory = layout.buildDirectory.dir("generated/historyAssets")
 val historyAssets = tasks.register<Sync>("prepareHistoryAssets") {
+    from(rootProject.file("../backend/agent_reasoning.py"))
     from(rootProject.file("../backend/session_history.py"), rootProject.file("../backend/tool_bridge.py"), rootProject.file("../backend/usage_records.py"), rootProject.file("../backend/model_pricing.py"), rootProject.file("../backend/gateway_billing.py"), rootProject.file("../backend/pricing_reference.json"))
     into(historyAssetsDirectory)
 }

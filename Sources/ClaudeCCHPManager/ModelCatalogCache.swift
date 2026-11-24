@@ -19,18 +19,19 @@ final class ModelCatalogCache {
         } ?? [:]
     }
 
-    private func key(_ profile: String, _ gateway: String) -> String {
+    private func key(_ profile: String, _ gateway: String, _ catalogURL: String) -> String {
         profile + "|" + gateway.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            + (catalogURL.isEmpty ? "" : "|catalog:" + catalogURL)
     }
 
-    func entry(profile: String, gateway: String) -> Entry {
-        entries[key(profile, gateway)] ?? Entry()
+    func entry(profile: String, gateway: String, catalogURL: String = "") -> Entry {
+        entries[key(profile, gateway, catalogURL)] ?? Entry()
     }
 
-    func remember(profile: String, gateway: String, selected: String, models: [String]? = nil) {
+    func remember(profile: String, gateway: String, catalogURL: String = "", selected: String, models: [String]? = nil) {
         guard !profile.isEmpty else { return }
-        let scope = key(profile, gateway)
+        let scope = key(profile, gateway, catalogURL)
         var entry = entries[scope] ?? Entry()
         if let models { entry.models = models }
         entry.selected = selected

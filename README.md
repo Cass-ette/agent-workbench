@@ -22,6 +22,10 @@ Android 可通过 SSH 接续新版 Mac / Windows 工作台内的同一终端，�
 
 **不用 CCHP 也能用。** 可以直连兼容的模型 API 或第三方网关，填写该服务的地址和它签发的调用 Key。支持自定义 API 前缀（例如 `/proxy/v1`、`/api/paas/v4`），不会重复拼接 `/v1`。裸域名仍默认使用 `/v1`；仅根路径 `/v1` 维持旧版的地址规范化，避免改变历史配置身份。模型列表可选：依次尝试 API 前缀下的 `/models`，未提供时再尝试 `/v1/models`；404/405/501 会提示手动填写 ID，401/403、网络和重定向错误仍显示。添加配置可取消读取列表，此时 Key 与模型尚未验证。启动不依赖模型目录或名单；实际鉴权、模型可用性和协议由 CLI 请求确认。Claude Code 需要 Anthropic Messages（`/v1/messages`），Codex 需要 OpenAI Responses（`/v1/responses`）。只提供 Chat Completions 的接口不能直接驱动这两个客户端。CCHP 专属的余额和账单功能需要网关提供对应接口；不影响普通模型调用。
 
+**模型目录与调用地址可分开设置（三端）。** 默认勾选「模型目录与调用共用地址」，旧配置继续使用上述发现规则。服务商把目录和推理放在不同入口时，取消勾选并填写「模型目录完整 URL」（包含 `/models`，也支持服务商自己的目录路径）。这个地址只用于 GET 列表，使用同一把调用 Key；请填写可信服务商地址，远程需 HTTPS，重定向不会转发 Key。目录为空或不可用仍可手填模型 ID；目录列出了模型，也不表示该 Key 已有调用权限。
+
+例如智谱的 Codex 调用地址为 `https://open.bigmodel.cn/api/v1`，独立模型目录为 `https://open.bigmodel.cn/api/paas/v4/models`。macOS 在左下网关编辑中修改，Windows 在配置旁的「连接设置」、Android 在配置卡片的「连接设置」修改；新增配置也有同样选项。重新勾选共用即可清除独立目录。修改保留配置 ID、Key、收藏与历史，后续启动使用新的调用地址，已运行的终端继续使用原配置。模型目录不会写入 CLI 推理路由，也不改变会话隔离身份；macOS 模型缓存同时区分目录来源。
+
 - [Windows 中文快速上手与排错](windows/QUICKSTART.zh-CN.md)
 - [Windows 源码、开发与构建说明](windows/README.md)
 - 本项目采用 [MIT 许可证](LICENSE)，第三方组件保留各自许可证。

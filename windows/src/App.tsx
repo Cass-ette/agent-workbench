@@ -45,6 +45,7 @@ interface KeyProfile {
   id: string;
   name: string;
   gateway: string;
+  model_catalog_url?: string;
 }
 
 interface AppConfig {
@@ -151,6 +152,7 @@ function App() {
   const closing = useRef(new Map<string, Promise<boolean>>());
   const [closingIds, setClosingIds] = useState<string[]>([]);
   const [showProfileDialog, setShowProfileDialog] = useState(false);
+  const [editingConnection, setEditingConnection] = useState<KeyProfile | null>(null);
   const [terminalFullscreen, setTerminalFullscreen] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -364,7 +366,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [launchScope, loaded, selectedProfile?.id, modelReload]);
+  }, [launchScope, loaded, selectedProfile?.id, selectedProfile?.gateway, selectedProfile?.model_catalog_url, modelReload]);
 
   const registerTerminal = useCallback((id: string, terminal: Terminal) => {
     terminalRefs.current.set(id, terminal);
@@ -658,6 +660,7 @@ function App() {
                   </span>
                   {profile.id === config.selected_profile_id && <Check size={14} className="profile-check" />}
                 </button>
+                <button className="icon-button" title={`连接设置 ${profile.name}`} onClick={() => setEditingConnection(profile)}><Settings2 size={13} /></button>
                 <button className="profile-remove" title={`删除 ${profile.name}`} onClick={() => removeProfile(profile)}>
                   <Trash2 size={13} />
                 </button>
@@ -942,12 +945,27 @@ function App() {
         </div>
       )}
       {showSSHConnection && <SSHConnection close={() => setShowSSHConnection(false)} />}
+      {editingConnection && <ProfileDialog initial={editingConnection}
+        onClose={() => setEditingConnection(null)} onError={setError}
+        onSave={async (_name, gateway, _key, read_models, model_catalog_url) => {
+          const response = await invoke<AddProfileResponse>("update_profile_connection", { request: {
+            profile_id: editingConnection.id, gateway, model_catalog_url, read_models,
+          } });
+          const selected = config.selected_profile_id === response.profile.id;
+          if (selected) {
+            addedCatalog.current = { id: response.profile.id, reload: modelReload, catalog: response };
+            setModels(response.models); setCatalogNotice(response.catalog_notice ?? ""); setModelLoadError("");
+          }
+          setConfig((current) => ({ ...current, profiles: current.profiles.map((p) => p.id === response.profile.id ? response.profile : p) }));
+          setEditingConnection(null);
+          setNotice("连接设置已保存；后续启动使用新调用地址，已运行终端保留原配置。" + (response.catalog_notice || ""));
+        }} />}
       {showProfileDialog && (
         <ProfileDialog
           onClose={() => setShowProfileDialog(false)}
-          onSave={async (name, gateway, key, read_models) => {
+          onSave={async (name, gateway, key, read_models, model_catalog_url) => {
             setError("");
-            const response = await invoke<AddProfileResponse>("add_profile", { request: { name, gateway, key, read_models } });
+            const response = await invoke<AddProfileResponse>("add_profile", { request: { name, gateway, key, read_models, model_catalog_url } });
             addedCatalog.current = { id: response.profile.id, reload: modelReload, catalog: response };
             setConfig((current) => ({
               ...current,
@@ -1126,16 +1144,20 @@ function isNativeTauri(): boolean {
 }
 
 function ProfileDialog({
+  initial,
   onClose,
   onSave,
   onError,
 }: {
+  initial?: KeyProfile;
   onClose: () => void;
-  onSave: (name: string, gateway: string, key: string, readModels: boolean) => Promise<void>;
+  onSave: (name: string, gateway: string, key: string, readModels: boolean, modelCatalogURL: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
-  const [name, setName] = useState("");
-  const [gateway, setGateway] = useState("http://127.0.0.1:8081");
+  const [name, setName] = useState(initial?.name ?? "");
+  const [gateway, setGateway] = useState(initial?.gateway ?? "http://127.0.0.1:8081");
+  const [sharedCatalog, setSharedCatalog] = useState(!initial?.model_catalog_url);
+  const [catalogURL, setCatalogURL] = useState(initial?.model_catalog_url ?? "");
   const [key, setKey] = useState("");
   const [readModels, setReadModels] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -1146,7 +1168,7 @@ function ProfileDialog({
     setBusy(true);
     setDialogError("");
     try {
-      await onSave(name.trim(), gateway.trim(), key.trim(), readModels);
+      await onSave(name.trim(), gateway.trim(), key.trim(), readModels, sharedCatalog ? "" : catalogURL.trim());
     } catch (cause) {
       const message = errorMessage(cause);
       setDialogError(message);
@@ -1158,20 +1180,22 @@ function ProfileDialog({
 
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
-      <form className="profile-dialog" onSubmit={submit}>
+      <form className="profile-dialog" role="dialog" aria-label={initial ? "连接设置" : "添加调用配置"} onSubmit={submit}>
         <div className="dialog-header">
           <div className="dialog-icon"><KeyRound size={18} /></div>
-          <div><h2>添加调用配置</h2><p>使用兼容网关创建可复用的调用配置。</p></div>
+          <div><h2>{initial ? "连接设置" : "添加调用配置"}</h2><p>{initial ? initial.name + " · 保留已有 Key 和历史" : "使用兼容网关创建可复用的调用配置。"}</p></div>
           <button type="button" className="icon-button" title="关闭" onClick={onClose} disabled={busy}><X size={17} /></button>
         </div>
-        <label className="dialog-field">配置名称<input autoFocus value={name} onChange={(event) => setName(event.currentTarget.value)} placeholder="例如：AutoBits 免费" maxLength={80} required /></label>
-        <label className="dialog-field">API 基础地址（可含路径）<input value={gateway} onChange={(event) => setGateway(event.currentTarget.value)} placeholder="http://127.0.0.1:8081" required /></label>
-        <label className="dialog-field">下游调用 Key<input type="password" value={key} onChange={(event) => setKey(event.currentTarget.value)} autoComplete="new-password" placeholder="不会写入普通配置文件" required /></label>
+        {!initial && <label className="dialog-field">配置名称<input autoFocus value={name} onChange={(event) => setName(event.currentTarget.value)} placeholder="例如：AutoBits 免费" maxLength={80} required /></label>}
+        <label className="dialog-field">调用 API 基础地址（可含路径）<input value={gateway} onChange={(event) => setGateway(event.currentTarget.value)} placeholder="http://127.0.0.1:8081" required /></label>
+        <label><input type="checkbox" checked={sharedCatalog} onChange={(event) => setSharedCatalog(event.currentTarget.checked)} />模型目录与调用共用地址</label>
+        {!sharedCatalog && <><label className="dialog-field">模型目录完整 URL<input value={catalogURL} onChange={(event) => setCatalogURL(event.currentTarget.value)} placeholder="https://服务商/api/paas/v4/models" required /></label><p>只向此地址读取模型列表，使用同一把调用 Key；请填写服务商可信地址。推理仍使用上方调用地址。</p></>}
+        {!initial && <label className="dialog-field">下游调用 Key<input type="password" value={key} onChange={(event) => setKey(event.currentTarget.value)} autoComplete="new-password" placeholder="不会写入普通配置文件" required /></label>}
         <label><input type="checkbox" checked={readModels} onChange={(event) => setReadModels(event.currentTarget.checked)} />保存时读取模型列表</label>
         <p>支持 /proxy/v1 等 API 前缀；未提供模型列表时可手动填写模型 ID。取消读取时不校验 Key。</p>
         {dialogError && <div className="dialog-error" role="alert">{dialogError}</div>}
         <div className="dialog-security"><KeyRound size={14} />Key 将保存到 Windows 凭据管理器。可选读取模型列表，不发起推理。</div>
-        <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="primary-button" disabled={busy || !name.trim() || !key.trim()}>{busy ? "保存中…" : "保存配置"}</button></div>
+        <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="primary-button" disabled={busy || !name.trim() || (!initial && !key.trim()) || (!sharedCatalog && !catalogURL.trim())}>{busy ? "保存中…" : "保存配置"}</button></div>
       </form>
     </div>
   );

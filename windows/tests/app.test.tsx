@@ -356,7 +356,7 @@ describe("工作会话配置", () => {
     await openApp();
     fireEvent.click(screen.getByTitle("添加调用配置"));
     fireEvent.change(screen.getByLabelText("配置名称"), { target: { value: "Manual gateway" } });
-    fireEvent.change(screen.getByLabelText("API 基础地址（可含路径）"), { target: { value: "https://gateway.test/custom/v1" } });
+    fireEvent.change(screen.getByLabelText("调用 API 基础地址（可含路径）"), { target: { value: "https://gateway.test/custom/v1" } });
     fireEvent.change(screen.getByLabelText("下游调用 Key"), { target: { value: "local-key" } });
     fireEvent.click(screen.getByLabelText("保存时读取模型列表"));
     const normal = invoke.getMockImplementation()!;
@@ -367,10 +367,36 @@ describe("工作会话配置", () => {
     const requests = invoke.mock.calls.filter(([command]) => command === "models_for_profile").length;
     fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
     await screen.findAllByText("已跳过模型列表读取");
-    expect(invoke).toHaveBeenCalledWith("add_profile", { request: { name: "Manual gateway", gateway: "https://gateway.test/custom/v1", key: "local-key", read_models: false } });
+    expect(invoke).toHaveBeenCalledWith("add_profile", { request: { name: "Manual gateway", gateway: "https://gateway.test/custom/v1", key: "local-key", read_models: false, model_catalog_url: "" } });
     expect(invoke.mock.calls.filter(([command]) => command === "models_for_profile")).toHaveLength(requests);
     fireEvent.change(screen.getByLabelText("模型 ID（可手动填写）"), { target: { value: "manual-model" } });
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "新建会话" }).disabled).toBe(false);
+  });
+
+  it("连接设置可单独保存目录地址，保留 Key、手选模型并重新打开设置", async () => {
+    await openApp();
+    const normal = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: { request?: { gateway: string; model_catalog_url: string } }) => {
+      if(command === "update_profile_connection") return { profile: { id: "fixture-profile", name: "测试配置", gateway: args.request!.gateway, model_catalog_url: args.request!.model_catalog_url }, models: ["catalog-model"], catalog_notice: "" };
+      return normal(command, args);
+    });
+    const requests = invoke.mock.calls.filter(([command]) => command === "models_for_profile").length;
+    fireEvent.click(screen.getByTitle("连接设置 测试配置"));
+    expect(screen.queryByLabelText("下游调用 Key")).toBeNull();
+    expect((screen.getByLabelText("模型目录与调用共用地址") as HTMLInputElement).checked).toBe(true);
+    fireEvent.change(screen.getByLabelText("调用 API 基础地址（可含路径）"), { target: { value: "https://gateway.test/api/v1" } });
+    fireEvent.click(screen.getByLabelText("模型目录与调用共用地址"));
+    fireEvent.change(screen.getByLabelText("模型目录完整 URL"), { target: { value: "https://gateway.test/api/paas/v4/models" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "连接设置" })).toBeNull());
+    expect(invoke).toHaveBeenCalledWith("update_profile_connection", { request: { profile_id: "fixture-profile", gateway: "https://gateway.test/api/v1", model_catalog_url: "https://gateway.test/api/paas/v4/models", read_models: true } });
+    expect(screen.getByLabelText<HTMLInputElement>("模型 ID（可手动填写）").value).toBe(models[0]);
+    expect(invoke.mock.calls.filter(([command]) => command === "models_for_profile")).toHaveLength(requests);
+    fireEvent.click(screen.getByTitle("连接设置 测试配置"));
+    expect(screen.getByLabelText<HTMLInputElement>("模型目录完整 URL").value).toBe("https://gateway.test/api/paas/v4/models");
+    fireEvent.click(screen.getByLabelText("模型目录与调用共用地址"));
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    await waitFor(() => expect(invoke).toHaveBeenLastCalledWith("update_profile_connection", { request: { profile_id: "fixture-profile", gateway: "https://gateway.test/api/v1", model_catalog_url: "", read_models: true } }));
   });
 
   it("兼容网关没有模型目录时可以手填，刷新不覆盖手填 ID", async () => {

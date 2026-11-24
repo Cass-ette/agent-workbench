@@ -801,9 +801,13 @@ private struct GatewaySettingsSheet: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            Text("调用 API 基础地址（可含路径）").font(.caption).foregroundStyle(.secondary)
             TextField("http://127.0.0.1:8081", text: $model.gatewayDraft)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12, design: .monospaced))
+            ModelCatalogAddressFields(shared: $model.sharedModelCatalogDraft, url: $model.modelCatalogURLDraft)
+            Toggle("保存时读取模型列表", isOn: $model.readModelsOnSave)
+            if !model.gatewaySettingsError.isEmpty { Text(model.gatewaySettingsError).font(.caption).foregroundStyle(.orange) }
             HStack {
                 Spacer()
                 Button("取消") { dismiss() }
@@ -815,7 +819,7 @@ private struct GatewaySettingsSheet: View {
                     else { Text(model.selectedProfile == nil || model.selectedProfile?.id == "free" ? "保存为默认网关" : "保存到当前 Key") }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.gatewayDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isSavingGateway)
+                .disabled(model.gatewayDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isSavingGateway || (!model.sharedModelCatalogDraft && model.modelCatalogURLDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
             }
         }
         .padding(22)
@@ -909,6 +913,24 @@ private struct TerminalAppearanceSheet: View {
     }
 }
 
+private struct ModelCatalogAddressFields: View {
+    @Binding var shared: Bool
+    @Binding var url: String
+
+    var body: some View {
+        Toggle("模型目录与调用共用地址", isOn: $shared)
+        if !shared {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("模型目录完整 URL").font(.caption).foregroundStyle(.secondary)
+                TextField("https://服务商/api/paas/v4/models", text: $url).textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                Text("只向此地址读取模型列表，使用同一把调用 Key；请填写服务商可信地址。推理仍使用调用地址。")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 private struct AddProfileSheet: View {
     @ObservedObject var model: ManagerModel
     @Environment(\.dismiss) private var dismiss
@@ -916,6 +938,8 @@ private struct AddProfileSheet: View {
     @State private var key = ""
     @State private var gateway = ""
     @State private var readModels = true
+    @State private var sharedCatalog = true
+    @State private var catalogURL = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -948,7 +972,7 @@ private struct AddProfileSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("API 基础地址（可含路径）")
+                Text("调用 API 基础地址（可含路径）")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 TextField("http://127.0.0.1:8081", text: $gateway)
@@ -956,6 +980,7 @@ private struct AddProfileSheet: View {
                     .font(.system(size: 12, design: .monospaced))
             }
 
+            ModelCatalogAddressFields(shared: $sharedCatalog, url: $catalogURL)
             Toggle("保存时读取模型列表", isOn: $readModels)
             Text("支持 /proxy/v1 等 API 前缀；未提供模型列表的网关可手动填写模型 ID。Claude 需 Messages 接口，Codex 需 Responses 接口。")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -982,7 +1007,7 @@ private struct AddProfileSheet: View {
                 Spacer()
                 Button {
                     Task {
-                        if await model.addProfile(name: name, key: key, gateway: gateway, readModels: readModels) {
+                        if await model.addProfile(name: name, key: key, gateway: gateway, readModels: readModels, modelCatalogURL: sharedCatalog ? "" : catalogURL) {
                             key = ""
                             dismiss()
                         }
@@ -995,7 +1020,7 @@ private struct AddProfileSheet: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || key.isEmpty || gateway.isEmpty || model.isAddingProfile)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || key.isEmpty || gateway.isEmpty || model.isAddingProfile || (!sharedCatalog && catalogURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
                 .keyboardShortcut(.defaultAction)
             }
         }

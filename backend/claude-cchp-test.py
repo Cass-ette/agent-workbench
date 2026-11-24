@@ -79,7 +79,22 @@ def gateway_claude_base(gateway):
     return gateway[:-3] if gateway.endswith("/v1") else gateway
 
 
-def gateway_model_urls(gateway):
+def normalize_model_catalog_url(value):
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise RuntimeError("模型目录地址必须是完整的 HTTP(S) URL。")
+    value = value.strip()
+    if not value:
+        return ""
+    normalize_gateway(value)  # Same credential, transport and redirect policy as the call address.
+    return value.rstrip("/")  # This is an exact endpoint, not an API prefix.
+
+
+def gateway_model_urls(gateway, model_catalog_url=""):
+    model_catalog_url = normalize_model_catalog_url(model_catalog_url)
+    if model_catalog_url:
+        return [model_catalog_url]
     gateway = gateway.rstrip("/")
     urls = [gateway_api_base(gateway) + "/models"]
     path = urlparse(gateway).path
@@ -92,11 +107,11 @@ class ModelCatalogUnavailable(RuntimeError):
     ...
 
 
-def model_catalog(key, gateway, read_models=True):
+def model_catalog(key, gateway, read_models=True, model_catalog_url=""):
     if not read_models:
         return {"models": [], "catalog_notice": "已跳过模型列表读取；Key 和模型尚未验证，请手动填写模型 ID。"}
     try:
-        models = fetch_models(key, gateway)
+        models = fetch_models(key, gateway, model_catalog_url=model_catalog_url) if model_catalog_url else fetch_models(key, gateway)
         return {"models": models, "catalog_notice": "" if models else "网关返回了空模型列表，请手动填写模型 ID；实际可用性由客户端请求确认。"}
     except ModelCatalogUnavailable:
         return {"models": [], "catalog_notice": "网关未提供模型列表接口；Key 尚未验证，请手动填写模型 ID。"}
@@ -121,10 +136,19 @@ def gateway_url():
     return GATEWAY
 
 
-def save_gateway(value):
+def default_model_catalog_url():
+    if GATEWAY_CONFIG.is_file():
+        data = json.loads(GATEWAY_CONFIG.read_text())
+        if isinstance(data, dict):
+            return normalize_model_catalog_url(data.get("model_catalog_url"))
+    return ""
+
+
+def save_gateway(value, model_catalog_url=None):
     value = normalize_gateway(value)
+    catalog_url = default_model_catalog_url() if model_catalog_url is None else normalize_model_catalog_url(model_catalog_url)
     prepare_isolated_config()
-    private_write(GATEWAY_CONFIG, json.dumps({"url": value}, ensure_ascii=False, indent=2) + "\n")
+    private_write(GATEWAY_CONFIG, json.dumps({"url": value, "model_catalog_url": catalog_url}, ensure_ascii=False, indent=2) + "\n")
     return value
 
 
@@ -193,7 +217,7 @@ def load_profiles():
     profiles = []
     if KEY_FILE.is_file():
         profiles.append({"id": "free", "name": "AutoBits 免费（默认）", "path": KEY_FILE,
-                         "gateway": gateway_url()})
+                         "gateway": gateway_url(), "model_catalog_url": default_model_catalog_url()})
     if PROFILE_INDEX.is_file():
         data = json.loads(PROFILE_INDEX.read_text())
         if not isinstance(data, dict):
@@ -204,18 +228,20 @@ def load_profiles():
                 continue
             if isinstance(value, str):
                 label, profile_gateway = value, gateway_url()
+                catalog_url = ""
             elif isinstance(value, dict) and isinstance(value.get("name"), str):
                 label = value["name"]
                 profile_gateway = value.get("gateway", gateway_url())
                 if not isinstance(profile_gateway, str):
                     profile_gateway = gateway_url()
+                catalog_url = normalize_model_catalog_url(value.get("model_catalog_url"))
             else:
                 continue
-            valid_profiles.append((profile_id, label, normalize_gateway(profile_gateway)))
-        for profile_id, label, profile_gateway in sorted(valid_profiles, key=lambda item: item[1]):
+            valid_profiles.append((profile_id, label, normalize_gateway(profile_gateway), catalog_url))
+        for profile_id, label, profile_gateway, catalog_url in sorted(valid_profiles, key=lambda item: item[1]):
             path = KEY_DIR / (profile_id + ".key")
             if path.is_file():
-                profiles.append({"id": profile_id, "name": label, "path": path, "gateway": profile_gateway})
+                profiles.append({"id": profile_id, "name": label, "path": path, "gateway": profile_gateway, "model_catalog_url": catalog_url})
     return profiles
 
 
@@ -231,7 +257,7 @@ def read_profile_key(profile):
     return value
 
 
-def save_profile_key(label, key, gateway=None, read_models=True):
+def save_profile_key(label, key, gateway=None, read_models=True, model_catalog_url=""):
     label = label.strip()
     if not label or len(label) > 80:
         raise RuntimeError("名称不能为空，且最多 80 个字符。")
@@ -242,7 +268,8 @@ def save_profile_key(label, key, gateway=None, read_models=True):
     if not key or len(key) > 4096 or any(c.isspace() for c in key) or key[:1] in {"'", '"'}:
         raise RuntimeError("格式不正确；请粘贴完整 Key，不带引号、空格或换行。")
     gateway = normalize_gateway(gateway) if gateway else gateway_url()
-    catalog = model_catalog(key, gateway, read_models)
+    model_catalog_url = normalize_model_catalog_url(model_catalog_url)
+    catalog = model_catalog(key, gateway, read_models, model_catalog_url)
     prepare_isolated_config()
     KEY_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(KEY_DIR, 0o700)
@@ -253,10 +280,10 @@ def save_profile_key(label, key, gateway=None, read_models=True):
         if not isinstance(loaded, dict):
             raise RuntimeError("本机 Key 配置索引损坏，已停止且未覆盖。")
         index = loaded
-    index[profile_id] = {"name": label, "gateway": gateway}
+    index[profile_id] = {"name": label, "gateway": gateway, "model_catalog_url": model_catalog_url}
     private_write(KEY_DIR / (profile_id + ".key"), key + "\n")
     private_write(PROFILE_INDEX, json.dumps(index, ensure_ascii=False, indent=2) + "\n")
-    return {"id": profile_id, "name": label, "gateway": gateway, "model_count": len(catalog["models"]), **catalog}
+    return {"id": profile_id, "name": label, "gateway": gateway, "model_catalog_url": model_catalog_url, "model_count": len(catalog["models"]), **catalog}
 
 
 def add_profile_key():
@@ -273,7 +300,7 @@ def add_profile_from_stdin():
     payload = json.load(sys.stdin)
     if not isinstance(payload, dict) or not isinstance(payload.get("name"), str) or not isinstance(payload.get("key"), str):
         raise RuntimeError("新增 Key 请求格式不正确。")
-    profile = save_profile_key(payload["name"], payload["key"], payload.get("gateway"), payload.get("read_models", True) is not False)
+    profile = save_profile_key(payload["name"], payload["key"], payload.get("gateway"), payload.get("read_models", True) is not False, payload.get("model_catalog_url"))
     print(json.dumps(profile, ensure_ascii=False))
 
 
@@ -320,7 +347,7 @@ def gui_state():
     prepare_isolated_config()
     print(json.dumps({
         "gateway": gateway_url(),
-        "profiles": [{"id": item["id"], "name": item["name"], "gateway": item["gateway"]}
+        "profiles": [{"id": item["id"], "name": item["name"], "gateway": item["gateway"], "model_catalog_url": item.get("model_catalog_url", "")}
                      for item in load_profiles()],
         "last_launch": load_last_launch(MANAGER_LAST_LAUNCH),
         "workspaces": load_workspaces(),
@@ -333,7 +360,8 @@ def profile_models(profile_id, gateway_value=None):
         raise RuntimeError("找不到所选调用 Key；请刷新列表。")
     gateway = normalize_gateway(gateway_value) if gateway_value else profile["gateway"]
     print(json.dumps({"profile_id": profile_id, "gateway": gateway,
-                      **model_catalog(read_profile_key(profile), gateway)}, ensure_ascii=False))
+                      "model_catalog_url": profile.get("model_catalog_url", ""),
+                      **model_catalog(read_profile_key(profile), gateway, model_catalog_url=profile.get("model_catalog_url", ""))}, ensure_ascii=False))
 
 
 def usage_snapshot():
@@ -371,11 +399,14 @@ def profile_pricing(profile_id, force=False):
     models_path = TEST_ROOT / "pricing" / (profile_id + "-models.json")
     from model_pricing import read_json
     cached = read_json(models_path) or {}
-    models = cached.get("models", []) if cached.get("gateway") == profile["gateway"] else []
+    catalog_url = profile.get("model_catalog_url", "")
+    same_catalog = cached.get("gateway") == profile["gateway"] and cached.get("model_catalog_url", "") == catalog_url
+    models = cached.get("models", []) if same_catalog else []
     if force or not models or time.time() - cached.get("fetched_at", 0) >= 21600:
         try:
-            models = fetch_models(read_profile_key(profile), profile["gateway"])
-            private_write(models_path, json.dumps({"gateway": profile["gateway"], "models": models, "fetched_at": int(time.time())}))
+            models = fetch_models(read_profile_key(profile), profile["gateway"], catalog_url)
+            private_write(models_path, json.dumps({"gateway": profile["gateway"], "model_catalog_url": catalog_url,
+                                                  "models": models, "fetched_at": int(time.time())}))
         except (OSError, RuntimeError, ValueError):
             models = models or list(service.context(profile_id)["catalog"].get("models", {}))
     print(json.dumps(service.snapshot(profile_id, models), ensure_ascii=False))
@@ -477,7 +508,8 @@ def set_gateway_from_stdin():
     payload = json.load(sys.stdin)
     if not isinstance(payload, dict) or not isinstance(payload.get("url"), str):
         raise RuntimeError("网关配置请求格式不正确。")
-    print(json.dumps({"gateway": save_gateway(payload["url"])}, ensure_ascii=False))
+    gateway = save_gateway(payload["url"], payload.get("model_catalog_url"))
+    print(json.dumps({"gateway": gateway, "model_catalog_url": default_model_catalog_url()}, ensure_ascii=False))
 
 
 def set_profile_gateway_from_stdin(profile_id):
@@ -488,11 +520,13 @@ def set_profile_gateway_from_stdin(profile_id):
     if not isinstance(payload, dict) or not isinstance(payload.get("url"), str):
         raise RuntimeError("网关配置请求格式不正确。")
     gateway = normalize_gateway(payload["url"])
-    catalog = model_catalog(read_profile_key(profile), gateway)
+    catalog_url = normalize_model_catalog_url(payload.get("model_catalog_url", profile.get("model_catalog_url", "")))
+    catalog = model_catalog(read_profile_key(profile), gateway, payload.get("read_models", True) is not False, catalog_url)
     data = json.loads(PROFILE_INDEX.read_text())
-    data[profile_id] = {"name": profile["name"], "gateway": gateway}
+    entry = data.get(profile_id)
+    data[profile_id] = {**(entry if isinstance(entry, dict) else {}), "name": profile["name"], "gateway": gateway, "model_catalog_url": catalog_url}
     private_write(PROFILE_INDEX, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    print(json.dumps({"profile_id": profile_id, "gateway": gateway, "model_count": len(catalog["models"]), **catalog}, ensure_ascii=False))
+    print(json.dumps({"profile_id": profile_id, "gateway": gateway, "model_catalog_url": catalog_url, "model_count": len(catalog["models"]), **catalog}, ensure_ascii=False))
 
 
 def launch_profile(profile_id, model, workspace_value, session_mode, gateway_value=None, permission_mode="restricted"):
@@ -790,7 +824,7 @@ def choose_profile():
 
 def choose_model(profile):
     key = read_profile_key(profile)
-    models = model_catalog(key, profile["gateway"])["models"]
+    models = model_catalog(key, profile["gateway"], model_catalog_url=profile.get("model_catalog_url", ""))["models"]
     if not models:
         model = input("此网关未提供模型目录，请输入模型 ID：").strip()
         if not model or len(model) > 250 or any(c in model for c in "\0\r\n"):
@@ -951,11 +985,13 @@ def close_http_error(exc):
         exc.close()
 
 
-def fetch_models(key, gateway=None):
+def fetch_models(key, gateway=None, model_catalog_url=""):
+    if gateway is None and not model_catalog_url:
+        model_catalog_url = default_model_catalog_url()
     gateway = gateway or gateway_url()
     headers = {"User-Agent": "agent-workbench-metadata/1.0"}
     opener = build_opener(ProxyHandler({}), NoModelListRedirect())
-    for url in gateway_model_urls(gateway):
+    for url in gateway_model_urls(gateway, model_catalog_url):
         try:
             try:
                 response = opener.open(Request(url + "?limit=1000", headers={
@@ -1147,7 +1183,7 @@ def menu():
                 launch(model, True, selected_key=key, selected_name=profile["name"], gateway=profile["gateway"])
             elif choice == "5":
                 profile = choose_profile()
-                print("\n".join(fetch_models(read_profile_key(profile), profile["gateway"])))
+                print("\n".join(fetch_models(read_profile_key(profile), profile["gateway"], profile.get("model_catalog_url", ""))))
             elif choice == "6": add_profile_key()
             else: print("请输入 0 至 6。")
         except (RuntimeError, ValueError, OSError) as exc:

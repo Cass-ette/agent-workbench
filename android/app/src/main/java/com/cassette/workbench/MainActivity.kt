@@ -542,6 +542,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
 
 @Composable private fun ProfilesScreen(model: WorkbenchModel) {
     var adding by remember { mutableStateOf(false) }
+    var editingConnection by remember { mutableStateOf<KeyProfile?>(null) }
     var removing by remember { mutableStateOf<KeyProfile?>(null) }
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -560,9 +561,11 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                             if (model.options.profileId == profile.id) Text("当前", style = MaterialTheme.typography.labelMedium)
                         }
                         Text(profile.gateway, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if(profile.modelCatalogUrl.isNotBlank()) Text("模型目录：" + profile.modelCatalogUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text("${profile.models.size} 个缓存模型 · ${profile.favorites.size} 个收藏", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 8.dp))
                         Row {
                             TextButton(onClick = { model.chooseProfile(profile.id); model.refreshModels() }, enabled = !model.loadingModels) { Text("刷新模型") }
+                            TextButton(onClick = { editingConnection = profile }, enabled = !model.busy) { Text("连接设置") }
                             Spacer(Modifier.weight(1f))
                             TextButton(onClick = { removing = profile }) { Text("删除", color = MaterialTheme.colorScheme.error) }
                         }
@@ -575,26 +578,39 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
         }
     }
     if (adding) AddProfileDialog(model) { adding = false }
+    editingConnection?.let { profile -> AddProfileDialog(model, profile) { editingConnection = null } }
     removing?.let { profile -> AlertDialog(onDismissRequest = { removing = null }, title = { Text("删除调用配置？") }, text = { Text("将删除本机保存的“${profile.name}”及加密 Key。已启动的终端继续使用启动时的配置。") },
         confirmButton = { TextButton(onClick = { model.removeProfile(profile.id); removing = null }) { Text("删除") } }, dismissButton = { TextButton(onClick = { removing = null }) { Text("取消") } }) }
 }
 
-@Composable private fun AddProfileDialog(model: WorkbenchModel, dismiss: () -> Unit) {
-    var name by remember { mutableStateOf("") }; var gateway by remember { mutableStateOf("https://") }; var key by remember { mutableStateOf("") }
+@Composable private fun AddProfileDialog(model: WorkbenchModel, profile: KeyProfile? = null, dismiss: () -> Unit) {
+    var name by remember { mutableStateOf(profile?.name.orEmpty()) }; var gateway by remember { mutableStateOf(profile?.gateway ?: "https://") }; var key by remember { mutableStateOf("") }
+    var sharedCatalog by remember { mutableStateOf(profile?.modelCatalogUrl.isNullOrBlank()) }
+    var catalogUrl by remember { mutableStateOf(profile?.modelCatalogUrl.orEmpty()) }
     var validate by remember { mutableStateOf(true) }
-    var allowInsecureLan by remember { mutableStateOf(false) }
-    AlertDialog(onDismissRequest = { if (!model.busy) dismiss() }, title = { Text("添加调用配置") }, text = {
+    var allowInsecureLan by remember { mutableStateOf(profile?.allowInsecureLan ?: false) }
+    AlertDialog(onDismissRequest = { if (!model.busy) dismiss() }, title = { Text(if(profile == null) "添加调用配置" else "连接设置 · " + profile.name) }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-            OutlinedTextField(name, { name = it }, label = { Text("配置名称") }, singleLine = true)
-            OutlinedTextField(gateway, { gateway = it }, label = { Text("API 基础地址（可含路径）") }, singleLine = true)
-            OutlinedTextField(key, { key = it }, label = { Text("网关签发的调用 Key") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
+            if(profile == null) OutlinedTextField(name, { name = it }, label = { Text("配置名称") }, singleLine = true)
+            OutlinedTextField(gateway, { gateway = it }, label = { Text("调用 API 基础地址（可含路径）") }, singleLine = true)
+            Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(sharedCatalog, { sharedCatalog = it }); Text("模型目录与调用共用地址", style = MaterialTheme.typography.bodySmall) }
+            if(!sharedCatalog) {
+                OutlinedTextField(catalogUrl, { catalogUrl = it }, label = { Text("模型目录完整 URL") }, placeholder = { Text("https://服务商/api/paas/v4/models") }, singleLine = true)
+                Text("只向此地址读取模型列表，使用同一把调用 Key；请填写服务商可信地址。推理仍使用调用地址。", style = MaterialTheme.typography.labelSmall)
+            }
+            if(profile == null) OutlinedTextField(key, { key = it }, label = { Text("网关签发的调用 Key") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
+            else Text("保留已有 Key、收藏与对话历史。已运行终端继续使用原配置。", style = MaterialTheme.typography.labelSmall)
             Text("127.0.0.1 指这部手机。电脑上的本机网关需要另外提供可访问地址或安全隧道。", style = MaterialTheme.typography.labelSmall)
             Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(validate, { validate = it }); Text("保存时读取模型列表", style = MaterialTheme.typography.bodySmall) }
             Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(allowInsecureLan, { allowInsecureLan = it }); Text("允许可信局域网 HTTP（Key 会在局域网明文传输）", style = MaterialTheme.typography.bodySmall) }
             Text("可填写 /proxy/v1 等 API 前缀。Claude 需 Messages 接口，Codex 需 Responses 接口；仅支持 Chat Completions 的网关不能直接供 Codex 使用。读取列表只发送 GET，不调用模型。", style = MaterialTheme.typography.labelSmall)
             if (model.error.isNotBlank()) Text(model.error, color = MaterialTheme.colorScheme.error)
         }
-    }, confirmButton = { TextButton(onClick = { model.saveProfile(name, gateway, key, validate, allowInsecureLan) { key = ""; dismiss() } }, enabled = !model.busy && name.isNotBlank() && key.isNotBlank()) { Text(if (model.busy) "保存中…" else "保存") } },
+    }, confirmButton = { TextButton(onClick = {
+        val catalog = if(sharedCatalog) "" else catalogUrl
+        if(profile == null) model.saveProfile(name, gateway, key, validate, allowInsecureLan, catalog) { key = ""; dismiss() }
+        else model.updateProfileConnection(profile.id, gateway, catalog, validate, allowInsecureLan, dismiss)
+    }, enabled = !model.busy && name.isNotBlank() && (profile != null || key.isNotBlank()) && (sharedCatalog || catalogUrl.isNotBlank())) { Text(if (model.busy) "保存中…" else "保存") } },
         dismissButton = { TextButton(onClick = { key = ""; dismiss() }, enabled = !model.busy) { Text("取消") } })
 }
 

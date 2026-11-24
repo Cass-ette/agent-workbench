@@ -58,6 +58,8 @@ struct KeyProfile {
     id: String,
     name: String,
     gateway: String,
+    #[serde(default)]
+    model_catalog_url: String,
 }
 
 #[derive(Serialize)]
@@ -71,6 +73,18 @@ struct AddProfileRequest {
     name: String,
     gateway: String,
     key: String,
+    #[serde(default)]
+    model_catalog_url: String,
+    #[serde(default = "default_read_models")]
+    read_models: bool,
+}
+
+#[derive(Deserialize)]
+struct UpdateProfileConnectionRequest {
+    profile_id: String,
+    gateway: String,
+    #[serde(default)]
+    model_catalog_url: String,
     #[serde(default = "default_read_models")]
     read_models: bool,
 }
@@ -293,8 +307,9 @@ async fn model_pricing(
     }
     let context = selected.ok_or("找不到所选调用配置")?;
     let gateway = context["gateway"].as_str().ok_or("网关地址无效")?;
+    let catalog_url = config.profiles.iter().find(|p| p.id == profile_id).map(|p| p.model_catalog_url.as_str()).unwrap_or("");
     let models = if let Some(key) = selected_key {
-        fetch_models(gateway, &key).await.ok()
+        fetch_model_catalog_at(gateway, &key, catalog_url).await.ok().map(|c| c.models)
     } else {
         None
     }
@@ -387,11 +402,30 @@ fn gateway_claude_base(gateway: &str) -> &str {
 }
 
 async fn fetch_model_catalog(gateway: &str, key: &str) -> Result<ModelCatalog, String> {
+    fetch_model_catalog_at(gateway, key, "").await
+}
+
+fn normalize_model_catalog_url(value: &str) -> Result<String, String> {
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() { return Ok(String::new()); }
+    normalize_gateway(value)?;
+    // Exact catalog endpoint; don't apply the legacy /v1 base normalization.
+    Ok(value.to_string())
+}
+
+fn gateway_model_urls(gateway: &str, model_catalog_url: &str) -> Result<Vec<String>, String> {
+    let explicit = normalize_model_catalog_url(model_catalog_url)?;
+    if !explicit.is_empty() { return Ok(vec![explicit]); }
     let base = gateway.trim_end_matches('/');
     let mut urls = vec![format!("{}/models", gateway_api_base(base))];
     if Url::parse(base).map(|url| url.path() != "/" && !url.path().is_empty()).unwrap_or(false) && !base.ends_with("/v1") {
         urls.push(format!("{base}/v1/models"));
     }
+    Ok(urls)
+}
+
+async fn fetch_model_catalog_at(gateway: &str, key: &str, model_catalog_url: &str) -> Result<ModelCatalog, String> {
+    let urls = gateway_model_urls(gateway, model_catalog_url)?;
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("agent-workbench/0.1")
@@ -449,12 +483,14 @@ async fn add_profile(
         return Err("请填写名称和完整的下游调用 Key".into());
     }
     let gateway = normalize_gateway(&request.gateway)?;
-    let catalog = if request.read_models { fetch_model_catalog(&gateway, request.key.trim()).await? }
+    let model_catalog_url = normalize_model_catalog_url(&request.model_catalog_url)?;
+    let catalog = if request.read_models { fetch_model_catalog_at(&gateway, request.key.trim(), &model_catalog_url).await? }
         else { ModelCatalog { models: vec![], catalog_notice: "已跳过模型列表读取；Key 和模型尚未验证，请手动填写模型 ID。".into() } };
     let profile = KeyProfile {
         id: Uuid::new_v4().to_string(),
         name: name.to_string(),
         gateway,
+        model_catalog_url,
     };
     key_entry(&profile.id)?
         .set_password(request.key.trim())
@@ -490,7 +526,29 @@ async fn models_for_profile(
     let key = key_entry(&profile.id)?
         .get_password()
         .map_err(|_| "Windows 凭据管理器中没有这把 Key".to_string())?;
-    fetch_model_catalog(&profile.gateway, &key).await
+    fetch_model_catalog_at(&profile.gateway, &key, &profile.model_catalog_url).await
+}
+
+#[tauri::command]
+async fn update_profile_connection(request: UpdateProfileConnectionRequest, state: State<'_, AppState>) -> Result<AddProfileResponse, String> {
+    let gateway = normalize_gateway(&request.gateway)?;
+    let model_catalog_url = normalize_model_catalog_url(&request.model_catalog_url)?;
+    let previous = state.config.lock().map_err(|_| "配置锁异常")?.profiles.iter()
+        .find(|p| p.id == request.profile_id).cloned().ok_or("找不到所选 Key 配置")?;
+    let catalog = if request.read_models {
+        let key = key_entry(&previous.id)?.get_password().map_err(|_| "Windows 凭据管理器中没有这把 Key")?;
+        fetch_model_catalog_at(&gateway, &key, &model_catalog_url).await?
+    } else { ModelCatalog { models: vec![], catalog_notice: "已跳过模型列表读取；连接尚未验证。".into() } };
+    let profile = KeyProfile { gateway, model_catalog_url, ..previous.clone() };
+    let mut config = state.config.lock().map_err(|_| "配置锁异常")?;
+    let index = config.profiles.iter().position(|p| p.id == previous.id).ok_or("调用配置已删除")?;
+    if config.profiles[index].gateway != previous.gateway || config.profiles[index].model_catalog_url != previous.model_catalog_url {
+        return Err("连接设置已更改，请重新打开后保存。".into());
+    }
+    let original = config.clone();
+    config.profiles[index] = profile.clone();
+    if let Err(error) = write_config(&state.config_path, &config) { *config = original; return Err(error); }
+    Ok(AddProfileResponse { profile, models: catalog.models, catalog_notice: catalog.catalog_notice })
 }
 
 #[tauri::command]
@@ -1147,6 +1205,7 @@ pub fn run() {
             model_pricing,
             save_pricing_source,
             add_profile,
+            update_profile_connection,
             models_for_profile,
             select_profile,
             save_preferences,
@@ -1321,6 +1380,34 @@ mod tests {
             assert_eq!(super::gateway_claude_base(&base), base.strip_suffix("/v1").unwrap_or(&base));
         }
         assert_eq!(super::gateway_api_base("https://gateway.test"), "https://gateway.test/v1");
+    }
+
+    #[test]
+    fn independent_catalog_preserves_call_route_and_legacy_profiles_default_to_shared() {
+        let gateway = "https://gateway.test/api/v1";
+        let endpoint = "https://gateway.test/api/paas/v4/models";
+        let profile: super::KeyProfile = serde_json::from_str(r#"{"id":"p","name":"Legacy","gateway":"https://gateway.test/api/v1"}"#).unwrap();
+        assert!(profile.model_catalog_url.is_empty());
+        assert_eq!(super::gateway_model_urls(gateway, "").unwrap(), vec!["https://gateway.test/api/v1/models"]);
+        assert_eq!(super::gateway_model_urls(gateway, endpoint).unwrap(), vec![endpoint]);
+        assert_eq!(super::gateway_api_base(gateway), gateway);
+        assert_eq!(super::normalize_model_catalog_url("https://gateway.test/v1").unwrap(), "https://gateway.test/v1");
+        for url in ["http://gateway.test/models", "https://key@gateway.test/models", "https://gateway.test/models?token=x", "file:///tmp/models"] {
+            assert!(super::gateway_model_urls(gateway, url).is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_catalog_only_queries_the_selected_endpoint_and_does_not_fall_back() {
+        let (url, server) = catalog_fixture(vec![("200 OK", r#"{"data":[{"id":"model-from-catalog"}]}"#)]);
+        let endpoint = format!("{url}/directory");
+        let catalog = tauri::async_runtime::block_on(super::fetch_model_catalog_at("https://call.test/api/v1", "dummy", &endpoint)).unwrap();
+        assert_eq!(catalog.models, vec!["model-from-catalog"]);
+        assert_eq!(server.join().unwrap(), vec!["GET /custom/directory?limit=1000 HTTP/1.1\r\n"]);
+        let (url, server) = catalog_fixture(vec![("404 Not Found", "")]);
+        let catalog = tauri::async_runtime::block_on(super::fetch_model_catalog_at("https://call.test/api/v1", "dummy", &url)).unwrap();
+        assert!(catalog.models.is_empty());
+        assert_eq!(server.join().unwrap().len(), 1);
     }
 
     fn catalog_fixture(statuses: Vec<(&'static str, &'static str)>) -> (String, std::thread::JoinHandle<Vec<String>>) {

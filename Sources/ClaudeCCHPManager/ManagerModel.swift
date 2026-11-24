@@ -6,6 +6,7 @@ struct KeyProfile: Decodable, Identifiable, Hashable {
     let id: String
     let name: String
     let gateway: String?
+    var model_catalog_url: String? = nil
 }
 
 struct LastLaunch: Decodable {
@@ -181,6 +182,7 @@ private struct RemovedProfile: Decodable {
 
 private struct GatewayUpdateResponse: Decodable {
     let gateway: String
+    let model_catalog_url: String?
 }
 
 enum SessionMode: String, CaseIterable, Identifiable {
@@ -441,7 +443,7 @@ final class ManagerModel: ObservableObject {
     @Published var selectedModel = "" {
         didSet {
             if !selectedModel.isEmpty {
-                modelCatalog.remember(profile: selectedProfileID, gateway: gateway, selected: selectedModel)
+                modelCatalog.remember(profile: selectedProfileID, gateway: gateway, catalogURL: selectedProfile?.model_catalog_url ?? "", selected: selectedModel)
             }
         }
     }
@@ -460,6 +462,10 @@ final class ManagerModel: ObservableObject {
     @Published var isGatewaySettingsPresented = false
     @Published var isTerminalAppearancePresented = false
     @Published var gatewayDraft = "http://127.0.0.1:8081"
+    @Published var modelCatalogURLDraft = ""
+    @Published var sharedModelCatalogDraft = true
+    @Published var readModelsOnSave = true
+    @Published var gatewaySettingsError = ""
     @Published var isSavingGateway = false
     @Published var isAddProfilePresented = false
     @Published var isAddingProfile = false
@@ -566,7 +572,7 @@ final class ManagerModel: ObservableObject {
         guard let backend else { throw RemoteWorkbenchError.invalid("电脑工作台正在读取配置") }
         if op == "state" {
             return ["schema": 1, "platform": "macos", "capabilities": ["sessions", "launch", "system-cli", "history", "models", "attachments"],
-                    "profiles": profiles.map { ["id": $0.id, "name": $0.name, "gateway": $0.gateway ?? defaultGateway] },
+                    "profiles": profiles.map { ["id": $0.id, "name": $0.name, "gateway": $0.gateway ?? defaultGateway, "model_catalog_url": $0.model_catalog_url ?? ""] },
                     "workspace": workspace, "workspaces": workspaces, "client": activeClient.rawValue,
                     "profile_id": selectedProfileID, "model": selectedModel,
                     "permissions": ["codex": agentPermissions?.codex.rawValue ?? "unreviewed", "claude": agentPermissions?.claude.rawValue ?? "unreviewed"],
@@ -741,6 +747,10 @@ final class ManagerModel: ObservableObject {
 
     func showGatewaySettings() {
         gatewayDraft = gateway
+        modelCatalogURLDraft = selectedProfile?.model_catalog_url ?? ""
+        sharedModelCatalogDraft = modelCatalogURLDraft.isEmpty
+        readModelsOnSave = true
+        gatewaySettingsError = ""
         isGatewaySettingsPresented = true
     }
 
@@ -751,9 +761,12 @@ final class ManagerModel: ObservableObject {
     func saveGateway() async {
         guard let backend else { return }
         isSavingGateway = true
+        gatewaySettingsError = ""
         defer { isSavingGateway = false }
         do {
-            let payload = try JSONSerialization.data(withJSONObject: ["url": gatewayDraft])
+            let oldCatalogURL = selectedProfile?.model_catalog_url ?? ""
+            let payload = try JSONSerialization.data(withJSONObject: ["url": gatewayDraft,
+                "model_catalog_url": sharedModelCatalogDraft ? "" : modelCatalogURLDraft, "read_models": readModelsOnSave])
             let profileID = selectedProfile?.id
             let action: [String]
             if let profileID, profileID != "free" {
@@ -768,21 +781,23 @@ final class ManagerModel: ObservableObject {
             gateway = value
             if profileID == nil || profileID == "free" { defaultGateway = value }
             if let profileID, let index = profiles.firstIndex(where: { $0.id == profileID }) {
-                profiles[index] = KeyProfile(id: profiles[index].id, name: profiles[index].name, gateway: value)
+                profiles[index] = KeyProfile(id: profiles[index].id, name: profiles[index].name, gateway: value, model_catalog_url: saved.model_catalog_url)
             }
-            if gatewayChanged {
-                let cached = modelCatalog.entry(profile: selectedProfileID, gateway: value)
+            if gatewayChanged || oldCatalogURL != (saved.model_catalog_url ?? "") {
+                modelRequestID = nil
+                let cached = modelCatalog.entry(profile: selectedProfileID, gateway: value, catalogURL: saved.model_catalog_url ?? "")
                 models = cached.models
-                selectedModel = cached.selected
+                if !cached.selected.isEmpty { selectedModel = cached.selected }
                 modelLoadError = ""
             }
             isGatewaySettingsPresented = false
-            statusMessage = "网关地址已保存；正在刷新当前 Key 的模型列表。"
+            statusMessage = "连接设置已保存；已运行终端保留原配置。"
             isStatusError = false
             resetGatewayUsage()
-            if !selectedProfileID.isEmpty { await loadModels(for: selectedProfileID) }
+            if readModelsOnSave && !selectedProfileID.isEmpty { await loadModels(for: selectedProfileID) }
             await refreshGatewayUsage()
         } catch {
+            gatewaySettingsError = error.localizedDescription
             setError(error.localizedDescription)
         }
     }
@@ -979,7 +994,7 @@ final class ManagerModel: ObservableObject {
         }
         selectedProfileID = profile.id
         gateway = profile.gateway ?? defaultGateway
-        let cached = modelCatalog.entry(profile: profile.id, gateway: gateway)
+        let cached = modelCatalog.entry(profile: profile.id, gateway: gateway, catalogURL: profile.model_catalog_url ?? "")
         models = cached.models
         selectedModel = cached.selected
         modelLoadError = ""
@@ -993,9 +1008,10 @@ final class ManagerModel: ObservableObject {
     func loadModels(for profileID: String) async {
         guard profileID == selectedProfileID, backend != nil || modelLoader != nil else { return }
         let requestGateway = gateway
+        let requestCatalogURL = selectedProfile?.model_catalog_url ?? ""
         let requestID = UUID()
         modelRequestID = requestID
-        let cached = modelCatalog.entry(profile: profileID, gateway: requestGateway)
+        let cached = modelCatalog.entry(profile: profileID, gateway: requestGateway, catalogURL: requestCatalogURL)
         if models.isEmpty { models = cached.models }
         if selectedModel.isEmpty { selectedModel = cached.selected }
         isUsingCachedModels = !models.isEmpty
@@ -1011,7 +1027,8 @@ final class ManagerModel: ObservableObject {
                 let data = try await backend!.run(["profile-models", "--profile-id", profileID])
                 response = try JSONDecoder().decode(ModelResponse.self, from: data)
             }
-            guard modelRequestID == requestID, selectedProfileID == profileID, gateway == requestGateway else { return }
+            guard modelRequestID == requestID, selectedProfileID == profileID, gateway == requestGateway,
+                  (selectedProfile?.model_catalog_url ?? "") == requestCatalogURL else { return }
             let fetched = Array(Set(response.models.filter { !$0.isEmpty })).sorted()
             if !fetched.isEmpty { models = fetched }
             modelLoadError = response.catalog_notice ?? (fetched.isEmpty ? "网关返回了空模型列表；可手动填写模型 ID。" : "")
@@ -1019,21 +1036,22 @@ final class ManagerModel: ObservableObject {
             if selectedModel.isEmpty {
                 selectedModel = models.first ?? ""
             }
-            modelCatalog.remember(profile: profileID, gateway: gateway, selected: selectedModel, models: models)
+            modelCatalog.remember(profile: profileID, gateway: gateway, catalogURL: requestCatalogURL, selected: selectedModel, models: models)
             isUsingCachedModels = fetched.isEmpty && !models.isEmpty
             isLoadingModels = false
             statusMessage = modelLoadError.isEmpty ? "\(models.count) 个可用模型" : modelLoadError
             isStatusError = false
             await refreshUsage()
         } catch {
-            guard modelRequestID == requestID, selectedProfileID == profileID, gateway == requestGateway else { return }
+            guard modelRequestID == requestID, selectedProfileID == profileID, gateway == requestGateway,
+                  (selectedProfile?.model_catalog_url ?? "") == requestCatalogURL else { return }
             modelLoadError = error.localizedDescription
             isUsingCachedModels = !models.isEmpty || !selectedModel.isEmpty
             setError("模型列表读取失败：\(modelLoadError)" + (isUsingCachedModels ? " 已保留上次模型选择。" : " 请重试或切换调用配置。"))
         }
     }
 
-    func addProfile(name: String, key: String, gateway profileGateway: String, readModels: Bool = true) async -> Bool {
+    func addProfile(name: String, key: String, gateway profileGateway: String, readModels: Bool = true, modelCatalogURL: String = "") async -> Bool {
         guard let backend else {
             addProfileError = "本机后端尚未就绪。"
             return false
@@ -1042,7 +1060,7 @@ final class ManagerModel: ObservableObject {
         addProfileError = ""
         addProfileStatus = readModels ? "正在读取模型列表…" : "正在保存配置…"
         do {
-            let payload = try JSONSerialization.data(withJSONObject: ["name": name, "key": key, "gateway": profileGateway, "read_models": readModels])
+            let payload = try JSONSerialization.data(withJSONObject: ["name": name, "key": key, "gateway": profileGateway, "read_models": readModels, "model_catalog_url": modelCatalogURL])
             let data = try await backend.run(["add-profile-stdin"], stdin: payload)
             let added = try JSONDecoder().decode(AddedProfile.self, from: data)
             try await refreshProfiles()
@@ -1052,7 +1070,7 @@ final class ManagerModel: ObservableObject {
             selectedModel = models.first ?? ""
             modelLoadError = added.catalog_notice ?? ""
             isUsingCachedModels = false
-            modelCatalog.remember(profile: added.id, gateway: gateway, selected: selectedModel, models: models)
+            modelCatalog.remember(profile: added.id, gateway: gateway, catalogURL: selectedProfile?.model_catalog_url ?? "", selected: selectedModel, models: models)
             resetGatewayUsage()
             addProfileStatus = "已保存；" + (modelLoadError.isEmpty ? "找到 \(added.model_count) 个模型，未发起推理。" : modelLoadError)
             statusMessage = addProfileStatus

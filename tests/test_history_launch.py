@@ -66,11 +66,13 @@ class HistoryLaunchTests(unittest.TestCase):
                                     B.launch_history(entry["history_ref"], session_id, client, "", "", str(workspace), original=True)
                             popen.assert_not_called()
                             self.assertEqual(B.launch_history(entry["history_ref"], session_id, client,
-                                "different-selection", "model-b", str(workspace), original=True, permission_mode="standard"), 0)
+                                "different-selection", "model-b", str(workspace), original=True, permission_mode="standard", reasoning_effort="high"), 0)
                         else:
                             self.assertEqual(B.launch_history(entry["history_ref"], session_id, client, "p-one",
                                 "model-b" if action == "fork-other-model" else "model-a", str(workspace), force_fork=True, permission_mode="standard"), 0)
                         command = popen.call_args.args[0]
+                        if action == "original":
+                            self.assertIn('model_reasoning_effort="high"' if client == "codex" else "--effort", command)
                         env = popen.call_args.kwargs["env"]
                         launched_home = Path(env["CODEX_HOME"] if client == "codex" else env["CLAUDE_CONFIG_DIR"])
                         if client == "codex":

@@ -3,6 +3,7 @@ mod remote;
 mod discovery;
 mod attachments;
 mod pricing;
+mod reasoning;
 #[cfg(windows)]
 mod terminal_job;
 mod usage;
@@ -124,6 +125,8 @@ struct StartTerminalRequest {
     history_action: Option<String>,
     #[serde(default)]
     permission_mode: AgentPermission,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -684,6 +687,7 @@ fn start_terminal(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TerminalInfo, String> {
+    let effort = reasoning::normalize(request.reasoning_effort.as_deref())?.map(str::to_owned);
     let closing = state.closing_for_update.lock().map_err(|_| "终端状态不可用。")?;
     if *closing { return Err("正在安装更新。".into()); }
     if !matches!(request.client.as_str(), "claude" | "codex") {
@@ -762,8 +766,9 @@ fn start_terminal(
         fs::create_dir_all(&codex_home)
             .map_err(|error| format!("创建隔离 Codex 配置失败：{error}"))?;
         let config_text = format!(
-            "model = {}\nmodel_provider = \"cchp_local\"\nmodel_reasoning_effort = \"medium\"\nsandbox_mode = \"workspace-write\"\ndisable_response_storage = true\n\n[model_providers.cchp_local]\nname = \"cchp_local\"\nbase_url = {}\nwire_api = \"responses\"\nenv_key = \"CCH_API_KEY\"\n",
+            "model = {}\nmodel_provider = \"cchp_local\"\n{}sandbox_mode = \"workspace-write\"\ndisable_response_storage = true\n\n[model_providers.cchp_local]\nname = \"cchp_local\"\nbase_url = {}\nwire_api = \"responses\"\nenv_key = \"CCH_API_KEY\"\n",
             serde_json::to_string(&request.model).map_err(|error| error.to_string())?,
+            reasoning::config_line(effort.as_deref(), &fs::read_to_string(codex_home.join("config.toml")).unwrap_or_default())?,
             serde_json::to_string(&gateway_api_base(&profile.gateway))
                 .map_err(|error| error.to_string())?,
         );
@@ -806,6 +811,7 @@ fn start_terminal(
             ];
         }
         args.extend(request.permission_mode.args("codex"));
+        args.extend(reasoning::args("codex", effort.as_deref())?);
         args.extend(tools::apply(&config_root.join("tools/codex"), &selected_home, "codex")?);
         shell.env("CODEX_HOME", codex_home);
         shell.env("CCH_API_KEY", &key);
@@ -822,6 +828,8 @@ fn start_terminal(
         shell.env("CLAUDE_CONFIG_DIR", claude_home);
         shell.env("ANTHROPIC_BASE_URL", gateway_claude_base(&profile.gateway));
         shell.env("ANTHROPIC_API_KEY", &key);
+        shell.env_remove("MAX_THINKING_TOKENS");
+        shell.env_remove("CLAUDE_CODE_EFFORT_LEVEL");
         let mut args = vec![
             "--model".to_string(),
             request.model.clone(),
@@ -829,6 +837,7 @@ fn start_terminal(
             workspace.display().to_string(),
         ];
         args.extend(request.permission_mode.args("claude"));
+        args.extend(reasoning::args("claude", effort.as_deref())?);
         if source.is_some() {
             for name in ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
                 "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"] {

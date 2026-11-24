@@ -27,6 +27,8 @@ import {
 } from "lucide-react";
 import "@xterm/xterm/css/xterm.css";
 import "./App.css";
+import { CurrentReasoningDialog, ReasoningSlider, effortKey, readEffortPreferences } from "./ReasoningEffort";
+import type { Effort } from "./ReasoningEffort";
 import { UsageStatus } from "./UsagePanel";
 import { WorkbenchUpdate } from "./WorkbenchUpdate";
 import { SSHConnection } from "./SSHConnection";
@@ -115,6 +117,8 @@ const emptyConfig: AppConfig = {
 };
 
 function App() {
+  const [effortPreferences, setEffortPreferences] = useState(readEffortPreferences);
+  const [reasoningTarget, setReasoningTarget] = useState<{ id: string; client: ClientKind } | null>(null);
   const [showTools, setShowTools] = useState(false);
   const [agentPermissions, setAgentPermissions] = useState(readAgentPermissions);
   const [showPermissions, setShowPermissions] = useState(() => readAgentPermissions() === null);
@@ -173,6 +177,12 @@ function App() {
     [config.profiles, config.selected_profile_id],
   );
   sessionsRef.current = sessions;
+  const startupEffort = effortPreferences[effortKey(config.client, config.selected_profile_id, config.model)] ?? "default";
+  function setStartupEffort(value: Effort) {
+    const next = { ...effortPreferences, [effortKey(config.client, config.selected_profile_id, config.model)]: value };
+    try { window.localStorage.setItem("reasoning.preferences", JSON.stringify(next)); setEffortPreferences(next); }
+    catch { setError("无法保存思考强度设置，请重试。"); }
+  }
 
   const matchingHistory = history.filter((entry) => Boolean(entry.archived) === historyArchived && [entry.title, entry.preview ?? "", entry.workspace, entry.client, entry.model, entry.profile_name].some(
     (value) => value.toLocaleLowerCase().includes(historyQuery.trim().toLocaleLowerCase()),
@@ -463,6 +473,8 @@ function App() {
           confirmed_gateway: source && !original ? selectedProfile?.gateway : undefined,
           history_action: original ? "original" : source ? "fork" : undefined,
           permission_mode: agentPermissions?.[client] ?? "restricted",
+          reasoning_effort: effortPreferences[effortKey(client, original?.profile_id ?? config.selected_profile_id,
+            original?.configured_model ?? original?.model ?? model)] ?? "default",
         },
       });
       const session: Session = {
@@ -811,6 +823,10 @@ function App() {
                 {isStarting ? "正在启动" : sessionMode === "resume" && launchScope === "workbench" ? "启动分支" : "启动"}
               </button>
             </div>
+            {launchScope === "workbench" && <div className="startup-reasoning">
+              <ReasoningSlider value={startupEffort} onChange={setStartupEffort} label="启动默认思考强度" />
+              <small>按客户端、调用配置和模型分别保存；当前会话使用终端旁的入口调整。</small>
+            </div>}
             <div className="setup-footnote">
               <span><CircleHelp size={13} />{launchScope === "system" ? "沿用系统已有命令、Key 和配置" : "每个标签使用独立终端进程"}</span>
               {launchScope === "workbench" && selectedProfile && <span className="gateway-address">{selectedProfile.gateway}</span>}
@@ -826,6 +842,8 @@ function App() {
                 {activeSession?.permissions && <small>{activeSession.permissions}</small>}
               </div>
               <div className="terminal-toolbar-actions">
+                {activeSession && activeSession.exitCode === null && <button className="secondary-button"
+                  onClick={() => setReasoningTarget({ id: activeSession.id, client: activeSession.client })}>思考强度</button>}
                 {activeSession && activeSession.exitCode === null && (
                   <button className="icon-button stop-button" title="停止并关闭此终端" disabled={closingIds.includes(activeSession.id)} onClick={() => closeSession(activeSession)}><Square size={13} fill="currentColor" /></button>
                 )}
@@ -918,6 +936,17 @@ function App() {
         </main>
       </div>
 
+      {reasoningTarget && <CurrentReasoningDialog client={reasoningTarget.client} close={() => setReasoningTarget(null)} insert={(command) => {
+        const session = sessionsRef.current.find((item) => item.id === reasoningTarget.id);
+        const terminal = terminalRefs.current.get(reasoningTarget.id);
+        if (currentSessionId.current !== reasoningTarget.id || !session || session.exitCode !== null || !terminal || closing.current.has(session.id)) {
+          setError("目标终端已切换或结束，请重新打开思考强度入口。"); return false;
+        }
+        terminal.paste(command);
+        terminal.focus?.();
+        setNotice(`已填入 ${command}；确认输入框内容后按回车，生效情况由 CLI 确认。`);
+        return true;
+      }} />}
       {showTools && <ToolBridge close={() => setShowTools(false)} />}
       {loaded && showPermissions && <AgentPermissionDialog settings={agentPermissions} close={() => setShowPermissions(false)} save={(settings: AgentPermissions) => {
         try {

@@ -349,6 +349,7 @@ struct ManagerView: View {
         .background(.bar)
     }
 
+    @State private var reasoningPresented = false
     private var configuration: some View {
         HStack(spacing: 10) {
             Picker("客户端", selection: $model.activeClient) {
@@ -403,6 +404,18 @@ struct ManagerView: View {
                 }
                 .frame(minWidth: 150, idealWidth: 205, maxWidth: 235)
                 .help("\(model.models.count) 个可用模型")
+                Button { reasoningPresented.toggle() } label: {
+                    Label("思考", systemImage: "slider.horizontal.3")
+                }
+                .buttonStyle(.bordered)
+                .help("启动默认思考强度：\(ReasoningEffort.label(model.selectedReasoningEffort))")
+                .popover(isPresented: $reasoningPresented) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ReasoningEffortSlider(value: $model.selectedReasoningEffort, label: "启动默认思考强度")
+                        Text("按客户端、调用配置和模型分别保存，用于之后启动或恢复。客户端默认不额外指定；当前运行会话请使用终端旁的思考强度入口。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.padding(18).frame(width: 350)
+                }
             } else {
                 Text("沿用终端配置")
                     .lineLimit(1)

@@ -59,6 +59,7 @@ data class RemoteWorkbench(
             Modifier.weight(1f), remote.profiles.map { it.id to it.name }, model::selectRemoteProfile)
     }
     if (model.remoteScope == "workbench") {
+        if(remote.capabilities.contains("reasoning-effort")) ReasoningEffortSlider(model.remoteStartupReasoningEffort, model::setRemoteStartupReasoningEffort, "电脑启动默认思考强度")
         OutlinedTextField(value = model.remoteModel, onValueChange = { model.remoteModel = it }, label = { Text("电脑模型 ID") },
             modifier = Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) model.terminalFocusChanged("", true) }, singleLine = true)
         Row {

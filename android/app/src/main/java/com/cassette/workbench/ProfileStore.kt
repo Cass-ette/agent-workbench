@@ -41,6 +41,13 @@ class ProfileStore(context: Context) {
     private val prefs = context.getSharedPreferences("workbench", Context.MODE_PRIVATE)
     private val secrets = context.getSharedPreferences("credentials", Context.MODE_PRIVATE)
     private val alias = "agent-workbench-aes-v1"
+    fun loadReasoningPreferences(): Map<String, String> = runCatching {
+        val value = JSONObject(prefs.getString("reasoning.preferences", "{}") ?: "{}")
+        value.keys().asSequence().mapNotNull { key -> value.optString(key).takeIf { it in ReasoningEffort.levels }?.let { key to it } }.toMap()
+    }.getOrDefault(emptyMap())
+    fun saveReasoningPreferences(value: Map<String, String>) {
+        check(prefs.edit().putString("reasoning.preferences", JSONObject(value).toString()).commit()) { "无法保存思考强度设置" }
+    }
 
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

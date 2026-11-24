@@ -60,7 +60,7 @@ class TermuxConnection(private val context: Context, private val store: ProfileS
             store.saveSecret("bridge:$port", token)
             store.saveBridgePort(port)
         }
-        val files = listOf("termux_bridge.py", "remote_workbench.py", "debian_runner.py", "runtime_setup.sh", "workbench_runtime.py", "linux_vm.py", "session_history.py", "tool_bridge.py", "usage_records.py", "model_pricing.py", "gateway_billing.py", "pricing_reference.json")
+        val files = listOf("termux_bridge.py", "remote_workbench.py", "debian_runner.py", "runtime_setup.sh", "workbench_runtime.py", "linux_vm.py", "session_history.py", "agent_reasoning.py", "tool_bridge.py", "usage_records.py", "model_pricing.py", "gateway_billing.py", "pricing_reference.json")
         val assets = files.associateWith { name -> context.assets.open(name).use { it.readBytes() } }
         val digest = MessageDigest.getInstance("SHA-256")
         assets.forEach { (name, bytes) -> digest.update(name.toByteArray(Charsets.UTF_8)); digest.update(bytes) }

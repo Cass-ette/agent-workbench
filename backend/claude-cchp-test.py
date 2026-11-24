@@ -17,6 +17,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.dont_write_bytecode = True
+import agent_reasoning
+
 
 USER_ROOT = Path.home()
 CLIENT_ROOT = USER_ROOT / ".config/cchp-client"
@@ -529,7 +533,8 @@ def set_profile_gateway_from_stdin(profile_id):
     print(json.dumps({"profile_id": profile_id, "gateway": gateway, "model_catalog_url": catalog_url, "model_count": len(catalog["models"]), **catalog}, ensure_ascii=False))
 
 
-def launch_profile(profile_id, model, workspace_value, session_mode, gateway_value=None, permission_mode="restricted"):
+def launch_profile(profile_id, model, workspace_value, session_mode, gateway_value=None, permission_mode="restricted", reasoning_effort=None):
+    agent_reasoning.normalize(reasoning_effort)
     profile = next((item for item in load_profiles() if item["id"] == profile_id), None)
     if profile is None:
         raise RuntimeError("找不到所选调用 Key；请刷新列表。")
@@ -560,10 +565,11 @@ def launch_profile(profile_id, model, workspace_value, session_mode, gateway_val
     }, ensure_ascii=False))
     return launch(model, selected_key=key, selected_name=profile["name"],
                   workspace=workspace, session_mode=session_mode, gateway=gateway, config_dir=home,
-                  permission_mode=permission_mode)
+                  permission_mode=permission_mode, reasoning_effort=reasoning_effort)
 
 
-def codex_config(profile_id, model, gateway=None, workspace=None, branch_home=None, fingerprint=""):
+def codex_config(profile_id, model, gateway=None, workspace=None, branch_home=None, fingerprint="", reasoning_effort=None):
+    agent_reasoning.normalize(reasoning_effort)
     gateway = gateway or gateway_url()
     identity = [profile_id, model, gateway, str(workspace or "")]
     if fingerprint:
@@ -573,10 +579,11 @@ def codex_config(profile_id, model, gateway=None, workspace=None, branch_home=No
     home = branch_home or CODEX_HOME_ROOT / profile_id / scope_id
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(home, 0o700)
+    previous = (home / "config.toml").read_text() if (home / "config.toml").is_file() else ""
     config = (
         'model = ' + json.dumps(model, ensure_ascii=False) + '\n'
         'model_provider = "cchp_local"\n'
-        'model_reasoning_effort = "medium"\n'
+        + agent_reasoning.config_line(reasoning_effort, previous) +
         'sandbox_mode = "workspace-write"\n'
         'disable_response_storage = true\n\n'
         '[model_providers.cchp_local]\n'
@@ -615,9 +622,9 @@ def local_network_bypass(environment):
     return ",".join(dict.fromkeys(entries))
 
 
-def build_codex_command(model, workspace, session_mode, history_id=None, fork_history=True, permission_mode="restricted"):
+def build_codex_command(model, workspace, session_mode, history_id=None, fork_history=True, permission_mode="restricted", reasoning_effort=None):
     options = ["--model", model, "--cd", str(workspace), "--no-alt-screen", "--no-daemon",
-               *agent_permission_args("codex", permission_mode)]
+               *agent_permission_args("codex", permission_mode), *agent_reasoning.arguments("codex", reasoning_effort)]
     command = [str(CODEX), *options]
     if history_id:
         action = "fork" if fork_history else "resume"
@@ -706,7 +713,8 @@ def archive_history_from_stdin():
 
 
 def launch_history(history_ref, session_id, client, profile_id, model, workspace_value,
-                   gateway_value=None, include_global=False, *, original=False, force_fork=False, permission_mode="restricted"):
+                   gateway_value=None, include_global=False, *, original=False, force_fork=False, permission_mode="restricted", reasoning_effort=None):
+    agent_reasoning.normalize(reasoning_effort)
     session_history = history_module()
     codex_roots, claude_roots = history_roots()
     if include_global:
@@ -755,7 +763,7 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
     try:
         if client == "codex":
             if not same_config:
-                codex_config(profile_id, model, gateway, workspace, branch_home=home)
+                codex_config(profile_id, model, gateway, workspace, branch_home=home, reasoning_effort=reasoning_effort)
             environment = dict(os.environ)
             for name in ("OPENAI_API_KEY", "CODEX_SQLITE_HOME", "OPENAI_BASE_URL"):
                 environment.pop(name, None)
@@ -763,13 +771,13 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
             environment.update(CODEX_HOME=str(home), CCH_API_KEY=key,
                                NO_PROXY=bypass, no_proxy=bypass)
             command = build_codex_command(model, workspace, "resume", session_id, fork_history=not same_config,
-                                          permission_mode=permission_mode)
+                                          permission_mode=permission_mode, reasoning_effort=reasoning_effort)
             command += tool_args(home, "codex") or []
         else:
             if not (home / "settings.json").exists():
                 private_write(home / "settings.json", "{}\n")
             command, environment = build_launch(key, model, workspace=workspace, gateway=gateway,
-                                               config_dir=home, isolated_branch=True, permission_mode=permission_mode)
+                                               config_dir=home, isolated_branch=True, permission_mode=permission_mode, reasoning_effort=reasoning_effort)
             command += ["--resume", session_id]
             if not same_config:
                 command += ["--fork-session"]
@@ -786,7 +794,8 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
             seed.unlink(missing_ok=True)
 
 
-def launch_codex_profile(profile_id, model, workspace_value, session_mode, gateway_value=None, permission_mode="restricted"):
+def launch_codex_profile(profile_id, model, workspace_value, session_mode, gateway_value=None, permission_mode="restricted", reasoning_effort=None):
+    agent_reasoning.normalize(reasoning_effort)
     profile = next((item for item in load_profiles() if item["id"] == profile_id), None)
     if profile is None:
         raise RuntimeError("找不到所选调用 Key；请刷新列表。")
@@ -805,7 +814,7 @@ def launch_codex_profile(profile_id, model, workspace_value, session_mode, gatew
     if not CODEX.is_file():
         raise RuntimeError("未找到原有 Codex 可执行文件；没有修改原入口。")
     codex_home = codex_config(profile_id, model, gateway, workspace,
-                              fingerprint=history_module().key_fingerprint(key))
+                              fingerprint=history_module().key_fingerprint(key), reasoning_effort=reasoning_effort)
     remember_workspace(workspace)
     save_last_launch(profile, model, workspace, session_mode, "codex", MANAGER_LAST_LAUNCH)
     environment = dict(os.environ)
@@ -818,7 +827,7 @@ def launch_codex_profile(profile_id, model, workspace_value, session_mode, gatew
         "NO_PROXY": bypass,
         "no_proxy": bypass,
     })
-    command = build_codex_command(model, workspace, session_mode, permission_mode=permission_mode)
+    command = build_codex_command(model, workspace, session_mode, permission_mode=permission_mode, reasoning_effort=reasoning_effort)
     command += tool_args(codex_home, "codex") or []
     os.chdir(workspace)
     os.execve(CODEX, command, environment)
@@ -1060,7 +1069,8 @@ def setup_key():
 
 
 def build_launch(key, model, smoke=False, workspace=None, session_mode="new", gateway=None, config_dir=None,
-                 isolated_branch=False, permission_mode="restricted"):
+                 isolated_branch=False, permission_mode="restricted", reasoning_effort=None):
+    effort_args = agent_reasoning.arguments("claude", reasoning_effort)
     gateway = normalize_gateway(gateway) if gateway else gateway_url()
     environment = dict(os.environ)
     for name in list(environment):
@@ -1069,6 +1079,8 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new", ga
             "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "DEBUG",
         }:
             environment.pop(name, None)
+    environment.pop("MAX_THINKING_TOKENS", None)
+    environment.pop("CLAUDE_CODE_EFFORT_LEVEL", None)
     bypass = local_network_bypass(environment)
     environment.update({
         "CLAUDE_CONFIG_DIR": str(config_dir or CONFIG_DIR),
@@ -1085,13 +1097,12 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new", ga
         "DISABLE_AUTOUPDATER": "1",
         "NO_PROXY": bypass,
         "no_proxy": bypass,
-        "MAX_THINKING_TOKENS": "0",
     })
     settings = config_dir / "settings.json" if isolated_branch else SETTINGS
     mcp = '{"mcpServers":{}}' if isolated_branch else str(EMPTY_MCP)
     command = [str(CLAUDE), "--bare", "--setting-sources", "user", "--settings", str(settings),
                "--model", model,
-               "--append-system-prompt", "全程使用简体中文。"]
+               "--append-system-prompt", "全程使用简体中文。", *effort_args]
     command += (tool_args(config_dir or CONFIG_DIR, "claude") if not smoke else None) or ["--strict-mcp-config", "--mcp-config", mcp]
     if smoke:
         environment["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "256"
@@ -1109,7 +1120,7 @@ def build_launch(key, model, smoke=False, workspace=None, session_mode="new", ga
 
 
 def launch(model, smoke=False, selected_key=None, selected_name=None, workspace=None, session_mode="new", gateway=None,
-           config_dir=None, permission_mode="restricted"):
+           config_dir=None, permission_mode="restricted", reasoning_effort=None):
     if not CLAUDE.is_file():
         raise RuntimeError("未找到原有 Claude 可执行文件；没有修改原入口。")
     key = selected_key if selected_key is not None else read_key()
@@ -1119,7 +1130,7 @@ def launch(model, smoke=False, selected_key=None, selected_name=None, workspace=
     cwd = workspace or WORKSPACE
     command, environment = build_launch(key, model, smoke, cwd, session_mode, gateway,
                                         config_dir=config_dir, isolated_branch=config_dir is not None,
-                                        permission_mode=permission_mode)
+                                        permission_mode=permission_mode, reasoning_effort=reasoning_effort)
     if selected_name:
         print("本机调用 Key：" + selected_name, flush=True)
     print("网关：" + gateway + "；模型：" + model, flush=True)
@@ -1228,6 +1239,7 @@ def main():
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--fork-history", action="store_true")
     parser.add_argument("--permission-mode", choices=["restricted", "standard", "full", "dangerous"], default="restricted")
+    parser.add_argument("--reasoning-effort", choices=["default", *agent_reasoning.LEVELS])
     arguments = parser.parse_args()
     if arguments.action.startswith("tools-"):
         if arguments.client not in ("codex", "claude"):
@@ -1269,7 +1281,7 @@ def main():
         if not all((arguments.history_ref, arguments.session_id, arguments.client, arguments.workspace)):
             raise RuntimeError("恢复会话缺少历史来源或工作目录。")
         return launch_history(arguments.history_ref, arguments.session_id, arguments.client,
-                              None, None, arguments.workspace, original=True, permission_mode=arguments.permission_mode)
+                              None, None, arguments.workspace, original=True, permission_mode=arguments.permission_mode, reasoning_effort=arguments.reasoning_effort)
     if arguments.action in {"history-launch", "history-import-launch"}:
         if not all((arguments.history_ref, arguments.session_id, arguments.client,
                     arguments.profile_id, arguments.workspace)):
@@ -1278,7 +1290,7 @@ def main():
                               arguments.profile_id, arguments.model, arguments.workspace,
                               arguments.gateway_url,
                               include_global=arguments.action == "history-import-launch",
-                              force_fork=arguments.fork_history, permission_mode=arguments.permission_mode)
+                              force_fork=arguments.fork_history, permission_mode=arguments.permission_mode, reasoning_effort=arguments.reasoning_effort)
     if arguments.action == "profile-models":
         if not arguments.profile_id: raise RuntimeError("缺少 profile-id。")
         profile_models(arguments.profile_id, arguments.gateway_url); return 0
@@ -1294,12 +1306,12 @@ def main():
         if not arguments.profile_id or not arguments.workspace:
             raise RuntimeError("启动 Claude 时必须指定 profile-id 和工作目录。")
         return launch_profile(arguments.profile_id, arguments.model, arguments.workspace, arguments.session_mode, arguments.gateway_url,
-                              permission_mode=arguments.permission_mode)
+                              permission_mode=arguments.permission_mode, reasoning_effort=arguments.reasoning_effort)
     if arguments.action == "codex-launch":
         if not arguments.profile_id or not arguments.workspace:
             raise RuntimeError("启动 Codex 时必须指定 profile-id 和工作目录。")
         return launch_codex_profile(arguments.profile_id, arguments.model, arguments.workspace, arguments.session_mode, arguments.gateway_url,
-                                    permission_mode=arguments.permission_mode)
+                                    permission_mode=arguments.permission_mode, reasoning_effort=arguments.reasoning_effort)
     if arguments.action == "models": print("\n".join(fetch_models(read_key()))); return 0
     return launch(arguments.model, arguments.action == "smoke")
 

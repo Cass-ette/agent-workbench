@@ -385,7 +385,7 @@ fn operation(app: &tauri::AppHandle, request: Value) -> Result<Value, String> {
             .cloned()
             .collect();
         return Ok(
-            json!({"schema":1,"platform":"windows","capabilities":["sessions","launch","system-cli","history","history-archive","models","attachments"],
+            json!({"schema":1,"platform":"windows","capabilities":["sessions","launch","system-cli","history","history-archive","reasoning-effort","models","attachments"],
             "profiles":config.profiles,"workspace":config.workspace,"workspaces":[],"profile_id":config.selected_profile_id,
             "client":config.client,"model":config.model,"permissions":config.remote_permissions,"sessions":sessions}),
         );
@@ -499,6 +499,7 @@ fn operation(app: &tauri::AppHandle, request: Value) -> Result<Value, String> {
                         None
                     },
                     permission_mode,
+                    reasoning_effort: request.get("reasoning_effort").map(|value| value.as_str().map(str::to_owned).ok_or("思考强度无效")).transpose()?,
                 },
                 app.clone(),
                 state,

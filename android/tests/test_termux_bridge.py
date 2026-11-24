@@ -24,6 +24,25 @@ spec.loader.exec_module(B)
 
 
 class BridgeTests(unittest.TestCase):
+    def test_effort_override_preserves_home_and_model_and_drops_forced_thinking_env(self):
+        for client in ("codex", "claude"):
+            with self.subTest(client=client), tempfile.TemporaryDirectory() as home, \
+                    patch.dict(os.environ, {"MAX_THINKING_TOKENS":"0", "CLAUDE_CODE_EFFORT_LEVEL":"low"}), \
+                    patch.object(B.shutil, "which", side_effect=lambda name, **kw: "/usr/bin/" + name):
+                payload = dict(client=client, model="glm-5.3", key="dummy", gateway="https://gateway.test", reasoning_effort="high")
+                first_args, first_env, _ = B.launch_spec(payload, home)
+                next_args, next_env, _ = B.launch_spec({**payload, "reasoning_effort":"low"}, home)
+                home_var = "CODEX_HOME" if client == "codex" else "CLAUDE_CONFIG_DIR"
+                self.assertEqual(first_env[home_var], next_env[home_var])
+                launch = {"args": shlex.split(first_args[-1].split("; result=$?;", 1)[0]), "environment": first_env}
+                self.assertIn('model_reasoning_effort="high"' if client == "codex" else "--effort", launch["args"])
+                self.assertEqual(launch["args"][launch["args"].index("--model") + 1], "glm-5.3")
+                for name in ("MAX_THINKING_TOKENS", "CLAUDE_CODE_EFFORT_LEVEL"):
+                    self.assertNotIn(name, first_env)
+                    self.assertNotIn(name, launch["environment"])
+                with self.assertRaises(ValueError):
+                    B.launch_spec({**payload, "reasoning_effort":"high\n/model bad"}, home)
+
     def test_history_restore_resumes_matching_config_and_forks_changed_model(self):
         session_id = "01a1ec86-bf14-70f2-8144-874b179beb72"
         for client in ("codex", "claude"):

@@ -102,7 +102,7 @@ class UsageTests(unittest.TestCase):
     def test_bundled_usage_scan_does_not_modify_signed_resources(self):
         backend = Path(__file__).resolve().parents[1] / "backend"
         for name in ("claude-cchp-test.py", "usage_records.py", "gateway_billing.py", "model_pricing.py", "pricing_service.py",
-                     "pricing_reference.json", "deepseek_reference.json", "session_history.py"):
+                     "pricing_reference.json", "deepseek_reference.json", "session_history.py", "agent_reasoning.py"):
             shutil.copyfile(backend / name, self.root / name)
         # A normal interpreter, without -B, must leave the signed resource tree intact.
         result = subprocess.run([sys.executable, "-c", """

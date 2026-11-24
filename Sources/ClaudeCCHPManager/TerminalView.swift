@@ -142,6 +142,15 @@ final class EmbeddedTerminalControl: ObservableObject {
         terminalView?.terminate()
     }
 
+    func insertNativeCommand(_ command: String) -> Bool {
+        guard isSelected, let view = terminalView, view.isSelectedForInput,
+              !view.isHiddenOrHasHiddenAncestor, !command.contains("\n"), !command.contains("\r") else { return false }
+        view.onLocalInput?()
+        view.window?.makeFirstResponder(view)
+        view.pasteText(command)
+        return true
+    }
+
     func remoteInput(_ bytes: Data, client: String, inputID: String) throws {
         guard let terminalView else { throw RemoteWorkbenchError.invalid("终端正在准备，请稍后重试") }
         if try replay.requireControl(client, inputID: inputID) {
@@ -334,6 +343,11 @@ struct TerminalPanel: View {
             .clipped()
             .background(.bar)
             .overlay(alignment: .bottom) { Divider() }
+
+            if let session = model.selectedTerminal {
+                HStack { Spacer(); CurrentSessionReasoning(model: model, session: session).id(session.id) }
+                    .padding(.horizontal, 14).padding(.vertical, 5).background(.bar)
+            }
 
             ZStack {
                 if isEmpty {

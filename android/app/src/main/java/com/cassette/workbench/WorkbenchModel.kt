@@ -263,6 +263,17 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         val body = JSONObject().put("op", "launch").put("client", source?.client ?: remoteClient)
             .put("workspace", source?.workspace ?: remoteWorkspace).put("scope", remoteScope)
             .put("model", remoteModel).put("profile_id", remoteProfile).put("history_action", action)
+        if (remoteScope == "workbench" && remoteWorkbench?.capabilities?.contains("reasoning-effort") == true) {
+            // Original history uses its own configuration. A recent-history lookup
+            // is resolved on the computer, so never apply an unrelated UI selection.
+            val effort = when {
+                action == "recent" -> null
+                action == "original" && source != null -> reasoningPreferences[ReasoningEffort.key(
+                    source.client, "ssh:$target:${source.profileId}", source.configuredModel)]
+                else -> remoteStartupReasoningEffort
+            }
+            if (effort != null) body.put("reasoning_effort", effort)
+        }
         if (source != null) body.put("history_ref", source.reference)
         busy = true; error = ""
         worker.execute {
@@ -429,6 +440,27 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         notice = "已保存权限设置；之后新建、恢复和分支的本地会话使用此设置"
     }
     var history by mutableStateOf(emptyList<LocalConversation>()); private set
+    private var reasoningPreferences by mutableStateOf(store.loadReasoningPreferences())
+    private fun reasoningFor(client: String, profile: String, model: String) = reasoningPreferences[ReasoningEffort.key(client, profile, model)] ?: "default"
+    val startupReasoningEffort get() = reasoningFor(options.client, options.profileId, options.model)
+    val remoteStartupReasoningEffort get() = reasoningFor(remoteClient, "ssh:${sshTarget?.id}:$remoteProfile", remoteModel)
+    fun setStartupReasoningEffort(value: String) = saveReasoning(options.client, options.profileId, options.model, value)
+    fun setRemoteStartupReasoningEffort(value: String) = saveReasoning(remoteClient, "ssh:${sshTarget?.id}:$remoteProfile", remoteModel, value)
+    private fun saveReasoning(client: String, profile: String, model: String, value: String) {
+        if(value !in ReasoningEffort.levels) return
+        val next = reasoningPreferences + (ReasoningEffort.key(client, profile, model) to value)
+        runCatching { store.saveReasoningPreferences(next) }.onSuccess { reasoningPreferences = next }.onFailure { error = "无法保存思考强度设置" }
+    }
+    fun insertReasoningCommand(id: String, value: String): Boolean {
+        val session = sessions.firstOrNull { it.id == id } ?: return false
+        val command = ReasoningEffort.command(session.client, value)
+        if(selectedSession != id || !session.canWrite || session.exitCode != null || command == null) {
+            error = "目标终端已切换、结束或没有输入控制权"; return false
+        }
+        send(id, "\u001b[200~$command\u001b[201~")
+        notice = "已填入 $command；确认输入框内容后按回车，生效情况由 CLI 确认"
+        return true
+    }
     var historyLoading by mutableStateOf(false); private set
     var historyError by mutableStateOf(""); private set
     var historyArchiving by mutableStateOf(""); private set
@@ -986,6 +1018,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                     .put("host_key", remote.hostKey).put("remember", remote.remember))
                 else if (!shell && selected != null) body.put("profile_id", selected.id).put("model", snapshot.model)
                     .put("gateway", selected.gateway).put("key", store.secret(selected.id))
+                    .put("reasoning_effort", reasoningFor(client, selected.id, snapshot.model))
                 val result = termux.request("/sessions", "POST", body, if (source != null) 15000 else 4000)
                 val title = if (remote != null) "SSH · ${remote.name}" else when (client) {
                     "debian-shell" -> "Debian Shell"

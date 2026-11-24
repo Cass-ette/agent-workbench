@@ -61,6 +61,31 @@ async function openApp() {
 }
 
 describe("工作会话配置", () => {
+  it("启动强度按模型保存，当前会话命令保持客户端并且不会自动发送", async () => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if(command === "start_terminal") return { id: "effort-session", title: "Claude", workspace: "C:\\test-project" };
+      return normalInvoke(command, args);
+    });
+    await openApp();
+    fireEvent.change(screen.getByRole("slider", { name: /启动默认思考强度/ }), { target: { value: "3" } });
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+    await screen.findByRole("tab");
+    expect(invoke.mock.calls.find(([command]) => command === "start_terminal")?.[1].request)
+      .toMatchObject({ reasoning_effort: "high", model: models[0], client: "claude" });
+    fireEvent.click(screen.getByRole("button", { name: "Codex", exact: true }));
+    expect((screen.getByRole("slider", { name: /启动默认思考强度/ }) as HTMLInputElement).value).toBe("0");
+    fireEvent.click(screen.getByRole("button", { name: "思考强度", exact: true }));
+    fireEvent.change(screen.getByRole("slider", { name: /选择思考强度/ }), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: "填入当前终端" }));
+    expect(terminalPaste).toHaveBeenCalledExactlyOnceWith("/effort max");
+    expect(invoke.mock.calls.filter(([command]) => command === "start_terminal")).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([command]) => command === "write_terminal")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code", exact: true }));
+    expect((screen.getByRole("slider", { name: /启动默认思考强度/ }) as HTMLInputElement).value).toBe("3");
+  });
+
   it("首次设置可以取消，局部启动仍需明确选择权限", async () => {
     window.localStorage.removeItem(permissionStorageKey);
     await openApp();

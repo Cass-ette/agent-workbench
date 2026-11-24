@@ -260,3 +260,6 @@ button { color: inherit; }
 .history-directory > summary svg { vertical-align: middle; margin-right: 4px; }
 .history-directory > summary strong { white-space: normal; }
 .history-directory-children { margin-left: 14px; border-left: 1px solid #dfe3e6; }
+
+.manual-model { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.manual-model input { flex: 1; min-width: 0; padding: 7px; }

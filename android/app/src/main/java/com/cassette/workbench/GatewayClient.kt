@@ -4,6 +4,9 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
+class GatewayHttpException(val status: Int, message: String) : IllegalStateException(message)
+class ModelCatalogUnavailable : IllegalStateException("网关未提供模型列表接口；Key 尚未验证，请手动填写模型 ID")
+
 object GatewayClient {
     fun json(url: String, key: String, method: String = "GET", body: JSONObject? = null, timeout: Int = 12000, bridge: Boolean = false): JSONObject {
         val destination = URL(url)
@@ -36,7 +39,7 @@ object GatewayClient {
                         JSONObject(String(input.readBytesBounded(4096), Charsets.UTF_8)).optString("error").take(180)
                     }
                 }.getOrNull()?.takeIf(String::isNotBlank) else null
-                error(localConflict ?: when (status) {
+                throw GatewayHttpException(status, localConflict ?: when (status) {
                     401, 403 -> "凭据被拒绝（HTTP $status）"
                     404 -> "接口不存在（HTTP 404）"
                     in 300..399 -> "服务要求重定向，已阻止转发调用 Key"
@@ -49,11 +52,18 @@ object GatewayClient {
     }
 
     fun models(gateway: String, key: String): List<String> {
-        val data = json("$gateway/v1/models?limit=1000", key)
-        val rows = data.optJSONArray("data") ?: data.optJSONArray("models") ?: error("网关没有返回模型列表")
-        return (0 until rows.length()).mapNotNull { index ->
-            rows.optJSONObject(index)?.optString("id")?.takeIf(String::isNotBlank)
-        }.distinct().sorted()
+        for (url in GatewayPolicy.modelUrls(gateway)) {
+            val data = try { json("$url?limit=1000", key) } catch (cause: GatewayHttpException) {
+                if (cause.status in setOf(404, 405, 501)) continue
+                throw cause
+            }
+            val rows = data.optJSONArray("data") ?: data.optJSONArray("models") ?: error("网关没有返回有效模型列表；可取消读取列表后保存")
+            return (0 until rows.length()).mapNotNull { index ->
+                val row = rows.optJSONObject(index)
+                row?.optString("id")?.takeIf(String::isNotBlank) ?: row?.optString("name")?.takeIf(String::isNotBlank)
+            }.distinct().sorted()
+        }
+        throw ModelCatalogUnavailable()
     }
 }
 

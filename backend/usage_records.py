@@ -56,6 +56,7 @@ def _paths(root):
 
 def _context(path, root, client):
     """Only return routing metadata, never config text or credentials."""
+    from session_history import gateway_from_api_base
     if client != "codex":
         return {}
     parts = path.relative_to(root).parts
@@ -70,7 +71,8 @@ def _context(path, root, client):
                 for key, target in (("base_url", "gateway"), ("model", "model")):
                     match = re.search(r'^' + key + r'\s*=\s*("[^"\n]*")', text, re.M)
                     if match:
-                        result[target] = json.loads(match[1]).removesuffix("/v1").rstrip("/")
+                        value = json.loads(match[1])
+                        result[target] = gateway_from_api_base(value) if target == "gateway" else value
             except (OSError, ValueError):
                 result.update({})
             break

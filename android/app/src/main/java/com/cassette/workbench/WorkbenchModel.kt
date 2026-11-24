@@ -665,9 +665,11 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         busy = true; error = ""
         worker.execute {
             try {
-                require(name.isNotBlank() && name.length <= 80 && key.isNotBlank() && !key.contains('\n')) { "请填写名称和完整调用 Key" }
+                require(name.isNotBlank() && name.length <= 80 && key.isNotBlank() && key.length <= 4096 && key.trim().none { it.isWhitespace() || it.isISOControl() }) { "请填写名称和完整调用 Key" }
                 val gateway = GatewayPolicy.normalize(address, allowInsecureLan)
-                val models = if (validate) GatewayClient.models(gateway, key.trim()) else emptyList()
+                var catalogNotice = if (validate) "" else "已跳过模型列表读取；Key 和模型尚未验证，请手动填写模型 ID"
+                val models = if (validate) try { GatewayClient.models(gateway, key.trim()) }
+                    catch (cause: ModelCatalogUnavailable) { catalogNotice = cause.message.orEmpty(); emptyList() } else emptyList()
                 val created = KeyProfile(name = name.trim(), gateway = gateway, models = models, allowInsecureLan = allowInsecureLan)
                 store.saveSecret(created.id, key.trim())
                 main.post {
@@ -675,7 +677,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                         val next = profiles + created
                         store.saveProfiles(next); profiles = next
                         updateOptions(options.copy(profileId = created.id, model = models.firstOrNull().orEmpty()))
-                        notice = if (validate) "配置已保存，读取到 ${models.size} 个模型" else "配置已保存，等待连接网关"
+                        notice = "配置已保存；" + (catalogNotice.ifBlank { if (models.isEmpty()) "模型列表为空，请手动填写模型 ID" else "读取到 ${models.size} 个模型" })
                         done()
                     } catch (_: Exception) { store.removeSecret(created.id); error = "配置写入失败，未添加调用配置" }
                     busy = false
@@ -716,7 +718,9 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                     notice = if (models.isEmpty()) "网关未返回模型；已保留手动填写的模型" else "已刷新 ${models.size} 个模型"
                     loadingModels = false
                 }
-            } catch (cause: Exception) { main.post { loadingModels = false; error = safeError(cause) + "；保留已缓存列表" } }
+            } catch (cause: ModelCatalogUnavailable) { main.post {
+                loadingModels = false; notice = cause.message.orEmpty() + "；保留已缓存列表和模型选择"
+            } } catch (cause: Exception) { main.post { loadingModels = false; error = safeError(cause) + "；保留已缓存列表" } }
         }
     }
 

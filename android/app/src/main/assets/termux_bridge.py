@@ -375,7 +375,7 @@ def launch_spec(payload, home=None, bundle=None):
         raise ValueError("调用 Key 无效")
     gateway = str(payload.get("gateway") or "").rstrip("/")
     uri = urlsplit(gateway)
-    if uri.scheme not in ("http", "https") or not uri.hostname or "@" in uri.netloc or uri.query or uri.fragment or uri.path:
+    if uri.scheme not in ("http", "https") or not uri.hostname or "@" in uri.netloc or uri.query or uri.fragment:
         raise ValueError("网关地址无效")
     environment = payload.get("environment", "debian")
     if environment not in ("debian", "vm"):
@@ -439,7 +439,7 @@ def launch_spec(payload, home=None, bundle=None):
     env.update(NO_PROXY=bypass, no_proxy=bypass)
     if client == "codex":
         if not same_config or not (config / "config.toml").is_file():
-            private_write(config / "config.toml", "model = " + json.dumps(model) + '\nmodel_provider = "workbench_gateway"\nsandbox_mode = "workspace-write"\n\n[model_providers.workbench_gateway]\nname = "Workbench gateway"\nwire_api = "responses"\nenv_key = "WORKBENCH_GATEWAY_KEY"\nbase_url = ' + json.dumps(gateway + "/v1") + "\n")
+            private_write(config / "config.toml", "model = " + json.dumps(model) + '\nmodel_provider = "workbench_gateway"\nsandbox_mode = "workspace-write"\n\n[model_providers.workbench_gateway]\nname = "Workbench gateway"\nwire_api = "responses"\nenv_key = "WORKBENCH_GATEWAY_KEY"\nbase_url = ' + json.dumps(gateway if uri.path else gateway + "/v1") + "\n")
         env["WORKBENCH_GATEWAY_KEY"] = key
         env["CODEX_HOME"] = str(config)
         args = command
@@ -459,7 +459,7 @@ def launch_spec(payload, home=None, bundle=None):
             private_write(config / "settings.json", "{}\n")
         # Claude Code sends ANTHROPIC_API_KEY as x-api-key. This also works
         # with Anthropic Messages-compatible CCHP/AutoBits gateways.
-        env.update(CLAUDE_CONFIG_DIR=str(config), ANTHROPIC_BASE_URL=gateway, ANTHROPIC_API_KEY=key,
+        env.update(CLAUDE_CONFIG_DIR=str(config), ANTHROPIC_BASE_URL=gateway[:-3] if gateway.endswith("/v1") else gateway, ANTHROPIC_API_KEY=key,
                    ANTHROPIC_MODEL=model, ANTHROPIC_DEFAULT_OPUS_MODEL=model,
                    ANTHROPIC_DEFAULT_SONNET_MODEL=model, ANTHROPIC_DEFAULT_HAIKU_MODEL=model,
                    ANTHROPIC_SMALL_FAST_MODEL=model, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",

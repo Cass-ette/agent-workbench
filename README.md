@@ -4,7 +4,7 @@
 
 Mac / Windows 终端支持粘贴微信等截图工具复制的图片，保存为工作台私有 PNG 后交给当前对话，不自动提交。Mac 使用 ⌘V / Ctrl+V，Windows 使用 Ctrl+V；需要支持图片的模型和网关。详见[截图粘贴](docs/tool-bridge.zh-CN.md#微信等截图工具粘贴)。
 
-Mac 模型列表读取失败时，会保留同一调用配置和网关上次的模型选择；点模型旁的刷新按钮可重试，点模型选择可查看具体错误。首次读取失败且没有历史选择时，请检查该网关，或选择其他可用的调用配置。已有终端继续使用启动时的配置。
+Mac 模型列表读取失败时，会保留同一调用配置和网关上次的模型选择；点模型旁的刷新按钮可重试，点模型选择可查看具体错误。没有模型目录时可手动填写模型 ID；鉴权、网络等读取错误会明确显示，也可在添加时取消「保存时读取模型列表」，以未验证状态保存。已有终端继续使用启动时的配置。
 
 Android 可通过 SSH 接续新版 Mac / Windows 工作台内的同一终端，使用电脑项目、配置和历史，或从手机传入文件/图片。电脑端在「手机连接」中启用；手机断开不结束电脑任务。工具与权限设置面板暂留在电脑端，实机验收边界见[手机接续电脑工作台](docs/remote-workbench.zh-CN.md)。
 
@@ -20,7 +20,7 @@ Android 可通过 SSH 接续新版 Mac / Windows 工作台内的同一终端，�
 
 支持应用内更新的版本可以在 macOS 左侧栏、Windows 窗口右上角或 Android 顶栏打开常驻的「检查更新」入口，发现新版时显示版本号。macOS 应用菜单也保留同一入口。查看更新说明后可以下载，等任务完成再安装。原地升级保留工作台配置、Key 和对话历史。也可以从发布页手动下载。发布流程见[三端更新与发布](docs/updates.zh-CN.md)。
 
-**不用 CCHP 也能用。** 可以直连兼容的模型 API 或第三方网关，填写该服务的地址和它签发的调用 Key。工作台通过 `/v1/models` 读取列表；Claude Code 需要 Anthropic Messages（`/v1/messages`），Codex 需要 OpenAI Responses（`/v1/responses`）。只提供 Chat Completions 的接口不能直接驱动这两个客户端。CCHP 专属的余额和账单功能需要网关提供对应接口；不影响普通模型调用。
+**不用 CCHP 也能用。** 可以直连兼容的模型 API 或第三方网关，填写该服务的地址和它签发的调用 Key。支持自定义 API 前缀（例如 `/proxy/v1`、`/api/paas/v4`），不会重复拼接 `/v1`。裸域名仍默认使用 `/v1`；仅根路径 `/v1` 维持旧版的地址规范化，避免改变历史配置身份。模型列表可选：依次尝试 API 前缀下的 `/models`，未提供时再尝试 `/v1/models`；404/405/501 会提示手动填写 ID，401/403、网络和重定向错误仍显示。添加配置可取消读取列表，此时 Key 与模型尚未验证。启动不依赖模型目录或名单；实际鉴权、模型可用性和协议由 CLI 请求确认。Claude Code 需要 Anthropic Messages（`/v1/messages`），Codex 需要 OpenAI Responses（`/v1/responses`）。只提供 Chat Completions 的接口不能直接驱动这两个客户端。CCHP 专属的余额和账单功能需要网关提供对应接口；不影响普通模型调用。
 
 - [Windows 中文快速上手与排错](windows/QUICKSTART.zh-CN.md)
 - [Windows 源码、开发与构建说明](windows/README.md)
@@ -72,7 +72,7 @@ Launching Claude may incur local CCHP balance and upstream charges. Resuming a s
 
 To enable billing details, click the status-bar balance, expand “账户级账单连接（高级，可选）”, choose “连接只读账户账单…”, and enter the CCHP **control-plane** URL (for the default local deployment, port 8080) and a read-only `cch_auth_live_…` management token. Port 8081 is the inference gateway. This connection makes GET requests only, stores its credential in a private mode-600 file under the local client config, and refuses HTTP redirects. A connection is bound to its original profile and gateway; changing the gateway disables that saved connection. “断开并删除本机凭据” removes the saved credential and its previous-version backup. No management token or billing record is included in the application bundle.
 
-Claude requires an Anthropic Messages-compatible gateway. Codex requires an OpenAI Responses-compatible gateway. The manager checks model IDs through `/v1/models`, but most gateways do not publish reliable tool-use or image capability metadata; model-list filters based on names are candidates only. Mark models you have verified as favorites for each key and client. Codex gets a `CODEX_HOME` isolated by profile, model, gateway, and workspace, and passes its key only to the child process. Its history is separate from the regular Codex desktop/TUI history.
+Claude requires an Anthropic Messages-compatible gateway. Codex requires an OpenAI Responses-compatible gateway. The manager accepts custom API base paths and optional model catalogs; a model ID can also be entered manually. Catalog availability does not prove protocol compatibility. Most gateways do not publish reliable tool-use or image capability metadata; model-list filters based on names are candidates only. Mark models you have verified as favorites for each key and client. Codex gets a `CODEX_HOME` isolated by profile, model, gateway, and workspace, and passes its key only to the child process. Its history is separate from the regular Codex desktop/TUI history.
 
 ## Build
 

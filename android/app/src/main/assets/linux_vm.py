@@ -61,7 +61,8 @@ AGENT_PACKAGES = {
     "claude": "@anthropic-ai/claude-code@2.1.326",
 }
 
-AGENT_RUNNER = r'''import json
+AGENT_RUNNER = r'''from urllib.parse import urlsplit
+import json
 import os
 from pathlib import Path
 import shutil
@@ -111,7 +112,7 @@ if client == "codex":
         'sandbox_mode = "workspace-write"\n\n[model_providers.workbench_gateway]\n'
         'name = "Workbench gateway"\nwire_api = "responses"\n'
         'env_key = "WORKBENCH_GATEWAY_KEY"\nbase_url = '
-        + json.dumps(gateway + "/v1") + "\n")
+        + json.dumps(gateway if urlsplit(gateway).path else gateway + "/v1") + "\n")
     (config / "config.toml").chmod(0o600)
     env["CODEX_HOME"] = str(config)
     env["WORKBENCH_GATEWAY_KEY"] = key
@@ -138,7 +139,7 @@ else:
     if not settings.exists():
         settings.write_text("{}\n")
     settings.chmod(0o600)
-    env.update(CLAUDE_CONFIG_DIR=str(config), ANTHROPIC_BASE_URL=gateway,
+    env.update(CLAUDE_CONFIG_DIR=str(config), ANTHROPIC_BASE_URL=gateway[:-3] if gateway.endswith("/v1") else gateway,
                ANTHROPIC_API_KEY=key, ANTHROPIC_MODEL=model,
                ANTHROPIC_DEFAULT_OPUS_MODEL=model,
                ANTHROPIC_DEFAULT_SONNET_MODEL=model,

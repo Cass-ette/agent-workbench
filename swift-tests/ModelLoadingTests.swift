@@ -96,6 +96,26 @@ final class ModelLoadingTests: XCTestCase {
     }
 
     @MainActor
+    func testManualModelSurvivesCatalogRefreshAndMissingCatalogAllowsLaunch() async {
+        let name = "ModelLoadingTests." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let notice = "网关未提供模型列表接口；Key 尚未验证，请手动填写模型 ID。"
+        let decoded = try! JSONDecoder().decode(ModelResponse.self, from: Data("{\"models\":[],\"catalog_notice\":\"\(notice)\"}".utf8))
+        XCTAssertEqual(decoded.catalog_notice, notice)
+        let replies = ModelReplies([.success(decoded), .success(ModelResponse(models: ["listed-model"], gateway: nil))])
+        let model = configured(defaults) { _ in try await replies.next() }
+        await model.loadModels(for: "a")
+        XCTAssertEqual(model.modelLoadError, notice)
+        model.selectedModel = "manual-model"
+        XCTAssertTrue(model.canLaunch)
+        await model.loadModels(for: "a")
+        XCTAssertEqual(model.selectedModel, "manual-model")
+        XCTAssertEqual(model.models, ["listed-model"])
+        XCTAssertTrue(model.canLaunch)
+    }
+
+    @MainActor
     func testEarlierRequestCannotOverwriteNewerRefreshForSameProfile() async {
         let name = "ModelLoadingTests." + UUID().uuidString
         let defaults = UserDefaults(suiteName: name)!

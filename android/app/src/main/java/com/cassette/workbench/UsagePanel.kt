@@ -95,6 +95,7 @@ private fun usageMoney(cost: Double?): String = if (cost == null) "未提供" el
     var group by remember { mutableStateOf("date") }
     var range by remember { mutableStateOf("all") }
     var money by remember { mutableStateOf(false) }
+    var tokenSeries by remember { mutableStateOf("both") }
     val today = LocalDate.now(ZoneOffset.UTC)
     var start by remember { mutableStateOf(today.minusDays(29).toString()) }
     var end by remember { mutableStateOf(today.toString()) }
@@ -140,23 +141,39 @@ private fun usageMoney(cost: Double?): String = if (cost == null) "未提供" el
             Text("缓存读 " + total { it.cached } + " / 写 " + total { it.created } + " · 推理 " + total { it.reasoning }, style = MaterialTheme.typography.bodySmall)
             Text(if(costs.isEmpty()) "费用未提供" else (if(missing > 0) "已提供部分费用 " else "上游费用／按上游单价计算 ") + usageMoney(costs.sum()))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { FilterChip(!showMoney, { money = false }, label = { Text("Token") }); if(costs.isNotEmpty()) FilterChip(showMoney, { money = true }, label = { Text("费用 USD") }) }
+            if(!showMoney) {
+                UsageFilter("Token 系列", tokenSeries, listOf("both" to "输入与输出", "input" to "仅看输入", "output" to "仅看输出")) { tokenSeries = it }
+                Text(if(tokenSeries == "both") "输入蓝／输出橙，分行同刻度；量级相差较大时可仅看输出。" else "单独按所选系列缩放；上方用量汇总不变。", style = MaterialTheme.typography.labelSmall)
+            }
             val dated = points.filter { it.date.isNotBlank() }
-            val max = dated.maxOfOrNull { if(showMoney) it.cost ?: 0.0 else ((it.input ?: 0) + (it.output ?: 0)).toDouble() }?.coerceAtLeast(1e-12) ?: 1.0
+            val max = dated.maxOfOrNull { if(showMoney) it.cost ?: 0.0 else maxOf(if(tokenSeries == "output") 0L else it.input ?: 0L, if(tokenSeries == "input") 0L else it.output ?: 0L).toDouble() }?.coerceAtLeast(1e-12) ?: 1.0
             if(dated.isEmpty()) Text("所选范围没有可按日期绘制的记录", style = MaterialTheme.typography.bodySmall)
-            Text(if(showMoney) "费用 USD · 柱长从零起算" else "输入蓝／输出橙 · Token 柱长从零起算", style = MaterialTheme.typography.labelSmall)
+            Text(if(showMoney) "费用 USD · 柱长从零起算" else "Token 柱长从零起算", style = MaterialTheme.typography.labelSmall)
             dated.forEach { point ->
-                val value = if(showMoney) point.cost ?: 0.0 else ((point.input ?: 0) + (point.output ?: 0)).toDouble()
-                Text((if(group == "profile") allRows.find { it.profileId == point.date }?.profileName.orEmpty().ifBlank { point.date } else point.date) + (if(group == "date") " UTC · " else " · ") + if(showMoney) usageMoney(point.cost) else String.format(Locale.US, "%,d Token", value.toLong()), style = MaterialTheme.typography.labelSmall)
+                fun tokenCount(value: Long?) = value?.let { String.format(Locale.US, "%,d", it) } ?: "未提供"
+                val label = if(showMoney) usageMoney(point.cost) else when(tokenSeries) {
+                    "input" -> "输入 " + tokenCount(point.input)
+                    "output" -> "输出 " + tokenCount(point.output)
+                    else -> "输入 " + tokenCount(point.input) + " · 输出 " + tokenCount(point.output)
+                }
+                Text((if(group == "profile") allRows.find { it.profileId == point.date }?.profileName.orEmpty().ifBlank { point.date } else point.date) + (if(group == "date") " UTC · " else " · ") + label, style = MaterialTheme.typography.labelSmall)
                 val inputColor = androidx.compose.ui.graphics.Color(0xFF668DF0)
                 val outputColor = androidx.compose.ui.graphics.Color(0xFFD79045)
-                Canvas(Modifier.fillMaxWidth().height(16.dp)) {
-                    val width = size.width * (value/max).toFloat().coerceIn(0f,1f)
-                    drawLine(inputColor.copy(alpha = .3f), Offset(0f,size.height), Offset(size.width,size.height))
-                    if(showMoney) drawRect(outputColor, size = Size(width,size.height))
+                Canvas(Modifier.fillMaxWidth().height(if(!showMoney && tokenSeries == "both") 28.dp else 12.dp)) {
+                    val barHeight = if(!showMoney && tokenSeries == "both") (size.height - 4.dp.toPx()) / 2 else size.height
+                    if(showMoney) {
+                        drawRect(outputColor, size = Size(size.width * ((point.cost ?: 0.0)/max).toFloat().coerceIn(0f,1f),barHeight))
+                    }
                     else {
-                        val incoming = size.width * ((point.input ?: 0)/max).toFloat().coerceIn(0f,1f)
-                        drawRect(inputColor, size = Size(incoming,size.height))
-                        drawRect(outputColor, topLeft = Offset(incoming,0f), size = Size((width-incoming).coerceAtLeast(0f),size.height))
+                        if(tokenSeries != "output") {
+                            drawLine(inputColor.copy(alpha = .3f), Offset(0f,barHeight), Offset(size.width,barHeight))
+                            drawRect(inputColor, size = Size(size.width * ((point.input ?: 0)/max).toFloat().coerceIn(0f,1f),barHeight))
+                        }
+                        if(tokenSeries != "input") {
+                            val top = if(tokenSeries == "both") barHeight + 4.dp.toPx() else 0f
+                            drawLine(outputColor.copy(alpha = .3f), Offset(0f,top + barHeight), Offset(size.width,top + barHeight))
+                            drawRect(outputColor, topLeft = Offset(0f,top), size = Size(size.width * ((point.output ?: 0)/max).toFloat().coerceIn(0f,1f),barHeight))
+                        }
                     }
                 }
             }

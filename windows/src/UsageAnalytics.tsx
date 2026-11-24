@@ -74,6 +74,7 @@ export function UsageAnalytics({ sessions }: { sessions: Session[] }) {
   const [group, setGroup] = useState("date");
   const [range, setRange] = useState("all");
   const [money, setMoney] = useState(false);
+  const [series, setSeries] = useState("both");
   const today = new Date().toISOString().slice(0, 10);
   const [start, setStart] = useState(new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10));
   const [end, setEnd] = useState(today);
@@ -94,7 +95,7 @@ export function UsageAnalytics({ sessions }: { sessions: Session[] }) {
   };
   const count = (key: keyof UsagePoint) => sum(key)?.toLocaleString() ?? "—";
   const dated = points.filter((p) => p.date);
-  const value = (p: UsagePoint) => showMoney ? p.estimated_cost ?? 0 : (p.input_tokens ?? 0) + (p.output_tokens ?? 0);
+  const value = (p: UsagePoint) => showMoney ? p.estimated_cost ?? 0 : Math.max(series === "output" ? 0 : p.input_tokens ?? 0, series === "input" ? 0 : p.output_tokens ?? 0);
   const max = Math.max(...dated.map(value), 1e-12);
   const missing = sum("unpriced_records") ?? 0;
   const unknown = group === "date" ? points.find((p) => !p.date) : undefined;
@@ -115,15 +116,19 @@ export function UsageAnalytics({ sessions }: { sessions: Session[] }) {
     <dl className="usage-totals"><div><dt>输入（含缓存）</dt><dd>{count("input_tokens")}</dd></div><div><dt>输出</dt><dd>{count("output_tokens")}</dd></div><div><dt>缓存读取</dt><dd>{count("cached_input_tokens")}</dd></div><div><dt>缓存写入</dt><dd>{count("cache_creation_input_tokens")}</dd></div><div><dt>推理输出</dt><dd>{count("reasoning_output_tokens")}</dd></div></dl>
     <p className="usage-cost">{sum("estimated_cost") == null ? "费用未提供" : (missing ? "已提供部分费用 " : "上游费用／按上游单价计算 ") + usd(sum("estimated_cost"))}</p>
     <div className="usage-tabs"><button className="secondary-button" aria-pressed={!showMoney} onClick={() => setMoney(false)}>Token</button>{points.some((p) => p.estimated_cost != null) && <button className="secondary-button" aria-pressed={showMoney} onClick={() => setMoney(true)}>费用 USD</button>}</div>
-    <div className="usage-chart" role="img" aria-label={(group === "date" ? "每日" : "分组") + (showMoney ? "费用柱状图" : "输入输出Token柱状图")}>
+    {!showMoney && <><div className="usage-filters"><label>Token 系列<select aria-label="图表系列" value={series} onChange={(e) => setSeries(e.target.value)}><option value="both">输入与输出</option><option value="input">仅看输入</option><option value="output">仅看输出</option></select></label></div><p className="usage-note">{series === "both" ? "输入蓝／输出橙，并列同刻度；量级相差较大时可仅看输出。" : "单独按所选系列缩放；上方用量汇总不变。"}</p></>}
+    <div className="usage-chart" role="img" aria-label={(group === "date" ? "每日" : "分组") + (showMoney ? "费用柱状图" : (series === "input" ? "输入" : series === "output" ? "输出" : "输入输出") + "Token柱状图")}>
       <svg width={Math.max(510, dated.length * (group === "date" ? 42 : 95))} height="205" viewBox={"0 0 " + Math.max(510, dated.length * (group === "date" ? 42 : 95)) + " 205"}>
-        <text x="0" y="12" fill="currentColor" fontSize="10">{showMoney ? "最高 " + usd(max) : "最高 " + Math.ceil(max).toLocaleString() + " Token · 输入蓝／输出橙"}</text>
+        <text x="0" y="12" fill="currentColor" fontSize="10">{showMoney ? "最高 " + usd(max) : "最高 " + Math.ceil(max).toLocaleString() + " Token"}</text>
         <line x1="0" y1="160" x2={Math.max(510, dated.length * (group === "date" ? 42 : 95))} y2="160" stroke="currentColor" opacity=".3" />
         {dated.map((p, i) => {
           const x = i * (group === "date" ? 42 : 95) + 8, h = 140 * value(p) / max;
-          const input = showMoney ? h : 140 * (p.input_tokens ?? 0) / max;
+          const input = 140 * (p.input_tokens ?? 0) / max, output = 140 * (p.output_tokens ?? 0) / max;
           return <g key={p.date}><title>{p.date} {group === "date" ? "UTC" : ""} · 输入 {p.input_tokens ?? "未知"} · 输出 {p.output_tokens ?? "未知"} · {usd(p.estimated_cost ?? null)}{p.unpriced_records ? " · " + p.unpriced_records + "条缺价" : ""}</title>
-            {showMoney ? p.estimated_cost == null ? <text x={x} y="153" fontSize="11" fill="currentColor">未提供</text> : <rect x={x} y={160 - h} width="26" height={h} fill="#d79045" /> : <><rect x={x} y={160 - input} width="26" height={input} fill="#668df0" /><rect x={x} y={160 - h} width="26" height={h - input} fill="#d79045" /></>}
+            {showMoney ? p.estimated_cost == null ? <text x={x} y="153" fontSize="11" fill="currentColor">未提供</text> : <rect x={x} y={160 - h} width="26" height={h} fill="#d79045" /> : <>
+              {series !== "output" && p.input_tokens != null && <rect aria-label={p.date + " 输入 " + p.input_tokens} x={x} y={160 - input} width={series === "both" ? 11 : 26} height={input} fill="#668df0" />}
+              {series !== "input" && p.output_tokens != null && <rect aria-label={p.date + " 输出 " + p.output_tokens} x={x + (series === "both" ? 15 : 0)} y={160 - output} width={series === "both" ? 11 : 26} height={output} fill="#d79045" />}
+            </>}
             <text transform={"translate(" + (x + 6) + " 176) rotate(35)"} fontSize="9" fill="currentColor">{(group === "profile" ? profiles.find(([id]) => id === p.date)?.[1] || p.date : p.date).slice(-14)}</text>
           </g>;
         })}

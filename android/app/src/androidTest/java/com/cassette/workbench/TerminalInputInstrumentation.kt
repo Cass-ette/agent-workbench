@@ -56,6 +56,10 @@ class TerminalInputInstrumentation : Instrumentation() {
             )
             return
         }
+        if (args.getString("gateway_protocol_smoke") == "true") {
+            GatewayProtocolSmoke(this).run()
+            return
+        }
         if (args.getString("gateway_smoke") == "true") {
             DeviceGatewaySmoke(this).run(args)
             return

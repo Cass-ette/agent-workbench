@@ -8,7 +8,7 @@ class GatewayHttpException(val status: Int, message: String) : IllegalStateExcep
 class ModelCatalogUnavailable : IllegalStateException("网关未提供模型列表接口；Key 尚未验证，请手动填写模型 ID")
 
 object GatewayClient {
-    fun json(url: String, key: String, method: String = "GET", body: JSONObject? = null, timeout: Int = 12000, bridge: Boolean = false): JSONObject {
+    fun json(url: String, key: String, method: String = "GET", body: JSONObject? = null, timeout: Int = 12000, bridge: Boolean = false, includeApiKey: Boolean = true): JSONObject {
         val destination = URL(url)
         val connection = (if (bridge) destination.openConnection(java.net.Proxy.NO_PROXY) else destination.openConnection()) as HttpURLConnection
         connection.instanceFollowRedirects = false
@@ -19,7 +19,7 @@ object GatewayClient {
         // keys with x-api-key. The local Termux bridge keeps its own Bearer
         // token; this header is only for the configured model gateway.
         connection.setRequestProperty("Authorization", "Bearer $key")
-        if (!bridge) {
+        if (!bridge && includeApiKey) {
             connection.setRequestProperty("x-api-key", key)
             connection.setRequestProperty("anthropic-version", "2023-06-01")
         }
@@ -54,8 +54,13 @@ object GatewayClient {
     fun models(gateway: String, key: String): List<String> {
         for (url in GatewayPolicy.modelUrls(gateway)) {
             val data = try { json("$url?limit=1000", key) } catch (cause: GatewayHttpException) {
-                if (cause.status in setOf(404, 405, 501)) continue
-                throw cause
+                if (cause.status in setOf(401, 403)) {
+                    try { json("$url", key, includeApiKey = false) } catch (bearer: GatewayHttpException) {
+                        if (bearer.status in setOf(404, 405, 501)) { continue }
+                        throw bearer
+                    }
+                } else if (cause.status in setOf(404, 405, 501)) continue
+                else throw cause
             }
             val rows = data.optJSONArray("data") ?: data.optJSONArray("models") ?: error("网关没有返回有效模型列表；可取消读取列表后保存")
             return (0 until rows.length()).mapNotNull { index ->

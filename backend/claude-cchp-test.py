@@ -1129,7 +1129,7 @@ def main():
     parser.add_argument("--client", choices=["codex", "claude"])
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--fork-history", action="store_true")
-    parser.add_argument("--permission-mode", choices=["restricted", "standard", "full"], default="restricted")
+    parser.add_argument("--permission-mode", choices=["restricted", "standard", "full", "dangerous"], default="restricted")
     arguments = parser.parse_args()
     if arguments.action.startswith("tools-"):
         if arguments.client not in ("codex", "claude"):

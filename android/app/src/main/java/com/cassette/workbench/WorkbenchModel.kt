@@ -163,13 +163,14 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     fun refreshRemote() {
         val target = sshTarget ?: return
         if (!connected || remoteRefreshing) return
+        val epoch = remoteConnectionEpoch
         remoteRefreshing = true
         worker.execute {
             try {
                 val status = termux.request("/remote/${target.id}")
                 val result = if (status.optBoolean("connected")) RemoteWorkbench.parse(remoteRequest(target.id, JSONObject().put("op", "state"))) else null
                 main.post {
-                    if (sshTarget?.id != target.id) return@post
+                    if (remoteConnectionEpoch != epoch || sshTarget?.id != target.id) return@post
                     if (remoteOpeningEpoch != 0) return@post
                     val loginId = status.optString("login_id")
                     if (loginId.isNotEmpty()) {
@@ -199,7 +200,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                         (status.optBoolean("retryable") || status.optString("phase") == "idle") &&
                         SystemClock.elapsedRealtime() >= remoteRetryAt) connectRemote()
                 }
-            } catch (cause: Exception) { main.post { if (sshTarget?.id == target.id) { remoteWorkbench = null; remoteConnecting = false; remoteMessage = safeError(cause) } } }
+            } catch (cause: Exception) { main.post { if (remoteConnectionEpoch == epoch && sshTarget?.id == target.id) { remoteWorkbench = null; remoteConnecting = false; remoteMessage = safeError(cause) } } }
             finally { main.post { remoteRefreshing = false } }
         }
     }

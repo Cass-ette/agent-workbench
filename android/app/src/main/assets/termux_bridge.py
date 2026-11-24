@@ -397,6 +397,7 @@ def launch_spec(payload, home=None, bundle=None):
             "client": client, "mode": mode, "profile_id": payload.get("profile_id"),
             "model": model, "gateway": gateway, "key": key,
             "workspace": str(workspace.resolve()), "codex_compatibility": payload.get("codex_compatibility") is True,
+            "permission_mode": payload.get("permission_mode", "standard"),
         }, ensure_ascii=False))
         vm_script = shlex.join([sys.executable, str(Path(__file__).with_name("linux_vm.py")), "agent", str(launch_file)])
         vm_script += "; result=$?; rm -f -- " + shlex.quote(str(launch_file))

@@ -32,6 +32,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccountCircle
@@ -792,6 +793,10 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
     var keyboardRequest by remember { mutableIntStateOf(0) }
     var scrollRequest by remember { mutableIntStateOf(0) }
     var bottomRequest by remember { mutableIntStateOf(0) }
+    var copyRequest by remember { mutableIntStateOf(0) }
+    var pasteRequest by remember { mutableIntStateOf(0) }
+    var copyText by remember { mutableStateOf<String?>(null) }
+    val clipboard = LocalClipboardManager.current
     Column(modifier.fillMaxSize()) {
         if (session.remoteTarget.isNotEmpty()) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(session.input.control.label, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
@@ -810,6 +815,8 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
             }
         }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { copyRequest++ }, contentPadding = PaddingValues(horizontal = 7.dp)) { Text("复制文本", fontSize = 11.sp) }
+            TextButton(onClick = { pasteRequest++ }, enabled = session.canWrite, contentPadding = PaddingValues(horizontal = 7.dp)) { Text("粘贴", fontSize = 11.sp) }
             listOf("回车" to "\r", "↑" to "\u001b[A", "↓" to "\u001b[B", "←" to "\u001b[D", "→" to "\u001b[C", "Esc" to "\u001b", "Tab" to "\t", "Ctrl+C" to "\u0003").forEach { (title, value) ->
                 TextButton(onClick = { model.send(session.id, value) }, enabled = session.canWrite, contentPadding = PaddingValues(horizontal = 7.dp), modifier = Modifier.height(38.dp).widthIn(min = 40.dp)) { Text(title, fontSize = 11.sp) }
             }
@@ -823,9 +830,27 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
             IconButton(onClick = { closing = true }, modifier = Modifier.width(34.dp)) { Icon(Icons.Outlined.Close, "关闭此终端") }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            TerminalSurface(model, session, fontDelta, keyboardRequest, scrollRequest, bottomRequest, Modifier.fillMaxSize())
+            TerminalSurface(model, session, fontDelta, keyboardRequest, scrollRequest, bottomRequest,
+                copyRequest, pasteRequest, { copyText = it }, Modifier.fillMaxSize())
         }
         if (session.exitCode != null) Text("终端已退出：${session.exitCode}", style = MaterialTheme.typography.labelSmall)
+    }
+    copyText?.let { snapshot ->
+        AlertDialog(onDismissRequest = { copyText = null }, title = { Text("复制终端文本") },
+            text = {
+                Column {
+                    Text("长按文字可选择并复制。这里只显示此终端已加载的内容，复制不会向电脑发送命令。", style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(8.dp))
+                    SelectionContainer {
+                        Text(snapshot.ifEmpty { "暂无可复制文本" }, fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp).verticalScroll(rememberScrollState()))
+                    }
+                }
+            },
+            confirmButton = { TextButton(enabled = snapshot.isNotEmpty(), onClick = {
+                clipboard.setText(AnnotatedString(snapshot)); model.message("已复制此终端文本"); copyText = null
+            }) { Text("复制全部") } },
+            dismissButton = { TextButton(onClick = { copyText = null }) { Text("关闭") } })
     }
     if (closing) AlertDialog(onDismissRequest = { closing = false }, title = { Text(if (session.remoteTarget.isEmpty()) "关闭此终端？" else "断开此会话？") },
         text = { Text(if (session.remoteTarget.isEmpty()) "该标签中的 Agent 与 Shell 将停止。关闭电脑登录标签只会断开 SSH，电脑任务继续。" else "移除手机标签，电脑上的任务继续运行，可以再次接续。") },
@@ -839,12 +864,14 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
 private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var scrollRequest: Int = 0, var bottomRequest: Int = 0)
 
 @SuppressLint("SetJavaScriptEnabled")
-@Composable private fun TerminalSurface(model: WorkbenchModel, session: TerminalSession, fontDelta: Int, keyboardRequest: Int, scrollRequest: Int, bottomRequest: Int, modifier: Modifier) {
+@Composable private fun TerminalSurface(model: WorkbenchModel, session: TerminalSession, fontDelta: Int, keyboardRequest: Int, scrollRequest: Int, bottomRequest: Int,
+    copyRequest: Int, pasteRequest: Int, onCopyText: (String) -> Unit, modifier: Modifier) {
     val context = LocalContext.current
     var ready by remember { mutableStateOf(false) }
     val cursor = remember { TerminalCursor() }
     val replayThrough = remember { session.after }
     val handler = remember { Handler(Looper.getMainLooper()) }
+    val clipboard = LocalClipboardManager.current
     val browser = remember {
         TerminalWebView(context) { model.send(session.id, it) }.apply {
             setOnFocusChangeListener { _, focused -> model.terminalFocusChanged(session.id, focused) }
@@ -873,9 +900,11 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
             loadUrl("https://workbench.local/terminal.html")
         }
     }
+    SideEffect { browser.onCopyText = onCopyText }
     DisposableEffect(browser) { onDispose {
         model.terminalFocusChanged(session.id, false)
         browser.setOnFocusChangeListener(null)
+        browser.onCopyText = null
         browser.removeJavascriptInterface("Workbench"); browser.destroy()
     } }
     LaunchedEffect(ready, session.canWrite) {
@@ -887,6 +916,12 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
     }
     LaunchedEffect(keyboardRequest) {
         if (keyboardRequest > 0) browser.showTerminalKeyboard()
+    }
+    LaunchedEffect(copyRequest) {
+        if (copyRequest > 0) browser.requestCopyText()
+    }
+    LaunchedEffect(pasteRequest) {
+        if (pasteRequest > 0 && session.canWrite) clipboard.getText()?.text?.let { browser.pasteText(it) }
     }
     Box(modifier) {
         AndroidView(factory = { browser }, modifier = Modifier.fillMaxSize(), update = { view ->

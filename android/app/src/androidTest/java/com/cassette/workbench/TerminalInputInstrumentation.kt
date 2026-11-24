@@ -156,6 +156,7 @@ class TerminalInputInstrumentation : Instrumentation() {
                 connection.performEditorAction(EditorInfo.IME_ACTION_DONE)
             }
             until("IME backspace removes one character") { hasLine(view, "DELETE_OK") }
+            verifyCopyAndPaste(model!!, view, sessionId)
             verifyScrolling(model!!, view, sessionId)
             val screenshot = java.io.File(targetContext.getExternalFilesDir(null), "terminal-input-test.png")
             screenshot.outputStream().use { uiAutomation.takeScreenshot().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
@@ -192,6 +193,50 @@ class TerminalInputInstrumentation : Instrumentation() {
         } }
         editor.commit()
     }
+    private fun verifyCopyAndPaste(model: WorkbenchModel, view: WebView, id: String) {
+        val terminalView = view as TerminalWebView
+        val wrapped = "COPY_中文_" + "x".repeat(eval(view, "terminal.cols").toInt() - 9) + " wrapped_tail"
+        eval(view, "terminal.write(${org.json.JSONObject.quote("\r\n$wrapped\r\n")});true")
+        until("copy joins soft wraps and preserves Chinese") {
+            eval(view, "window.terminalCopyText().includes(${org.json.JSONObject.quote(wrapped)})") == "true"
+        }
+        val inputs = model.termux.request("/test/state").getInt("inputs")
+        until("copy button visible") { runCatching { tabBounds("复制文本") }.isSuccess }
+        val copy = tabBounds("复制文本")
+        tapAt(copy.exactCenterX(), copy.exactCenterY())
+        until("copy dialog opens") { runCatching { tabBounds("复制终端文本") }.isSuccess }
+        // Live output must not rewrite the text the user is selecting.
+        eval(view, "terminal.write('SNAPSHOT_LATE_OUTPUT\\r\\n');true")
+        val copyAll = tabBounds("复制全部")
+        tapAt(copyAll.exactCenterX(), copyAll.exactCenterY())
+        var copied = ""
+        runOnMainSync { copied = targetContext.getSystemService(android.content.ClipboardManager::class.java)
+            .primaryClip?.getItemAt(0)?.coerceToText(targetContext)?.toString().orEmpty() }
+        check(copied.contains(wrapped) && !copied.contains("SNAPSHOT_LATE_OUTPUT")) { "Copy lost wrapped text or snapshot changed" }
+        check(model.termux.request("/test/state").getInt("inputs") == inputs) { "Copy sent terminal input" }
+        runOnMainSync { terminalView.inputEnabled = false }
+        eval(view, "window.setInputEnabled(false);window.pasteTerminalText('must-not-be-sent');true")
+        runOnMainSync { terminalView.pasteText("must-not-be-sent") }
+        val xy = IntArray(2)
+        runOnMainSync { view.getLocationOnScreen(xy) }
+        val down = android.os.SystemClock.uptimeMillis()
+        sendPointerSync(MotionEvent.obtain(down, down, MotionEvent.ACTION_DOWN, xy[0] + 60f, xy[1] + 60f, 0))
+        Thread.sleep(ViewConfiguration.getLongPressTimeout().toLong() + 150)
+        sendPointerSync(MotionEvent.obtain(down, android.os.SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, xy[0] + 60f, xy[1] + 60f, 0))
+        until("read-only long press opens copy dialog") { runCatching { tabBounds("复制终端文本") }.isSuccess }
+        check(model.termux.request("/test/state").getInt("inputs") == inputs) { "Read-only copy or paste sent input" }
+        val close = tabBounds("关闭")
+        tapAt(close.exactCenterX(), close.exactCenterY())
+        runOnMainSync { terminalView.inputEnabled = true }
+        eval(view, "window.setInputEnabled(true);true")
+        val command = "printf '\\103\\117\\120\\131\\137\\120\\101\\123\\124\\105\\137\\117\\113\\n'"
+        runOnMainSync { terminalView.pasteText(command) }
+        until("paste reaches PTY") { model.termux.request("/test/state").getInt("inputs") > inputs }
+        check(!hasLine(view, "COPY_PASTE_OK")) { "Paste unexpectedly submitted a command" }
+        runOnMainSync { model.send(id, "\r") }
+        until("pasted command executes only after Enter") { hasLine(view, "COPY_PASTE_OK") }
+    }
+
     private fun verifyScrolling(model: WorkbenchModel, view: WebView, id: String) {
         runOnMainSync { targetContext.getSystemService(android.view.inputmethod.InputMethodManager::class.java).hideSoftInputFromWindow(view.windowToken, 0) }
         runOnMainSync { model.send(id, "for ((i=0;i<100;i++)); do printf 'SCROLL_%s\\n' \"\$i\"; done\r") }
@@ -486,6 +531,7 @@ class TerminalInputInstrumentation : Instrumentation() {
                     check(sent == listOf("first\nsecond\n")) { "Multiline paste was changed" }
                     sent.clear()
                     connection.performEditorAction(EditorInfo.IME_ACTION_DONE)
+                    connection.deleteSurroundingText(1, 1)
                     check(sent == listOf("\r")) { "Editor action did not submit Enter" }
                     sent.clear()
                     view.inputEnabled = false

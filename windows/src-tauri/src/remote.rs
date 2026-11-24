@@ -638,7 +638,7 @@ pub fn sync_remote_permissions(
 ) -> Result<(), String> {
     if permissions.iter().any(|(k, v)| {
         !matches!(k.as_str(), "codex" | "claude")
-            || !matches!(v.as_str(), "restricted" | "standard" | "full")
+            || !matches!(v.as_str(), "restricted" | "standard" | "full" | "dangerous")
     }) {
         return Err("权限设置无效".into());
     }
@@ -756,7 +756,7 @@ pub fn set_remote_enabled(
     if let Some(ref permissions) = permissions {
         if permissions.iter().any(|(k, v)| {
             !matches!(k.as_str(), "codex" | "claude")
-                || !matches!(v.as_str(), "restricted" | "standard" | "full")
+                || !matches!(v.as_str(), "restricted" | "standard" | "full" | "dangerous")
         }) {
             return Err("权限设置无效".into());
         }

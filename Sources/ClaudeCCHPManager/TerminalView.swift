@@ -1,6 +1,7 @@
 import AppKit
 import SwiftTerm
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Accepts Finder file drops and inserts shell-safe paths into the active PTY.
 /// The trailing space lets the user keep composing the command without running it.
@@ -243,7 +244,6 @@ struct TerminalPanel: View {
     let onToggleFullScreen: () -> Void
     let isEmpty: Bool
     let onChooseWorkspace: () -> Void
-    @State private var draggedSessionID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -303,16 +303,25 @@ struct TerminalPanel: View {
                                                onSelect: { model.selectTerminal(session.id) },
                                                onClose: { model.closeSession(session) })
                                 .onDrag {
-                                    draggedSessionID = session.id
-                                    return NSItemProvider(object: session.id.uuidString as NSString)
+                                    let provider = NSItemProvider()
+                                    let data = Data(session.id.uuidString.utf8)
+                                    provider.registerDataRepresentation(forTypeIdentifier: "com.cassette.workbench.terminal-tab", visibility: .ownProcess) { completion in
+                                        completion(data, nil)
+                                        return nil
+                                    }
+                                    return provider
                                 }
-                                .onDrop(of: [.text], isTargeted: nil) { _ in
-                                    guard let draggedSessionID,
-                                          let targetIndex = model.terminalSessions.firstIndex(where: { $0.id == session.id }),
-                                          let sourceIndex = model.terminalSessions.firstIndex(where: { $0.id == draggedSessionID }) else { return false }
-                                    model.moveTerminal(draggedSessionID, to: targetIndex)
-                                    self.draggedSessionID = nil
-                                    return sourceIndex != targetIndex
+                                .onDrop(of: [UTType(exportedAs: "com.cassette.workbench.terminal-tab")], isTargeted: nil) { providers in
+                                    guard let provider = providers.first else { return false }
+                                    provider.loadDataRepresentation(forTypeIdentifier: "com.cassette.workbench.terminal-tab") { data, _ in
+                                        guard let data, let id = UUID(uuidString: String(decoding: data, as: UTF8.self)) else { return }
+                                        Task { @MainActor in
+                                            guard model.terminalSessions.contains(where: { $0.id == id }),
+                                                  let index = model.terminalSessions.firstIndex(where: { $0.id == session.id }) else { return }
+                                            model.moveTerminal(id, to: index)
+                                        }
+                                    }
+                                    return true
                                 }
                         }
                     }

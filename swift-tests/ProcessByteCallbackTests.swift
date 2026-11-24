@@ -10,11 +10,9 @@ final class ProcessByteCallbackTests: XCTestCase {
         let view = FileDropTerminalView(frame: CGRect(x: 0, y: 0, width: 640, height: 400), options: TerminalOptions())
         let control = EmbeddedTerminalControl()
         control.attach(view)
-        let batches = Locked(0)
         let replay = control.replay
         view.setProcessByteHandler { bytes in
             replay.append(bytes)
-            batches.withLock { $0 += 1 }
         }
         let script = "import os,time\nfor i in range(12000):\n os.write(1,b'workbench-output-batch\\r\\n'); time.sleep(.0015)\nos.write(1,b'PTY_STRESS_COMPLETE\\r\\n')"
         view.startProcess(executable: "/usr/bin/python3", args: ["-u", "-c", script], environment: ["TERM=xterm-256color"])
@@ -31,7 +29,8 @@ final class ProcessByteCallbackTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertTrue(complete, "Continuous output must finish without losing the PTY reader")
-        XCTAssertGreaterThan(batches.withLock { $0 }, 8_000, "Exercise more deliveries than the original stack overflow")
+        let end = replay.snapshot(after: .max, client: "")["after"] as? Int ?? 0
+        XCTAssertGreaterThan(end, 12_000 * 20, "Retain the complete stream across coalesced PTY deliveries")
     }
 
     func testRepeatedReadsOnPTYSizeStackDoNotAccumulateCallbackWrappers() {

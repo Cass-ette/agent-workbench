@@ -144,10 +144,15 @@ describe("工作会话配置", () => {
     }
 
     const tabs = screen.getAllByRole("tab");
-    const transfer = { effectAllowed: "", setData: vi.fn(), getData: vi.fn(() => "1") };
-    fireEvent.dragStart(tabs[0].parentElement!, { dataTransfer: transfer });
-    fireEvent.dragOver(tabs[2].parentElement!, { dataTransfer: transfer });
-    fireEvent.drop(tabs[2].parentElement!, { dataTransfer: transfer, clientX: 1 });
+    const pointer = window.PointerEvent;
+    window.PointerEvent = MouseEvent as typeof PointerEvent;
+    const hitTest = document.elementFromPoint;
+    document.elementFromPoint = vi.fn(() => tabs[2]);
+    try {
+      fireEvent.pointerDown(tabs[0].parentElement!, { button: 0, clientX: 20, clientY: 10 });
+      fireEvent.pointerMove(tabs[0].parentElement!, { clientX: -10, clientY: 10 });
+      fireEvent.pointerUp(tabs[0].parentElement!, { clientX: -10, clientY: 10 });
+    } finally { window.PointerEvent = pointer; document.elementFromPoint = hitTest; }
     await waitFor(() => {
       const order = [...document.querySelectorAll(".terminal-tab .tab-label")].map((node) => node.textContent);
       expect(order[0]).toContain("folder-2");

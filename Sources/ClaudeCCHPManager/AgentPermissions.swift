@@ -105,7 +105,7 @@ struct AgentPermissionsSheet: View {
                                                                claude: dangerous ? .dangerous : safeClaude))
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(needsConfirmation && !confirmed)
+                .disabled(needsConfirmation && !dangerous && !confirmed)
             }
         }
         .font(.system(size: 13))

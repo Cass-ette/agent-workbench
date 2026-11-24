@@ -70,7 +70,7 @@ internal class ComputerDiscovery(context: Context) {
                 override fun onResolveFailed(service: NsdServiceInfo, error: Int) { main.post { resolving = null; resolveNext() } }
                 override fun onServiceResolved(service: NsdServiceInfo) { main.post {
                     if (!active.get()) return@post
-                    val attrs = service.attributes.mapValues { String(it.value, Charsets.UTF_8) }
+                    val attrs = service.attributes.mapNotNull { (key, value) -> value?.let { key to String(it, Charsets.UTF_8) } }.toMap()
                     if (ComputerDiscoveryPolicy.matches(target, service.serviceName, attrs) && service.port in 1..65535) {
                         val addresses = if (Build.VERSION.SDK_INT >= 34) service.hostAddresses else listOfNotNull(service.host)
                         addresses.mapNotNull { it.hostAddress }.filter(ComputerDiscoveryPolicy::isLanAddress)

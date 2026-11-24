@@ -143,6 +143,8 @@ function App() {
   const sessionsRef = useRef<Session[]>([]);
   const [draggedSessionId, setDraggedSessionId] = useState("");
   const [dropTargetId, setDropTargetId] = useState("");
+  const tabPointer = useRef<{ id: string; x: number; y: number; moving: boolean; target: string; after: boolean } | null>(null);
+  const suppressTabClick = useRef(false);
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const currentSessionId = useRef("");
   const [isStarting, setIsStarting] = useState(false);
@@ -800,25 +802,41 @@ function App() {
             {sessions.length > 0 && (
               <div className="terminal-tabs" role="tablist">
                 {sessions.map((session) => (
-                  <div key={session.id} draggable
+                  <div key={session.id} data-session-id={session.id}
                     className={`terminal-tab ${session.id === selectedSessionId ? "active" : ""} ${draggedSessionId === session.id ? "dragging" : ""} ${dropTargetId === session.id ? "drop-target" : ""}`}
-                    onDragStart={(event) => {
-                      setDraggedSessionId(session.id);
-                      event.dataTransfer.effectAllowed = "move";
-                      event.dataTransfer.setData("text/plain", session.id);
+                    onPointerDown={(event) => {
+                      if (event.button !== 0 || (event.target as Element).closest(".tab-close")) return;
+                      suppressTabClick.current = false;
+                      tabPointer.current = { id: session.id, x: event.clientX, y: event.clientY, moving: false, target: "", after: false };
+                      event.currentTarget.setPointerCapture?.(event.pointerId);
                     }}
-                    onDragOver={(event) => { event.preventDefault(); setDropTargetId(session.id); }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      const movingId = event.dataTransfer.getData("text/plain") || draggedSessionId;
-                      const bounds = event.currentTarget.getBoundingClientRect();
-                      const afterTarget = event.clientX >= bounds.left + bounds.width / 2;
-                      setSessions((current) => reorderSessions(current, movingId, session.id, afterTarget));
+                    onPointerMove={(event) => {
+                      const drag = tabPointer.current;
+                      if (!drag) return;
+                      if (!drag.moving && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return;
+                      drag.moving = true;
+                      setDraggedSessionId(drag.id);
+                      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>(".terminal-tab");
+                      drag.target = target?.dataset.sessionId ?? "";
+                      drag.after = !!target && event.clientX >= target.getBoundingClientRect().left + target.getBoundingClientRect().width / 2;
+                      setDropTargetId(drag.target);
+                    }}
+                    onPointerUp={(event) => {
+                      const drag = tabPointer.current;
+                      tabPointer.current = null;
+                      if (drag?.moving) {
+                        suppressTabClick.current = true;
+                        setSessions((current) => reorderSessions(current, drag.id, drag.target, drag.after));
+                      }
+                      event.currentTarget.releasePointerCapture?.(event.pointerId);
                       setDraggedSessionId("");
                       setDropTargetId("");
                     }}
-                    onDragEnd={() => { setDraggedSessionId(""); setDropTargetId(""); }}>
-                    <button className="terminal-tab-select" role="tab" aria-selected={session.id === selectedSessionId} onClick={() => selectSession(session.id)}>
+                    onPointerCancel={() => { tabPointer.current = null; setDraggedSessionId(""); setDropTargetId(""); }}>
+                    <button className="terminal-tab-select" role="tab" aria-selected={session.id === selectedSessionId} onClick={() => {
+                      if (suppressTabClick.current) { suppressTabClick.current = false; return; }
+                      selectSession(session.id);
+                    }}>
                       <span className={`tab-state ${session.exitCode === null ? "running" : "ended"}`} />
                       <span className="tab-label" title={`${session.title}\n${session.workspace}\n配置：${session.profileName}`}>
                         {session.client === "codex" ? "Codex" : "Claude Code"} · {modeLabel(session.mode)}

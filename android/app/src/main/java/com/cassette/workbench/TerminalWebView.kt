@@ -11,16 +11,30 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebView
+import org.json.JSONObject
+import org.json.JSONTokener
 
 /** Keep terminal rendering in xterm; Android IMEs submit text through a native connection. */
 class TerminalWebView(context: Context, private val sendInput: (String) -> Unit) : WebView(context) {
     var terminalReady = false
     var inputEnabled = true
+    var onCopyText: ((String) -> Unit)? = null
     private val keyboard get() = context.getSystemService(InputMethodManager::class.java)
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private var downY = 0f
+    private var downX = 0f
     private var lastY = 0f
     private var touchMoved = false
+    private var copyOpened = false
+    private val longPressCopy = Runnable {
+        if (terminalReady && !touchMoved) {
+            copyOpened = true
+            val cancel = MotionEvent.obtain(0, 0, MotionEvent.ACTION_CANCEL, 0f, 0f, 0)
+            super.onTouchEvent(cancel)
+            cancel.recycle()
+            requestCopyText()
+        }
+    }
 
     init {
         isFocusable = true
@@ -34,6 +48,26 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
         post { keyboard.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT) }
     }
 
+    fun requestCopyText() {
+        if (!terminalReady) return
+        keyboard.hideSoftInputFromWindow(windowToken, 0)
+        evaluateJavascript("window.terminalCopyText()") { encoded ->
+            val text = runCatching { JSONTokener(encoded).nextValue() as? String }.getOrNull()
+            if (text != null) onCopyText?.invoke(text)
+        }
+    }
+
+    fun pasteText(text: String) {
+        if (terminalReady && inputEnabled) {
+            evaluateJavascript("window.pasteTerminalText(${JSONObject.quote(text)})", null)
+        }
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(longPressCopy)
+        super.onDetachedFromWindow()
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         // A connected mouse must not change finger gestures. Classify the
         // current event, leaving mouse selection/dragging and wheels to WebView.
@@ -42,13 +76,21 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
         }
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                removeCallbacks(longPressCopy)
+                downX = event.x
                 downY = event.y
                 lastY = event.y
                 touchMoved = false
+                copyOpened = false
+                postDelayed(longPressCopy, ViewConfiguration.getLongPressTimeout().toLong())
                 if (terminalReady) evaluateJavascript("window.beginTouchScroll()", null)
             }
             MotionEvent.ACTION_MOVE -> {
+                if (copyOpened) return true
                 val delta = event.y - lastY
+                if (kotlin.math.abs(event.x - downX) > touchSlop || kotlin.math.abs(event.y - downY) > touchSlop) {
+                    removeCallbacks(longPressCopy)
+                }
                 if (!touchMoved && kotlin.math.abs(event.y - downY) > touchSlop) {
                     touchMoved = true
                     // Stop WebView/xterm's default touch scroll before taking
@@ -66,6 +108,8 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                removeCallbacks(longPressCopy)
+                if (copyOpened) { copyOpened = false; return true }
                 if (touchMoved) {
                     touchMoved = false
                     return true
@@ -117,6 +161,7 @@ class TerminalWebView(context: Context, private val sendInput: (String) -> Unit)
             }
 
             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+                if (!inputEnabled) return true
                 if (!editable.isNullOrEmpty()) return super.deleteSurroundingText(beforeLength, afterLength)
                 if (beforeLength > 0) sendInput("\u007f".repeat(beforeLength.coerceAtMost(1024)))
                 if (afterLength > 0) sendInput("\u001b[3~".repeat(afterLength.coerceAtMost(1024)))

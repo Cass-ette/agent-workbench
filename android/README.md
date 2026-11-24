@@ -51,6 +51,7 @@ Android 版本默认不要求 root，也不能把没有 root 的设备描述成�
 
 ## 日常操作
 
+- 终端工具栏的「复制文本」会打开当前标签已加载内容的快照，可长按选择文字或「复制全部」；长按终端也可打开。只读电脑会话仍能复制；持续输出不会修改已打开的快照。「粘贴」使用 Android 剪贴板文本和终端的括号粘贴协议，不额外发送回车。
 - 保存的配置、模型缓存、收藏和最近项目在本机保留，模型列表可手动刷新、搜索或填写 ID。
 - 同时最多 8 个终端；每次启动固定自己的客户端、模型、网关、项目和会话方式。
 - Debian Agent 与 Debian Shell 都在 PRoot-Distro Debian 的普通用户 `workbench` 下运行，并绑定同一手机项目目录；Linux VM Agent 与 VM Shell 则在独立 Alpine 虚拟机中运行。Termux Shell 单独保留给主机维护。新建终端菜单可选 Debian Shell、Linux VM Shell 或 Termux Shell，首次打开工作区也默认直达 Debian Shell。

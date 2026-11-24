@@ -126,7 +126,7 @@ class BridgeTests(unittest.TestCase):
 
             payload = dict(client="codex", mode="new", profile_id="vm-profile", model="test-model",
                            key="private-vm-key", gateway="https://gateway.test",
-                           workspace="~/projects/vm-project", environment="vm")
+                           workspace="~/projects/vm-project", environment="vm", permission_mode="dangerous")
             with patch.dict(B.sys.modules, {"linux_vm": SimpleNamespace(LinuxVM=InstalledVM)}), \
                  patch.object(B.shutil, "which", side_effect=lambda name, **kw: "/bin/" + name):
                 args, env, workspace = B.launch_spec(payload, home)
@@ -137,6 +137,7 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(launch_file.stat().st_mode & 0o777, 0o600)
             launch = json.loads(launch_file.read_text())
             self.assertEqual(launch["key"], payload["key"])
+            self.assertEqual(launch["permission_mode"], "dangerous")
             self.assertEqual(launch["workspace"], str(Path(workspace).resolve()))
             self.assertIn("linux_vm.py", args[-1])
             self.assertIn("; unset", args[-1])

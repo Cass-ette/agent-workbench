@@ -29,7 +29,7 @@ stage_app() {
     cp backend/{pricing_reference,deepseek_reference}.json "$app/Contents/Resources/backend/"
     # Each test copy has its own settings and history directory alongside the app.
     sed 's@^USER_ROOT = Path.home()$@USER_ROOT = Path(__file__).resolve().parents[4] / ".test-home"@' \
-        backend/claude-cchp-test.py > "$app/Contents/Resources/backend/claude-cchp-test.py"
+        backend/workbench_backend.py > "$app/Contents/Resources/backend/workbench_backend.py"
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.cassette.agentworkbench.updatetest" "$app/Contents/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleName 工作台更新测试" "$app/Contents/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"

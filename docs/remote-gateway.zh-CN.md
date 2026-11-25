@@ -31,7 +31,7 @@ Mac、Windows 和 Android 都可以直接使用同一个 HTTPS 模型网关。�
 - **TLS 握手失败但浏览器能访问**：浏览器、工作台元数据请求和 Agent CLI 使用的 TLS/代理实现可能不同，不能只凭浏览器成功判断全部路径正常。还需对照同服务器的其他域名、查看服务端握手记录，以区分客户端兼容性和网络路径重置。不要关闭证书校验。
 - **模型列表成功但 Agent 失败**：列表查询与实际推理是两个接口；继续核对 Claude 的 Messages 或 Codex 的 Responses 支持、模型权限和 Agent 自身的代理设置。
 
-macOS 工作台优先使用已安装的 Homebrew/Miniconda Python，最后回退到系统 Python。系统 Python 的旧 LibreSSL 曾在远程网关握手时失败；可通过启动环境中的 `CCHP_MANAGER_PYTHON` 显式指定 Python 路径。这个设置不改变网关配置，也不改变 Agent CLI 的网络实现。Windows 和 Android 不需要套用这个 Mac 专用修复。
+macOS 工作台优先使用已安装的 Homebrew/Miniconda Python，最后回退到系统 Python。系统 Python 的旧 LibreSSL 曾在远程网关握手时失败；可通过启动环境中的 `WORKBENCH_PYTHON` 显式指定 Python 路径。这个设置不改变网关配置，也不改变 Agent CLI 的网络实现。Windows 和 Android 不需要套用这个 Mac 专用修复。
 
 ## Android 真机元数据检查（开发用）
 

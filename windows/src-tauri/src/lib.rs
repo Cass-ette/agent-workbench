@@ -766,7 +766,7 @@ fn start_terminal(
         fs::create_dir_all(&codex_home)
             .map_err(|error| format!("创建隔离 Codex 配置失败：{error}"))?;
         let config_text = format!(
-            "model = {}\nmodel_provider = \"cchp_local\"\n{}sandbox_mode = \"workspace-write\"\ndisable_response_storage = true\n\n[model_providers.cchp_local]\nname = \"cchp_local\"\nbase_url = {}\nwire_api = \"responses\"\nenv_key = \"CCH_API_KEY\"\n",
+            "model = {}\nmodel_provider = \"workbench_gateway\"\n{}sandbox_mode = \"workspace-write\"\ndisable_response_storage = true\n\n[model_providers.workbench_gateway]\nname = \"Workbench gateway\"\nbase_url = {}\nwire_api = \"responses\"\nenv_key = \"WORKBENCH_GATEWAY_KEY\"\n",
             serde_json::to_string(&request.model).map_err(|error| error.to_string())?,
             reasoning::config_line(effort.as_deref(), &fs::read_to_string(codex_home.join("config.toml")).unwrap_or_default())?,
             serde_json::to_string(&gateway_api_base(&profile.gateway))
@@ -814,7 +814,7 @@ fn start_terminal(
         args.extend(reasoning::args("codex", effort.as_deref())?);
         args.extend(tools::apply(&config_root.join("tools/codex"), &selected_home, "codex")?);
         shell.env("CODEX_HOME", codex_home);
-        shell.env("CCH_API_KEY", &key);
+        shell.env("WORKBENCH_GATEWAY_KEY", &key);
         let command_args = args
             .iter()
             .map(|arg| quote_powershell(arg))
@@ -891,7 +891,7 @@ fn start_terminal(
             String::new()
         };
         format!(
-            "try {{ {command_text}; $workbenchExitCode = {POWERSHELL_EXIT_CODE} }} finally {{ {cleanup}Remove-Item Env:CCH_API_KEY,Env:ANTHROPIC_API_KEY,Env:ANTHROPIC_BASE_URL,Env:CODEX_HOME,Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }}; exit $workbenchExitCode",
+            "try {{ {command_text}; $workbenchExitCode = {POWERSHELL_EXIT_CODE} }} finally {{ {cleanup}Remove-Item Env:WORKBENCH_GATEWAY_KEY,Env:CCH_API_KEY,Env:ANTHROPIC_API_KEY,Env:ANTHROPIC_BASE_URL,Env:CODEX_HOME,Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }}; exit $workbenchExitCode",
         )
     } else {
         command_text
@@ -908,6 +908,8 @@ fn start_terminal(
         shell.env_remove("OPENAI_BASE_URL");
         shell.env_remove("CODEX_SQLITE_HOME");
         shell.env_remove("ANTHROPIC_API_KEY");
+        // Previous releases injected the key under this name; never leak a stale one.
+        shell.env_remove("CCH_API_KEY");
     }
     let info = TerminalInfo {
         id: Uuid::new_v4().to_string(),

@@ -85,7 +85,7 @@ print "等待 CCHP 就绪……"
 for attempt in {1..60}; do
     if curl --silent --fail "http://127.0.0.1:${control_port}/readyz" >/dev/null \
         && curl --silent --fail "http://127.0.0.1:${gateway_port}/readyz" >/dev/null; then
-        manager_backend="${SCRIPT_DIR}/../../backend/claude-cchp-test.py"
+        manager_backend="${SCRIPT_DIR}/../../backend/workbench_backend.py"
         if [[ -r "$manager_backend" ]] && command -v python3 >/dev/null 2>&1; then
             if ! printf '{"url":"http://127.0.0.1:%s"}\n' "$gateway_port" \
                 | python3 "$manager_backend" set-gateway-stdin >/dev/null; then

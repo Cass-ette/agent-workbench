@@ -10,6 +10,7 @@ window.setTerminalTheme = theme => {
   document.getElementById('terminal').style.background = theme.background;
 };
 const fit = new FitAddon.FitAddon(); terminal.loadAddon(fit); terminal.open(document.getElementById('terminal'));
+terminal.options.minimumContrastRatio = 4.5;
 // Wheel reports must reach a full-screen TUI; its conversation history is not
 // xterm's scrollback. Keep xterm responsible for the negotiated mouse encoding.
 let wheelInput = null;

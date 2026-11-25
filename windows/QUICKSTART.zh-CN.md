@@ -12,7 +12,7 @@ Agent 工作台把 Claude Code / Codex CLI 放在同一窗口的独立终端标�
 
 ## 下载安装
 
-1. 打开 [GitHub Releases](https://github.com/Cass-ette/claude-cchp-manager/releases)，下载 `Agent-Workbench-Windows-x64-*-setup.exe`，在 Windows 10/11 x64 上运行安装。
+1. 打开 [GitHub Releases](https://github.com/Cass-ette/agent-workbench/releases)，下载 `Agent-Workbench-Windows-x64-*-setup.exe`，在 Windows 10/11 x64 上运行安装。
 2. 安装包需要 Microsoft WebView2；系统缺少它时，安装程序会联网安装。此版本未做商业代码签名，首次运行可能出现发布者确认，请核对下载来源及发布页提供的 SHA-256。
 3. 提前安装准备使用的客户端，安装后重新打开工作台，让它读取更新后的 PATH：
    - [Claude Code 官方安装说明](https://code.claude.com/docs/en/setup)。
@@ -61,6 +61,6 @@ Claude 需要支持 Anthropic Messages 的网关，Codex 需要支持 OpenAI Res
 
 可以把下面这段发给 AI：
 
-> 请阅读公开仓库 https://github.com/Cass-ette/claude-cchp-manager ，重点看 windows/QUICKSTART.zh-CN.md、windows/README.md、windows/src/App.tsx 和 windows/src-tauri/src/lib.rs。我在 Windows 使用已发布的安装包。请全程用简体中文，先检查 CLI 是否安装、PATH、网关可达性和所需 API 协议，再一步步指导我。不修改原有 Claude/Codex 配置，不索取或输出完整 API Key；密钥让我在应用里填写。连通性检查先用版本和模型列表，发起付费推理前告诉我。
+> 请阅读公开仓库 https://github.com/Cass-ette/agent-workbench ，重点看 windows/QUICKSTART.zh-CN.md、windows/README.md、windows/src/App.tsx 和 windows/src-tauri/src/lib.rs。我在 Windows 使用已发布的安装包。请全程用简体中文，先检查 CLI 是否安装、PATH、网关可达性和所需 API 协议，再一步步指导我。不修改原有 Claude/Codex 配置，不索取或输出完整 API Key；密钥让我在应用里填写。连通性检查先用版本和模型列表，发起付费推理前告诉我。
 
 源码入口：React 页面在 `windows/src/`；Rust 终端、凭据和隔离启动逻辑在 `windows/src-tauri/src/lib.rs`；本地 Token 读取在 `usage.rs`；公开价目与估算在 `pricing.rs`。Windows 客户端不依赖 macOS Python 后端；编译时使用仓库 `backend/` 中的参考价格 JSON 以及 `tests/fixtures/` 中的测试样本。

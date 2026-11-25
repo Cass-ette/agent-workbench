@@ -19,7 +19,7 @@ def generated():
     swift += "}\n"
     kotlin += "    }\n}\n"
     return {
-        ROOT / "Sources/ClaudeCCHPManager/WorkbenchPalette.swift": swift,
+        ROOT / "Sources/AgentWorkbench/WorkbenchPalette.swift": swift,
         ROOT / "android/app/src/main/java/com/cassette/workbench/WorkbenchPalette.kt": kotlin,
     }
 

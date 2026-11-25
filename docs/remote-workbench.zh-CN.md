@@ -31,4 +31,4 @@
 - 工具和权限沿用电脑会话。修改电脑 MCP/Skills/插件、增删 Key、账单管理以及系统授权面板仍在电脑端完成，本轮未把整套设置面板搬到手机。手机本地工具和权限按钮明确标为「本地」。
 - 终端 UI 是 CLI 的原生交互，尚无独立的结构化审批面板。执行位置为电脑时，截图工具看到的是电脑屏幕；不能据此读取手机屏幕。
 - 已实现自动化协议、权限边界、附件和共享 PTY 测试；真实手机到 Mac/Windows 的 SSH、两端同时操作、手机后台和网络切换仍须实机验收，不能把编译通过当成这些场景已经验收。
-- 两个独立 Agent 的任务派发与协作留在 [#18](https://github.com/Cass-ette/claude-cchp-manager/issues/18)。本轮及后续接续工作见 [#19](https://github.com/Cass-ette/claude-cchp-manager/issues/19)。
+- 两个独立 Agent 的任务派发与协作留在 [#18](https://github.com/Cass-ette/agent-workbench/issues/18)。本轮及后续接续工作见 [#19](https://github.com/Cass-ette/agent-workbench/issues/19)。

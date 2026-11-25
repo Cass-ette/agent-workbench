@@ -4,7 +4,7 @@ version = "0.1.4"
 description = "A terminal workbench for isolated Claude Code and Codex sessions"
 authors = ["Cass-ette"]
 license = "MIT"
-repository = "https://github.com/Cass-ette/claude-cchp-manager"
+repository = "https://github.com/Cass-ette/agent-workbench"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

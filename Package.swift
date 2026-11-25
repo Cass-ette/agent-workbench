@@ -3,10 +3,10 @@
 import PackageDescription
 
 let package = Package(
-    name: "ClaudeCCHPManager",
+    name: "AgentWorkbench",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "ClaudeCCHPManager", targets: ["ClaudeCCHPManager"])
+        .executable(name: "AgentWorkbench", targets: ["AgentWorkbench"])
     ],
     dependencies: [],
     targets: [
@@ -17,10 +17,10 @@ let package = Package(
             swiftSettings: [.define("SWIFTTERM_BUILD_LOCAL")]
         ),
         .executableTarget(
-            name: "ClaudeCCHPManager",
+            name: "AgentWorkbench",
             dependencies: ["SwiftTerm"],
-            path: "Sources/ClaudeCCHPManager"
+            path: "Sources/AgentWorkbench"
         ),
-        .testTarget(name: "ReleaseFeedTests", dependencies: ["ClaudeCCHPManager"], path: "swift-tests")
+        .testTarget(name: "ReleaseFeedTests", dependencies: ["AgentWorkbench"], path: "swift-tests")
     ]
 )

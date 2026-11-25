@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import ClaudeCCHPManager
+@testable import AgentWorkbench
 
 final class ReasoningEffortTests: XCTestCase {
     func testNativeCommandsChangeOnlyEffortAndNeverSubmitOrClearDraft() {

@@ -2,7 +2,7 @@ import Foundation
 import AppKit
 import XCTest
 @testable import SwiftTerm
-@testable import ClaudeCCHPManager
+@testable import AgentWorkbench
 
 final class ProcessByteCallbackTests: XCTestCase {
     @MainActor

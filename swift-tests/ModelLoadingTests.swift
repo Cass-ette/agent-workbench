@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import ClaudeCCHPManager
+@testable import AgentWorkbench
 
 private enum ModelLoadFailure: Error { case offline }
 

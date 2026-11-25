@@ -32,9 +32,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.HttpsURLConnection
 import kotlin.math.min
 
-private const val RELEASE_PAGE = "https://github.com/Cass-ette/claude-cchp-manager/releases"
-internal const val UPDATE_MANIFEST = "https://raw.githubusercontent.com/Cass-ette/claude-cchp-manager/update-feed/update.json"
-internal const val RELEASE_FEED = "https://api.github.com/repos/Cass-ette/claude-cchp-manager/releases?per_page=20"
+private const val RELEASE_PAGE = "https://github.com/Cass-ette/agent-workbench/releases"
+internal const val UPDATE_MANIFEST = "https://raw.githubusercontent.com/Cass-ette/agent-workbench/update-feed/update.json"
+internal const val RELEASE_FEED = "https://api.github.com/repos/Cass-ette/agent-workbench/releases?per_page=20"
 private const val APK_MIME = "application/vnd.android.package-archive"
 private val CHECK_INTERVAL = 86_400_000L
 private val RETRY_INTERVAL = 1_800_000L
@@ -64,7 +64,7 @@ internal data class AndroidUpdate(
                 it.size in 1..1_073_741_824 && it.sha256.matches(Regex("[0-9a-f]{64}")) &&
                 uri.scheme == "https" && uri.host == "github.com" && uri.rawUserInfo == null &&
                 uri.port == -1 && uri.rawQuery == null && uri.rawFragment == null &&
-                uri.path.startsWith("/Cass-ette/claude-cchp-manager/releases/download/") && uri.path.endsWith(".apk")
+                trustedDownloadPath(uri.path) && uri.path.endsWith(".apk")
             ) { "安装包信息无效。" }
         }
     }
@@ -106,7 +106,7 @@ internal fun selectReleaseManifest(releases: List<WorkbenchRelease>): ReleaseMan
         val uri = runCatching { URI(asset.url) }.getOrNull() ?: continue
         if (uri.scheme == "https" && uri.host == "github.com" && uri.rawUserInfo == null && uri.port == -1 &&
             uri.rawQuery == null && uri.rawFragment == null &&
-            uri.path.startsWith("/Cass-ette/claude-cchp-manager/releases/download/") && uri.path.endsWith("/update.json")) {
+            trustedDownloadPath(uri.path) && uri.path.endsWith("/update.json")) {
             return ReleaseManifestSource(asset.url)
         }
     }
@@ -446,3 +446,8 @@ internal fun WorkbenchUpdateDialog(updates: WorkbenchUpdates, running: Int, busy
         confirmButton = { Button(enabled = !busy, onClick = { confirming = false; updates.install(context) }) { Text("继续安装") } },
     )
 }
+
+// The repository was renamed; releases published before the rename keep the old path.
+internal fun trustedDownloadPath(path: String): Boolean =
+    path.startsWith("/Cass-ette/agent-workbench/releases/download/") ||
+        path.startsWith("/Cass-ette/claude-cchp-manager/releases/download/")

@@ -62,7 +62,7 @@ export function AgentPermissionDialog({ settings, save, close }: {
         我确认启用上述高权限，理解它可访问当前账号可读写的项目外文件。
       </label>}
       <p>只影响之后新建、恢复和分支的工作台会话。系统 CLI 沿用外部设置。系统隐私目录、管理员权限仍由操作系统授权。</p>
-      <button className="secondary-button" onClick={() => void openUrl("https://github.com/Cass-ette/claude-cchp-manager/blob/main/docs/agent-permissions.zh-CN.md").catch(() => setHelpError("无法打开浏览器，请在仓库 docs/agent-permissions.zh-CN.md 查看说明。"))}>权限与工具接入说明（浏览器、技能、MCP）</button>
+      <button className="secondary-button" onClick={() => void openUrl("https://github.com/Cass-ette/agent-workbench/blob/main/docs/agent-permissions.zh-CN.md").catch(() => setHelpError("无法打开浏览器，请在仓库 docs/agent-permissions.zh-CN.md 查看说明。"))}>权限与工具接入说明（浏览器、技能、MCP）</button>
       {helpError && <p role="alert">{helpError}</p>}
       <div className="dialog-actions">
         <button className="secondary-button" onClick={close}>取消</button>

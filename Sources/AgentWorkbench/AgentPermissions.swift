@@ -96,7 +96,7 @@ struct AgentPermissionsSheet: View {
             Text("只影响之后新建、恢复和分支的工作台会话。系统 CLI 沿用外部设置。macOS 隐私目录仍由系统授权；工作台不会自动获取管理员权限。")
                 .foregroundStyle(.secondary)
             Link("权限与工具接入说明（浏览器、技能、MCP）",
-                 destination: URL(string: "https://github.com/Cass-ette/claude-cchp-manager/blob/main/docs/agent-permissions.zh-CN.md")!)
+                 destination: URL(string: "https://github.com/Cass-ette/agent-workbench/blob/main/docs/agent-permissions.zh-CN.md")!)
             HStack {
                 Spacer()
                 Button("取消") { model.isAgentPermissionsPresented = false }

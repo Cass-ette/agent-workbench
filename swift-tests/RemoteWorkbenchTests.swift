@@ -1,7 +1,7 @@
 import XCTest
 import AppKit
 import SwiftTerm
-@testable import ClaudeCCHPManager
+@testable import AgentWorkbench
 
 final class RemoteWorkbenchTests: XCTestCase {
     func testDiscoveryIdentityUsesThePublicKeyRatherThanTheChangingAddress() throws {

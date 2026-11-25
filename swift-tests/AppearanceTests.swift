@@ -2,7 +2,7 @@ import XCTest
 import AppKit
 import SwiftUI
 @testable import SwiftTerm
-@testable import ClaudeCCHPManager
+@testable import AgentWorkbench
 
 final class AppearanceTests: XCTestCase {
     @MainActor func testThemePersistsAndCustomTerminalColorsSurviveMigration() throws {

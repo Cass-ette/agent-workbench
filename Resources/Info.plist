@@ -5,11 +5,11 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh_CN</string>
 	<key>CFBundleExecutable</key>
-	<string>ClaudeCCHPManager</string>
+	<string>AgentWorkbench</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.cassette.cchpmodelmanager</string>
+	<string>com.cassette.agentworkbench</string>
 	<key>CFBundleName</key>
 	<string>Agent 工作台</string>
 	<key>CFBundlePackageType</key>

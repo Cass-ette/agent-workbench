@@ -12,7 +12,7 @@ Android 可通过 SSH 接续新版 Mac / Windows 工作台内的同一终端，�
 
 三端支持 Catppuccin 浅色、深色和跟随系统；切换不重启终端。Mac 项目标签可拖动排序或右键移动，详见[外观与项目标签](docs/appearance.zh-CN.md)。
 
-从 [GitHub Releases](https://github.com/Cass-ette/claude-cchp-manager/releases) 下载客户端。Windows、macOS 和 Android 的默认安装包都不带 CCHP 服务端、Docker 或本地模型。
+从 [GitHub Releases](https://github.com/Cass-ette/agent-workbench/releases) 下载客户端。Windows、macOS 和 Android 的默认安装包都不带 CCHP 服务端、Docker 或本地模型。
 
 | 平台 | 下载 | 另外需要什么 |
 | --- | --- | --- |
@@ -89,7 +89,7 @@ Requirements: macOS 14+, Swift 6.2+, Python 3, and whichever CLI you intend to u
 
 For remote HTTPS metadata queries, the macOS app prefers Homebrew or Miniconda Python over the system Python, whose older LibreSSL may fail TLS negotiation even when a browser connects successfully. Set `CCHP_MANAGER_PYTHON` in the app's launch environment to choose a specific Python executable. This affects only the app's metadata backend, not the configured gateway or the Agent CLI. Windows uses Rustls and Android uses the system HTTPS implementation; neither depends on macOS Python.
 
-Run `./build-app.command`. The app bundle is written to `build/CCHP Model Manager.app`. Run `./package-friend.command` to create a client-only ZIP. This ad-hoc signed build is not notarized; broad distribution requires an Apple Developer ID signature and notarization.
+Run `./build-app.command`. The app bundle is written to `build/Agent Workbench.app`. Run `./package-friend.command` to create a client-only ZIP. This ad-hoc signed build is not notarized; broad distribution requires an Apple Developer ID signature and notarization.
 
 The app includes the macOS SwiftTerm source at commit `282c3c3a932b55c129628876b70f37d993af1615` (tag `1.99.3`) under its MIT license. The local target omits SwiftTerm's unrelated cross-platform package dependencies, which otherwise make SwiftPM fetch their complete Git histories on macOS. License and provenance are in `Vendor/SwiftTerm/UPSTREAM.md`.
 
@@ -105,6 +105,6 @@ Native Jetpack Compose implementation is under `android/`. It targets local Term
 
 ## 测试版与更新
 
-日常构建发布到 [GitHub Releases](https://github.com/Cass-ette/claude-cchp-manager/releases)，允许下载安装。客户端按版本号显示成熟度：`0.x.y` 是测试版，`1.0.0` 起是正式版；GitHub 的 Pre-release / Latest 标签不控制更新发现。macOS、Windows、Android 优先读取固定更新清单，失败时回退 Release 清单。升级保留原用户目录中的配置、Key 和历史，安装由用户确认，不会在检查或下载时重启终端。
+日常构建发布到 [GitHub Releases](https://github.com/Cass-ette/agent-workbench/releases)，允许下载安装。客户端按版本号显示成熟度：`0.x.y` 是测试版，`1.0.0` 起是正式版；GitHub 的 Pre-release / Latest 标签不控制更新发现。macOS、Windows、Android 优先读取固定更新清单，失败时回退 Release 清单。升级保留原用户目录中的配置、Key 和历史，安装由用户确认，不会在检查或下载时重启终端。
 
 旧客户端若无法发现测试版，请先从发布页手动覆盖安装一次。Android 必须使用与现有安装同签名的包。详见 [三端更新与发布](docs/updates.zh-CN.md)。

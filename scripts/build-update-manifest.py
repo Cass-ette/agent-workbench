@@ -9,7 +9,7 @@ import shutil
 import zipfile
 from pathlib import Path
 
-REPO = "https://github.com/Cass-ette/claude-cchp-manager"
+REPO = "https://github.com/Cass-ette/agent-workbench"
 VERSION = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 
 
@@ -51,8 +51,8 @@ def build_manifest(artifacts: Path, notes: str, tag: str, output: Path, channel:
 
     mac = one_file(artifacts / "macos-agent-workbench", "*.zip")
     with zipfile.ZipFile(mac) as archive:
-        info = plistlib.loads(archive.read("CCHP Model Manager.app/Contents/Info.plist"))
-    if info["CFBundleIdentifier"] != "com.cassette.cchpmodelmanager":
+        info = plistlib.loads(archive.read("Agent Workbench.app/Contents/Info.plist"))
+    if info["CFBundleIdentifier"] != "com.cassette.agentworkbench":
         raise ValueError("Unexpected macOS bundle identifier")
     windows_dir = artifacts / "windows-agent-workbench-installer"
     windows_version = (windows_dir / "version.txt").read_text(encoding="utf-8").strip()

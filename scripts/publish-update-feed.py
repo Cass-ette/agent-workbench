@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 
-REPOSITORY = "Cass-ette/claude-cchp-manager"
+REPOSITORY = "Cass-ette/agent-workbench"
 BRANCH = "update-feed"
 
 

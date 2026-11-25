@@ -12,13 +12,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.isOpaque = false
             window.backgroundColor = .clear
             window.isMovableByWindowBackground = false
-            window.setFrameAutosaveName("ClaudeCCHPManager")
+            window.setFrameAutosaveName("AgentWorkbench")
         }
     }
 }
 
 @main
-struct ClaudeCCHPManagerApp: App {
+struct AgentWorkbenchApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = ManagerModel()
     @StateObject private var updates = WorkbenchUpdates()

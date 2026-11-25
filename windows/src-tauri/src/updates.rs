@@ -14,10 +14,10 @@ use std::{
 use tauri::{AppHandle, Manager, State, ipc::Channel};
 
 const UPDATE_MANIFEST: &str =
-    "https://raw.githubusercontent.com/Cass-ette/claude-cchp-manager/update-feed/update.json";
+    "https://raw.githubusercontent.com/Cass-ette/agent-workbench/update-feed/update.json";
 
 const RELEASE_FEED: &str =
-    "https://api.github.com/repos/Cass-ette/claude-cchp-manager/releases?per_page=20";
+    "https://api.github.com/repos/Cass-ette/agent-workbench/releases?per_page=20";
 
 #[derive(Deserialize)]
 struct Release {
@@ -43,10 +43,15 @@ fn trusted_release_url(address: &str) -> bool {
             && url.port().is_none()
             && url.query().is_none()
             && url.fragment().is_none()
-            && url
-                .path()
-                .starts_with("/Cass-ette/claude-cchp-manager/releases/download/")
+            && trusted_download_path(url.path())
     })
+}
+
+/// The repository was renamed; releases published before the rename keep the old path.
+fn trusted_download_path(path: &str) -> bool {
+    ["/Cass-ette/agent-workbench/releases/download/", "/Cass-ette/claude-cchp-manager/releases/download/"]
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
 }
 
 fn select_manifest(mut releases: Vec<Release>) -> Option<String> {
@@ -238,9 +243,7 @@ fn parse_update(bytes: &[u8], current: &str, arch: &str) -> Result<Option<Availa
         || url.port().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
-        || !url
-            .path()
-            .starts_with("/Cass-ette/claude-cchp-manager/releases/download/")
+        || !trusted_download_path(url.path())
         || !url.path().ends_with("-setup.exe")
         || package.size == 0
         || package.size > 1_073_741_824
@@ -501,6 +504,12 @@ mod tests {
         ] {
             assert!(select_manifest(vec![release("2026-02-01", true, false, &bad)]).is_none());
         }
+        // Packages published after the repository rename use the new path.
+        let renamed = url.replace("claude-cchp-manager", "agent-workbench");
+        assert_eq!(
+            select_manifest(vec![release("2026-03-01", true, false, &renamed)]),
+            Some(renamed.into())
+        );
         assert!(select_manifest(vec![]).is_none());
     }
 
@@ -514,7 +523,7 @@ mod tests {
                 "arch": "x64",
                 "channel": "stable",
                 "version": "0.2.0",
-                "url": "https://github.com/Cass-ette/claude-cchp-manager/releases/download/test/app-setup.exe",
+                "url": "https://github.com/Cass-ette/agent-workbench/releases/download/test/app-setup.exe",
                 "size": 10,
                 "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             }]

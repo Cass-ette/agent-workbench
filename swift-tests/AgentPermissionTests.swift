@@ -1,5 +1,5 @@
 import XCTest
-@testable import ClaudeCCHPManager
+@testable import AgentWorkbench
 
 final class AgentPermissionTests: XCTestCase {
     func testLocalTerminalKeepsProxyButDoesNotCopyOtherClientCredentials() {

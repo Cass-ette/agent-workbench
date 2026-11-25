@@ -3,7 +3,7 @@ import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { version } from "../package.json";
 
-const releasePage = "https://github.com/Cass-ette/claude-cchp-manager/releases";
+const releasePage = "https://github.com/Cass-ette/agent-workbench/releases";
 const key = "workbench.update." + version;
 
 interface Available {

@@ -1,6 +1,6 @@
-# 本机 CCHP 部署
+# 可选：自建 CCHP 网关
 
-此目录提供朋友自用的 CCHP Compose 部署模板。它拉取 CCH-HQ 发布的多架构镜像，不包含 CCHP 服务端源码，也不包含任何人的上游 Key、下游 Key、数据库或 `.env`。
+Agent 工作台不依赖 CCHP；任何兼容 Anthropic Messages / OpenAI Responses 的网关都可以。这一页只给想自己跑一套 CCHP 的人一份参考：固定的 Compose 模板和一键脚本。它拉取 CCH-HQ 发布的多架构镜像，不包含 CCHP 服务端源码，也不包含任何人的上游 Key、下游 Key、数据库或 `.env`。
 
 ## 要求
 
@@ -20,7 +20,7 @@
 2. 在供应商管理中创建供应商、配置端点，并把自己的上游 API Key 保存在 CCHP 中。
 3. 在供应商分组和路由中限制模型范围；免费分组不要意外包含付费路由。
 4. 在下游 LLM 密钥页面创建一把客户端调用 Key，按需要绑定分组。
-5. 打开 `Agent Workbench.app`，添加这把下游调用 Key，选择模型和工作目录后启动 Claude 或 Codex。
+5. 打开 Agent 工作台，新建调用配置：网关填 `http://127.0.0.1:<网关端口>`，Key 填那把下游调用 Key；选择模型和工作目录后启动 Claude 或 Codex。
 
 官方文档：
 

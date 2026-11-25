@@ -76,6 +76,67 @@ class CodexConfigTests(unittest.TestCase):
         for name in ("CCH_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_SQLITE_HOME"):
             self.assertNotIn(name, environment)
 
+    def test_legacy_layout_moves_once_and_carries_the_backup_pointer(self):
+        with tempfile.TemporaryDirectory() as home:
+            legacy = Path(home) / ".config/cchp-client/claude-test"
+            legacy.mkdir(parents=True)
+            (legacy / "key-profiles.json").write_text("[]")
+            (legacy / "keys").mkdir()
+            (legacy / "keys/secret").write_text("x" * 30)
+            (legacy / "keys/secret").chmod(0o600)
+            (Path(home) / ".config/cchp-client/latest-backup.txt").write_text("/somewhere/backup\n")
+            with patch.object(BACKEND, "LEGACY_TEST_ROOT", legacy), \
+                 patch.object(BACKEND, "LEGACY_CLIENT_ROOT", legacy.parent), \
+                 patch.object(BACKEND, "TEST_ROOT", Path(home) / ".config/agent-workbench"):
+                BACKEND.migrate_legacy_layout()
+                target = Path(home) / ".config/agent-workbench"
+                self.assertEqual((target / "key-profiles.json").read_text(), "[]")
+                self.assertEqual((target / "keys/secret").stat().st_mode & 0o777, 0o600)
+                self.assertEqual((target / "latest-backup.txt").read_text().strip(), "/somewhere/backup")
+                self.assertFalse(legacy.parent.exists())
+                # Second run is a no-op.
+                BACKEND.migrate_legacy_layout()
+                self.assertTrue((target / "keys/secret").is_file())
+
+    def test_legacy_layout_never_overwrites_an_existing_new_layout(self):
+        with tempfile.TemporaryDirectory() as home:
+            legacy = Path(home) / ".config/cchp-client/claude-test"
+            legacy.mkdir(parents=True)
+            (legacy / "key-profiles.json").write_text('[{"legacy": true}]')
+            target = Path(home) / ".config/agent-workbench"
+            target.mkdir(parents=True)
+            (target / "key-profiles.json").write_text('[{"new": true}]')
+            with patch.object(BACKEND, "LEGACY_TEST_ROOT", legacy), \
+                 patch.object(BACKEND, "LEGACY_CLIENT_ROOT", legacy.parent), \
+                 patch.object(BACKEND, "TEST_ROOT", target):
+                BACKEND.migrate_legacy_layout()
+            self.assertEqual((target / "key-profiles.json").read_text(), '[{"new": true}]')
+            self.assertTrue(legacy.is_dir())
+
+    def test_legacy_layout_keeps_a_non_empty_legacy_parent(self):
+        with tempfile.TemporaryDirectory() as home:
+            legacy = Path(home) / ".config/cchp-client/claude-test"
+            legacy.mkdir(parents=True)
+            (legacy / "key-profiles.json").write_text("[]")
+            (legacy.parent / "unrelated").write_text("keep me")
+            target = Path(home) / ".config/agent-workbench"
+            with patch.object(BACKEND, "LEGACY_TEST_ROOT", legacy), \
+                 patch.object(BACKEND, "LEGACY_CLIENT_ROOT", legacy.parent), \
+                 patch.object(BACKEND, "TEST_ROOT", target):
+                BACKEND.migrate_legacy_layout()
+            self.assertFalse(legacy.exists())
+            self.assertEqual((legacy.parent / "unrelated").read_text(), "keep me")
+
+    def test_legacy_layout_is_a_no_op_without_the_old_directory(self):
+        with tempfile.TemporaryDirectory() as home:
+            target = Path(home) / ".config/agent-workbench"
+            with patch.object(BACKEND, "LEGACY_TEST_ROOT", Path(home) / ".config/cchp-client/claude-test"), \
+                 patch.object(BACKEND, "LEGACY_CLIENT_ROOT", Path(home) / ".config/cchp-client"), \
+                 patch.object(BACKEND, "TEST_ROOT", target):
+                BACKEND.migrate_legacy_layout()
+            self.assertFalse(target.exists())
+            self.assertFalse((Path(home) / ".config").exists())
+
     def test_history_launch_uses_native_fork(self):
         BACKEND.CODEX = Path("/fake/codex")
         command = BACKEND.build_codex_command(

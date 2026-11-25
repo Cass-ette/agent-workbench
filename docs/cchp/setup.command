@@ -85,17 +85,11 @@ print "等待 CCHP 就绪……"
 for attempt in {1..60}; do
     if curl --silent --fail "http://127.0.0.1:${control_port}/readyz" >/dev/null \
         && curl --silent --fail "http://127.0.0.1:${gateway_port}/readyz" >/dev/null; then
-        manager_backend="${SCRIPT_DIR}/../../backend/workbench_backend.py"
-        if [[ -r "$manager_backend" ]] && command -v python3 >/dev/null 2>&1; then
-            if ! printf '{"url":"http://127.0.0.1:%s"}\n' "$gateway_port" \
-                | python3 "$manager_backend" set-gateway-stdin >/dev/null; then
-                print -u2 "管理器网关配置未自动更新；可在应用内将默认网关设置为 http://127.0.0.1:${gateway_port}。"
-            fi
-        fi
         print "CCHP 已启动。"
         print "管理控制台：http://localhost:${control_port}"
         print "模型网关：http://127.0.0.1:${gateway_port}/v1"
         print "接下来在控制台添加你自己的上游供应商 Key，并创建下游调用 Key。"
+        print "然后在 Agent 工作台的调用配置里填写 http://127.0.0.1:${gateway_port} 和那把下游 Key。"
         open "http://localhost:${control_port}"
         exit 0
     fi

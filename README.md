@@ -51,7 +51,7 @@ Android 默认没有 root，因此不定义手机系统级“全局部署”或�
 
 macOS SwiftUI terminal-first Agent workbench for Claude Code and Codex CLI. It keeps real coding sessions in independent embedded PTY tabs, while gateway and model settings stay in reusable task profiles. A private CCHP deployment is optional; each saved key profile can point at its own local or HTTPS gateway.
 
-The repository includes a separate [optional CCHP deployment template](deployment/cchp-local/README.md). It is not part of any client download.
+CCHP is one of many compatible gateways; a [reference Compose template](docs/cchp/README.md) lives under `docs/` for people who want to self-host it. It is not part of any client download.
 
 ## Features
 
@@ -75,7 +75,7 @@ The repository includes a separate [optional CCHP deployment template](deploymen
 - Read CCHP account balances, spendable credit, published group ratio, and quota rules using the selected profile's existing LLM key. Gateway metadata refreshes at most once per minute, or on manual refresh. Other compatible inference gateways can still be used when they do not expose this optional CCHP account API.
 - Optionally connect a control-plane URL and a read-only management token for actual gateway billing. The panel shows today's UTC spend and the latest 20 requests in the last 24 hours, explicitly scoped to that management user's keys, not to one local session. Pending or absent prices remain unknown; exact decimal amounts and genuine zero charges are preserved. This is an advanced optional account-wide connection; it is not required to read current-Key public selling prices and is not a per-session receipt.
 
-Adding a key sends it to the local Python backend over stdin. The backend queries only `GET /v1/models` and stores the key and profile data in `~/.config/cchp-client/claude-test/` with restrictive permissions. It does not send an inference request. Keys, runtime configuration, and conversation data are not part of this repository.
+Adding a key sends it to the local Python backend over stdin. The backend queries only `GET /v1/models` and stores the key and profile data in `~/.config/agent-workbench/` with restrictive permissions; a pre-rename `~/.config/cchp-client/claude-test/` is moved there once on first launch. It does not send an inference request. Keys, runtime configuration, and conversation data are not part of this repository.
 
 Launching Claude may incur local CCHP balance and upstream charges. Resuming a session requires confirmation because its history is sent to the selected key and upstream. The app does not edit the user's regular Claude or Codex configuration.
 
@@ -95,9 +95,9 @@ The app includes the macOS SwiftTerm source at commit `282c3c3a932b55c129628876b
 
 ## Optional self-hosted gateway
 
-Run `deployment/cchp-local/setup.command` on the friend's Mac after installing and starting Docker Desktop to deploy their own CCHP instance. The script generates a new `.env`, avoids occupied host ports, starts the official CCHP containers, and opens the local control panel. The friend then adds their own upstream provider keys in CCHP and creates a downstream LLM key for this manager. The manager must receive a gateway-issued downstream key, never an upstream provider key. Existing compatible gateways can be configured directly without deploying CCHP.
+Any gateway that speaks Anthropic Messages and OpenAI Responses works. To self-host CCHP, see [`docs/cchp/README.md`](docs/cchp/README.md); on a Mac with Docker Desktop running, `docs/cchp/setup.command` generates a fresh `.env`, avoids occupied host ports, starts the official CCHP containers, and opens the local control panel. The script generates a new `.env`, avoids occupied host ports, starts the official CCHP containers, and opens the local control panel. Add your own upstream provider keys in CCHP and create a downstream LLM key for the workbench. The workbench must receive a gateway-issued downstream key, never an upstream provider key. Existing compatible gateways can be configured directly without deploying CCHP.
 
-The related project [ding113/claude-code-hub](https://github.com/ding113/claude-code-hub) is a separate MIT-licensed CC Hub implementation. It is not the CCHP Plus image used by the deployment template. Its documented public endpoint is primarily OpenAI Chat Completions and it does not promise the Anthropic Messages plus OpenAI Responses translation that this manager currently relies on, so it should not be substituted without a protocol compatibility test.
+The related project [ding113/claude-code-hub](https://github.com/ding113/claude-code-hub) is a separate MIT-licensed CC Hub implementation. It is not the CCHP Plus image used by the reference template. Its documented public endpoint is primarily OpenAI Chat Completions and it does not promise the Anthropic Messages plus OpenAI Responses translation that this manager currently relies on, so it should not be substituted without a protocol compatibility test.
 
 ## Android
 

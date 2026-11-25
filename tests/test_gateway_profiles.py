@@ -19,7 +19,6 @@ class GatewayProfileTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
         BACKEND.TEST_ROOT = root / "test"
-        BACKEND.CLIENT_ROOT = root
         BACKEND.CONFIG_DIR = BACKEND.TEST_ROOT / "config"
         BACKEND.WORKSPACE = BACKEND.TEST_ROOT / "workspace"
         BACKEND.KEY_FILE = BACKEND.TEST_ROOT / "free-key"

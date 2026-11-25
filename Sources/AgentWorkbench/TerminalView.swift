@@ -20,7 +20,7 @@ final class FileDropTerminalView: LocalProcessTerminalView {
     }
     private(set) var isSelectedForInput = false
     var attachmentDirectory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/cchp-client/claude-test/attachments", isDirectory: true)
+        .appendingPathComponent(".config/agent-workbench/attachments", isDirectory: true)
 
     func setSelected(_ selected: Bool) {
         isSelectedForInput = selected

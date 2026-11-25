@@ -23,8 +23,9 @@ import agent_reasoning
 
 
 USER_ROOT = Path.home()
-CLIENT_ROOT = USER_ROOT / ".config/cchp-client"
-TEST_ROOT = CLIENT_ROOT / "claude-test"
+TEST_ROOT = USER_ROOT / ".config/agent-workbench"
+LEGACY_CLIENT_ROOT = USER_ROOT / ".config/cchp-client"
+LEGACY_TEST_ROOT = LEGACY_CLIENT_ROOT / "claude-test"
 CONFIG_DIR = TEST_ROOT / "config"
 WORKSPACE = TEST_ROOT / "workspace"
 KEY_FILE = TEST_ROOT / "free-api-key"
@@ -183,6 +184,32 @@ def tool_args(home, client):
         return None
     return tools_module().apply_tools(root, home, client,
         [sys.executable, str(Path(__file__).with_name("screen_mcp.py"))])
+
+
+def migrate_legacy_layout():
+    """Move the pre-rename ~/.config/cchp-client/claude-test to ~/.config/agent-workbench once.
+
+    Renames the directory in place so permissions, keys, histories and Codex homes are
+    preserved. Never merges into or overwrites an existing new layout. The small
+    latest-backup.txt pointer that used to live one level up is carried along.
+    """
+    if not LEGACY_TEST_ROOT.is_dir() or TEST_ROOT.exists():
+        return
+    TEST_ROOT.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        LEGACY_TEST_ROOT.rename(TEST_ROOT)
+    except OSError:
+        return  # Different filesystem or busy; the user can move it manually.
+    pointer = LEGACY_CLIENT_ROOT / "latest-backup.txt"
+    if pointer.is_file() and not (TEST_ROOT / "latest-backup.txt").exists():
+        try:
+            pointer.rename(TEST_ROOT / "latest-backup.txt")
+        except OSError:
+            pass
+    try:
+        LEGACY_CLIENT_ROOT.rmdir()  # Only succeeds once the legacy parent is empty.
+    except OSError:
+        pass
 
 
 def prepare_isolated_config():
@@ -1159,7 +1186,9 @@ def launch(model, smoke=False, selected_key=None, selected_name=None, workspace=
 
 def status():
     prepare_isolated_config()
-    latest = CLIENT_ROOT / "latest-backup.txt"
+    latest = TEST_ROOT / "latest-backup.txt"
+    if not latest.is_file() and (LEGACY_CLIENT_ROOT / "latest-backup.txt").is_file():
+        latest = LEGACY_CLIENT_ROOT / "latest-backup.txt"
     backup = Path(latest.read_text().strip()) if latest.is_file() else None
     checks = {}
     if backup and (backup / "manifest.json").is_file():
@@ -1243,6 +1272,7 @@ def main():
     parser.add_argument("--permission-mode", choices=["restricted", "standard", "full", "dangerous"], default="restricted")
     parser.add_argument("--reasoning-effort", choices=["default", *agent_reasoning.LEVELS])
     arguments = parser.parse_args()
+    migrate_legacy_layout()
     if arguments.action.startswith("tools-"):
         if arguments.client not in ("codex", "claude"):
             raise RuntimeError("请选择客户端")

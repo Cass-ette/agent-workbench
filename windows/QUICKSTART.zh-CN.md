@@ -37,7 +37,7 @@ Claude 需要支持 Anthropic Messages 的网关，Codex 需要支持 OpenAI Res
 
 `http://127.0.0.1:8081` 只是本机网关地址的示例，不是公共服务。若网关在另一台电脑，请填写可访问的 HTTPS 地址，或先建立 SSH 隧道再填 Windows 本机转发地址。停止隧道后连接也会停止。
 
-仓库中的 `deployment/cchp-local/setup.command` 是 macOS 部署脚本，不能直接在 Windows 双击使用。Windows 用户可以连接已有网关；自行部署网关需按网关自身的 Windows/Docker 文档操作。
+仓库中的 `docs/cchp/setup.command` 是 macOS 部署脚本，不能直接在 Windows 双击使用。Windows 用户可以连接已有网关；自行部署网关需按网关自身的 Windows/Docker 文档操作。
 
 ## 配置与会话
 

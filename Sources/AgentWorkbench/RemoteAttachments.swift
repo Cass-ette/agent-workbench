@@ -12,7 +12,7 @@ final class RemoteAttachments {
     }
     private var uploads: [String: Upload] = [:]
     private let root: URL
-    init(root: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/cchp-client/claude-test/attachments/remote")) { self.root = root }
+    init(root: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/agent-workbench/attachments/remote")) { self.root = root }
 
     func receive(_ request: [String: Any], session: String, owner: String) throws -> [String: Any] {
         guard let id = request["upload_id"] as? String, UUID(uuidString: id) != nil,

@@ -31,6 +31,11 @@ android {
             keyAlias = "AndroidDebugKey"
             keyPassword = "android"
         }
+        // Keep the installed certificate so preview users can upgrade without losing data.
+        // The release build remains non-debuggable; the key's old alias is only its identity.
+        buildTypes.getByName("release") {
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
     buildFeatures { compose = true; buildConfig = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }

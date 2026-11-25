@@ -20,11 +20,14 @@ def one_file(directory: Path, pattern: str) -> Path:
     return matches[0]
 
 
-def build_manifest(artifacts: Path, notes: str, tag: str, output: Path, channel: str = "preview") -> dict:
+def build_manifest(artifacts: Path, notes: str, tag: str, output: Path, channel: str = "preview",
+                   android_development_compatible: bool = False) -> dict:
     if not re.fullmatch(f"(?:workbench-v{VERSION}|workbench-preview-[0-9]+-[0-9]+)", tag):
         raise ValueError("Release tag must use workbench-vMAJOR.MINOR.PATCH or workbench-preview-RUN-ATTEMPT")
     if channel not in {"preview", "stable"}:
         raise ValueError("Unknown release channel")
+    if android_development_compatible and channel != "stable":
+        raise ValueError("Android migration alias requires a stable release APK")
     if not notes.strip() or len(notes.encode("utf-8")) > 64 * 1024:
         raise ValueError("Provide release notes, up to 64 KiB")
 
@@ -61,6 +64,11 @@ def build_manifest(artifacts: Path, notes: str, tag: str, output: Path, channel:
     apk_info, = metadata["elements"]
     if apk_info["filters"] or not 0 < apk_info["versionCode"] <= 2_100_000_000:
         raise ValueError("Expected one universal APK with a valid versionCode")
+    if channel == "stable":
+        expected = tag.removeprefix("workbench-v")
+        versions = (info["CFBundleShortVersionString"], windows_version, apk_info["versionName"])
+        if not tag.startswith("workbench-v") or expected.startswith("0.") or any(v != expected for v in versions):
+            raise ValueError("Stable packages must all match the stable release tag version")
 
     output.mkdir(parents=True, exist_ok=False)
     packages = [
@@ -71,6 +79,10 @@ def build_manifest(artifacts: Path, notes: str, tag: str, output: Path, channel:
     ]
     (output / "SHA256SUMS.txt").write_text(
         "".join(f"{p['sha256']}  {p['url'].rsplit('/', 1)[-1]}\n" for p in packages), encoding="utf-8")
+    if android_development_compatible:
+        # Older clients select by build type, not certificate. Both entries point to
+        # the same verified release APK signed with the existing persistent key.
+        packages.append(dict(packages[-1], signing="development"))
     return {"schema": 1, "notes": notes.strip(), "packages": packages}
 
 
@@ -81,9 +93,11 @@ def main() -> None:
     parser.add_argument("--tag", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--channel", choices=("preview", "stable"), default="preview")
+    parser.add_argument("--android-development-compatible", action="store_true",
+                        help="Also offer the release APK to preview installs; requires verifying the same signing certificate")
     args = parser.parse_args()
     notes = args.notes.read_text(encoding="utf-8")
-    manifest = build_manifest(args.artifacts, notes, args.tag, args.output, args.channel)
+    manifest = build_manifest(args.artifacts, notes, args.tag, args.output, args.channel, args.android_development_compatible)
     (args.output / "update.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 

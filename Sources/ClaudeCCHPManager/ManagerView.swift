@@ -4,6 +4,7 @@ import SwiftUI
 struct ManagerView: View {
     @ObservedObject var model: ManagerModel
     @ObservedObject var updates: WorkbenchUpdates
+    @Environment(\.workbenchPalette) private var palette
     @State private var isAddProfilePresented = false
     @State private var profilePendingDeletion: KeyProfile?
     @State private var isProfileDeleteConfirmationPresented = false
@@ -16,7 +17,8 @@ struct ManagerView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
-                .navigationSplitViewColumnWidth(min: 180, ideal: 205, max: 245)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 224, max: 260)
+                .background(palette.color("mantle"))
         } detail: {
             detail
         }
@@ -247,6 +249,8 @@ struct ManagerView: View {
                 Label("工具与插件", systemImage: "puzzlepiece.extension")
             }.buttonStyle(.borderless).padding(.horizontal, 16).padding(.vertical, 6)
 
+            AppearancePicker().padding(.horizontal, 16).padding(.vertical, 12)
+
             Spacer(minLength: 12)
             Divider().opacity(0.35)
             HStack(spacing: 8) {
@@ -284,7 +288,7 @@ struct ManagerView: View {
                 }
                 Divider()
             }
-            TerminalPanel(model: model,
+            TerminalPanel(model: model, style: model.terminalStyle,
                           isFullScreen: isTerminalFullScreen,
                           onToggleFullScreen: toggleTerminalFullScreen,
                           isEmpty: model.terminalSessions.isEmpty,
@@ -294,7 +298,7 @@ struct ManagerView: View {
                 statusBar
             }
         }
-        .background(.background)
+        .background(palette.color("base"))
     }
 
     private func toggleTerminalFullScreen() {
@@ -346,7 +350,7 @@ struct ManagerView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 9)
-        .background(.bar)
+        .background(palette.color("mantle"))
     }
 
     @State private var reasoningPresented = false
@@ -862,6 +866,9 @@ private struct TerminalAppearanceSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
+            Toggle("终端跟随应用主题", isOn: $draft.followAppearance)
+            Text("关闭后使用下方自定义配色；已有颜色会保留。")
+                .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Image(systemName: "paintbrush.pointed")
                     .foregroundStyle(Color.accentColor)
@@ -871,6 +878,7 @@ private struct TerminalAppearanceSheet: View {
                 Menu("配色预设") {
                     ForEach(TerminalThemePreset.all) { preset in
                         Button(preset.title) {
+                            draft.followAppearance = false
                             draft.foreground = preset.foreground
                             draft.background = preset.background
                             draft.cursor = preset.cursor

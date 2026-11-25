@@ -24,6 +24,7 @@
     }
   },
   "bundle": {
+    "resources": ["../../shared/CATPPUCCIN-LICENSE"],
     "active": true,
     "targets": "all",
     "icon": [

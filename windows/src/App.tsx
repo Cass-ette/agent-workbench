@@ -35,7 +35,9 @@ import { SSHConnection } from "./SSHConnection";
 import { AgentPermissionDialog, permissionLabel, permissionStorageKey, readAgentPermissions } from "./AgentPermissions";
 import { ToolBridge } from "./ToolBridge";
 import { installImagePaste } from "./TerminalClipboard";
-import { reorderSessions } from "./SessionOrder";
+import { reorderSessions, tabDropTarget } from "./SessionOrder";
+import { AppearancePicker, terminalTheme, useAppearance } from "./Appearance";
+import type { ResolvedTheme } from "./Appearance";
 import type { AgentPermissions } from "./AgentPermissions";
 import type { UsageSnapshot } from "./UsagePanel";
 
@@ -117,6 +119,7 @@ const emptyConfig: AppConfig = {
 };
 
 function App() {
+  const appearance = useAppearance();
   const [effortPreferences, setEffortPreferences] = useState(readEffortPreferences);
   const [reasoningTarget, setReasoningTarget] = useState<{ id: string; client: ClientKind } | null>(null);
   const [showTools, setShowTools] = useState(false);
@@ -150,6 +153,7 @@ function App() {
   const sessionsRef = useRef<Session[]>([]);
   const [draggedSessionId, setDraggedSessionId] = useState("");
   const [dropTargetId, setDropTargetId] = useState("");
+  const [dropAfter, setDropAfter] = useState(false);
   const tabPointer = useRef<{ id: string; x: number; y: number; moving: boolean; target: string; after: boolean } | null>(null);
   const suppressTabClick = useRef(false);
   const [selectedSessionId, setSelectedSessionId] = useState("");
@@ -655,11 +659,12 @@ function App() {
           <div className="brand-mark"><Activity size={17} strokeWidth={2.2} /></div>
           <div>
             <div className="brand-name">Agent Workbench</div>
-            <div className="brand-caption">LOCAL SESSION MANAGER</div>
+            <div className="brand-caption">项目与终端会话</div>
           </div>
         </div>
         <div className="topbar-status">
           <span className="status-dot" />本机工作区
+          <AppearancePicker value={appearance.mode} change={appearance.changeMode} />
           <WorkbenchUpdate running={sessions.filter((session) => session.exitCode === null).length} />
         </div>
       </header>
@@ -668,7 +673,7 @@ function App() {
         <aside className="sidebar">
           <div className="sidebar-heading">
             <div>
-              <span className="eyebrow">CONNECTIONS</span>
+              <span className="eyebrow">调用配置</span>
               <h2>工作台调用配置</h2>
             </div>
             <button className="icon-button sidebar-add" title="添加调用配置" onClick={() => setShowProfileDialog(true)}>
@@ -858,7 +863,7 @@ function App() {
               <div className="terminal-tabs" role="tablist">
                 {sessions.map((session) => (
                   <div key={session.id} data-session-id={session.id}
-                    className={`terminal-tab ${session.id === selectedSessionId ? "active" : ""} ${draggedSessionId === session.id ? "dragging" : ""} ${dropTargetId === session.id ? "drop-target" : ""}`}
+                    className={`terminal-tab ${session.id === selectedSessionId ? "active" : ""} ${draggedSessionId === session.id ? "dragging" : ""} ${dropTargetId === session.id ? "drop-target" : ""} ${dropTargetId === session.id && dropAfter ? "drop-after" : ""}`}
                     onPointerDown={(event) => {
                       if (event.button !== 0 || (event.target as Element).closest(".tab-close")) return;
                       suppressTabClick.current = false;
@@ -871,10 +876,18 @@ function App() {
                       if (!drag.moving && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return;
                       drag.moving = true;
                       setDraggedSessionId(drag.id);
-                      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>(".terminal-tab");
-                      drag.target = target?.dataset.sessionId ?? "";
-                      drag.after = !!target && event.clientX >= target.getBoundingClientRect().left + target.getBoundingClientRect().width / 2;
+                      const row = event.currentTarget.closest<HTMLElement>(".terminal-tabs");
+                      if (!row) return;
+                      const rect = row.getBoundingClientRect();
+                      if (event.clientX < rect.left + 32) row.scrollLeft -= 20;
+                      else if (event.clientX > rect.right - 32) row.scrollLeft += 20;
+                      const target = tabDropTarget(event.clientX, Array.from(row.querySelectorAll<HTMLElement>(".terminal-tab")).map(tab => {
+                        const bounds = tab.getBoundingClientRect(); return { id: tab.dataset.sessionId!, left: bounds.left, right: bounds.right };
+                      }), drag.id);
+                      drag.target = target?.id ?? "";
+                      drag.after = target?.after ?? false;
                       setDropTargetId(drag.target);
+                      setDropAfter(drag.after);
                     }}
                     onPointerUp={(event) => {
                       const drag = tabPointer.current;
@@ -918,6 +931,7 @@ function App() {
                   key={session.id}
                   session={session}
                   active={session.id === selectedSessionId}
+                  theme={appearance.resolved}
                   register={registerTerminal}
                   unregister={unregisterTerminal}
                   canReceiveInput={canReceiveInput}
@@ -1091,12 +1105,14 @@ function HistoryOutline({ rows, profiles, onSelect, onArchive, archiving }: {
 function TerminalPane({
   session,
   active,
+  theme,
   register,
   unregister,
   canReceiveInput,
 }: {
   session: Session;
   active: boolean;
+  theme: ResolvedTheme;
   register: (id: string, terminal: Terminal) => void;
   unregister: (id: string, terminal: Terminal) => void;
   canReceiveInput: (id: string) => boolean;
@@ -1107,6 +1123,12 @@ function TerminalPane({
   const running = useRef(session.exitCode === null);
   running.current = session.exitCode === null;
   const [pasteError, setPasteError] = useState("");
+  const terminalInstance = useRef<Terminal | null>(null);
+  const initialTheme = useRef(theme);
+
+  useEffect(() => {
+    if (terminalInstance.current) terminalInstance.current.options.theme = terminalTheme(theme);
+  }, [theme]);
 
   useEffect(() => {
     if (!active) host.current?.dispatchEvent(new Event("workbench-input-revoked"));
@@ -1122,29 +1144,9 @@ function TerminalPane({
       fontSize: 13,
       lineHeight: 1.18,
       scrollback: 5000,
-      theme: {
-        background: "#17191c",
-        foreground: "#e5e7eb",
-        cursor: "#93c5fd",
-        selectionBackground: "#3c4658",
-        black: "#202329",
-        red: "#e16d6d",
-        green: "#77b58d",
-        yellow: "#d4ad69",
-        blue: "#7098c7",
-        magenta: "#b38ac4",
-        cyan: "#61a9a3",
-        white: "#c9cdd4",
-        brightBlack: "#666b75",
-        brightRed: "#ef8a8a",
-        brightGreen: "#91cba4",
-        brightYellow: "#e7c783",
-        brightBlue: "#8aaedb",
-        brightMagenta: "#caa0d8",
-        brightCyan: "#80c3bc",
-        brightWhite: "#f3f4f6",
-      },
+      theme: terminalTheme(initialTheme.current),
     });
+    terminalInstance.current = terminal;
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(host.current);
@@ -1178,6 +1180,7 @@ function TerminalPane({
       observer.disconnect();
       input.dispose();
       unregister(session.id, terminal);
+      terminalInstance.current = null;
       terminal.dispose();
     };
   }, [register, session.id, session.title, session.workspace, unregister, canReceiveInput]);

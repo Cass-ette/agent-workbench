@@ -10,6 +10,8 @@ Android 可通过 SSH 接续新版 Mac / Windows 工作台内的同一终端，�
 
 ## 下载与上手
 
+三端支持 Catppuccin 浅色、深色和跟随系统；切换不重启终端。Mac 项目标签可拖动排序或右键移动，详见[外观与项目标签](docs/appearance.zh-CN.md)。
+
 从 [GitHub Releases](https://github.com/Cass-ette/claude-cchp-manager/releases) 下载客户端。Windows、macOS 和 Android 的默认安装包都不带 CCHP 服务端、Docker 或本地模型。
 
 | 平台 | 下载 | 另外需要什么 |

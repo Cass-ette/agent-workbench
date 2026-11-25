@@ -167,9 +167,9 @@ final class EmbeddedTerminalControl: ObservableObject {
     }
 
     func apply(_ style: SharedTerminalStyle, to view: FileDropTerminalView) {
-        guard appliedStyle != style.settings else { return }
+        guard appliedStyle != style.effectiveSettings else { return }
         style.apply(to: view)
-        appliedStyle = style.settings
+        appliedStyle = style.effectiveSettings
     }
 
     func focus() {
@@ -249,6 +249,8 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
 
 struct TerminalPanel: View {
     @ObservedObject var model: ManagerModel
+    @ObservedObject var style: SharedTerminalStyle
+    @Environment(\.workbenchPalette) private var palette
     let isFullScreen: Bool
     let onToggleFullScreen: () -> Void
     let isEmpty: Bool
@@ -301,52 +303,21 @@ struct TerminalPanel: View {
             }
             .padding(.horizontal, 14)
             .frame(height: 40)
-            .background(.bar)
+            .background(palette.color("mantle"))
 
-            HStack(spacing: 0) {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 6) {
-                        ForEach(model.terminalSessions) { session in
-                            TerminalSessionTab(session: session,
-                                               selected: model.selectedTerminalID == session.id,
-                                               onSelect: { model.selectTerminal(session.id) },
-                                               onClose: { model.closeSession(session) })
-                                .onDrag {
-                                    let provider = NSItemProvider()
-                                    let data = Data(session.id.uuidString.utf8)
-                                    provider.registerDataRepresentation(forTypeIdentifier: "com.cassette.workbench.terminal-tab", visibility: .ownProcess) { completion in
-                                        completion(data, nil)
-                                        return nil
-                                    }
-                                    return provider
-                                }
-                                .onDrop(of: [UTType(exportedAs: "com.cassette.workbench.terminal-tab")], isTargeted: nil) { providers in
-                                    guard let provider = providers.first else { return false }
-                                    provider.loadDataRepresentation(forTypeIdentifier: "com.cassette.workbench.terminal-tab") { data, _ in
-                                        guard let data, let id = UUID(uuidString: String(decoding: data, as: UTF8.self)) else { return }
-                                        Task { @MainActor in
-                                            guard model.terminalSessions.contains(where: { $0.id == id }),
-                                                  let index = model.terminalSessions.firstIndex(where: { $0.id == session.id }) else { return }
-                                            model.moveTerminal(id, to: index)
-                                        }
-                                    }
-                                    return true
-                                }
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                }
-                .scrollIndicators(.hidden)
-            }
-            .frame(height: model.terminalSessions.isEmpty ? 0 : 42)
-            .clipped()
-            .background(.bar)
-            .overlay(alignment: .bottom) { Divider() }
+            ProjectSessionTabs(items: model.terminalSessions.map {
+                ProjectTabItem(id: $0.id, title: $0.title, detail: "\($0.workspaceName) · \($0.profileName)", running: $0.isRunning)
+            }, selected: model.selectedTerminalID, palette: palette,
+               select: model.selectTerminal,
+               close: { id in if let session = model.terminalSessions.first(where: { $0.id == id }) { model.closeSession(session) } },
+               move: model.moveTerminal)
+                .frame(height: model.terminalSessions.isEmpty ? 0 : 48)
+                .background(palette.color("mantle"))
+                .overlay(alignment: .bottom) { Divider() }
 
             if let session = model.selectedTerminal {
                 HStack { Spacer(); CurrentSessionReasoning(model: model, session: session).id(session.id) }
-                    .padding(.horizontal, 14).padding(.vertical, 5).background(.bar)
+                    .padding(.horizontal, 14).padding(.vertical, 5).background(palette.color("mantle"))
             }
 
             ZStack {
@@ -354,13 +325,13 @@ struct TerminalPanel: View {
                     VStack(spacing: 10) {
                         Image(systemName: "terminal")
                             .font(.system(size: 28, weight: .light))
-                            .foregroundStyle(Color(nsColor: NSColor(hex: model.terminalStyle.settings.foreground)).opacity(0.58))
+                            .foregroundStyle(Color(nsColor: NSColor(hex: style.effectiveSettings.foreground)).opacity(0.58))
                         Text("准备运行")
                             .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(Color(nsColor: NSColor(hex: model.terminalStyle.settings.foreground)))
+                            .foregroundStyle(Color(nsColor: NSColor(hex: style.effectiveSettings.foreground)))
                         Text("选择模型和项目目录，然后启动一个 Agent 任务。")
                             .font(.system(size: 12))
-                            .foregroundStyle(Color(nsColor: NSColor(hex: model.terminalStyle.settings.foreground)).opacity(0.7))
+                            .foregroundStyle(Color(nsColor: NSColor(hex: style.effectiveSettings.foreground)).opacity(0.7))
                         if model.workspace.isEmpty {
                             Button("选择项目目录", action: onChooseWorkspace)
                                 .buttonStyle(.bordered)
@@ -369,7 +340,7 @@ struct TerminalPanel: View {
                     }
                 }
                 ForEach(model.terminalSessions) { session in
-                    TerminalSessionPane(session: session, style: model.terminalStyle,
+                    TerminalSessionPane(session: session, style: style,
                                         isSelected: model.selectedTerminalID == session.id,
                                         onExit: { [weak model, weak session] code in
                                             if let session { model?.processDidExit(sessionID: session.id, exitCode: code) }
@@ -377,56 +348,10 @@ struct TerminalPanel: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: NSColor(hex: model.terminalStyle.settings.background)))
+            .background(Color(nsColor: NSColor(hex: style.effectiveSettings.background)))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: NSColor(hex: model.terminalStyle.settings.background)))
-    }
-}
-
-private struct TerminalSessionTab: View {
-    @ObservedObject var session: TerminalSession
-    let selected: Bool
-    let onSelect: () -> Void
-    let onClose: () -> Void
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Circle()
-                .fill(session.isRunning ? Color.accentColor : Color.secondary)
-                .frame(width: 6, height: 6)
-            Button(action: onSelect) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(session.title)
-                        .font(.system(size: 10, weight: .medium))
-                        .lineLimit(1)
-                    Text("\(session.workspaceName) · \(session.profileName)")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: 180, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 18, height: 18)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(session.isRunning ? "停止并关闭此会话标签" : "关闭会话标签")
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 36)
-        .foregroundStyle(selected ? .primary : .secondary)
-        .background(alignment: .bottom) {
-            Rectangle()
-                .fill(selected ? Color.accentColor : .clear)
-                .frame(height: 2)
-        }
+        .background(Color(nsColor: NSColor(hex: style.effectiveSettings.background)))
     }
 }
 

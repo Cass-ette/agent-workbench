@@ -35,6 +35,11 @@ final class TerminalDropTests: XCTestCase {
         XCTAssertTrue(secondView.process === process)
         XCTAssertTrue(secondView.registeredDraggedTypes.contains(.fileURL))
         XCTAssertFalse(firstView.registeredDraggedTypes.contains(.fileURL))
+        model.moveTerminal(first.id, relativeTo: second.id, after: false)
+        XCTAssertEqual(model.terminalSessions.map(\.id), [first.id, second.id, third.id])
+        model.moveTerminal(first.id, relativeTo: third.id, after: true)
+        XCTAssertEqual(model.terminalSessions.map(\.id), [second.id, third.id, first.id])
+        XCTAssertEqual(model.selectedTerminalID, second.id)
         model.moveTerminal(UUID(), to: 0)
         XCTAssertEqual(model.terminalSessions.map(\.id), [second.id, third.id, first.id])
     }

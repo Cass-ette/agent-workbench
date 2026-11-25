@@ -22,6 +22,7 @@ cp backend/usage_records.py "$APP_PATH/Contents/Resources/backend/usage_records.
 cp backend/gateway_billing.py "$APP_PATH/Contents/Resources/backend/gateway_billing.py"
 cp backend/model_pricing.py backend/pricing_service.py backend/pricing_reference.json backend/deepseek_reference.json "$APP_PATH/Contents/Resources/backend/"
 cp Resources/AppIcon.icns "$APP_PATH/Contents/Resources/AppIcon.icns"
+cp shared/CATPPUCCIN-LICENSE "$APP_PATH/Contents/Resources/CATPPUCCIN-LICENSE"
 chmod 755 "$APP_PATH/Contents/MacOS/ClaudeCCHPManager"
 codesign --force --deep --sign - "$APP_PATH"
 codesign --verify --deep --strict "$APP_PATH"

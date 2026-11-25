@@ -125,9 +125,9 @@ export function UsageAnalytics({ sessions }: { sessions: Session[] }) {
           const x = i * (group === "date" ? 42 : 95) + 8, h = 140 * value(p) / max;
           const input = 140 * (p.input_tokens ?? 0) / max, output = 140 * (p.output_tokens ?? 0) / max;
           return <g key={p.date}><title>{p.date} {group === "date" ? "UTC" : ""} · 输入 {p.input_tokens ?? "未知"} · 输出 {p.output_tokens ?? "未知"} · {usd(p.estimated_cost ?? null)}{p.unpriced_records ? " · " + p.unpriced_records + "条缺价" : ""}</title>
-            {showMoney ? p.estimated_cost == null ? <text x={x} y="153" fontSize="11" fill="currentColor">未提供</text> : <rect x={x} y={160 - h} width="26" height={h} fill="#d79045" /> : <>
-              {series !== "output" && p.input_tokens != null && <rect aria-label={p.date + " 输入 " + p.input_tokens} x={x} y={160 - input} width={series === "both" ? 11 : 26} height={input} fill="#668df0" />}
-              {series !== "input" && p.output_tokens != null && <rect aria-label={p.date + " 输出 " + p.output_tokens} x={x + (series === "both" ? 15 : 0)} y={160 - output} width={series === "both" ? 11 : 26} height={output} fill="#d79045" />}
+            {showMoney ? p.estimated_cost == null ? <text x={x} y="153" fontSize="11" fill="currentColor">未提供</text> : <rect x={x} y={160 - h} width="26" height={h} fill="var(--ctp-peach)" /> : <>
+              {series !== "output" && p.input_tokens != null && <rect aria-label={p.date + " 输入 " + p.input_tokens} x={x} y={160 - input} width={series === "both" ? 11 : 26} height={input} fill="var(--ctp-blue)" />}
+              {series !== "input" && p.output_tokens != null && <rect aria-label={p.date + " 输出 " + p.output_tokens} x={x + (series === "both" ? 15 : 0)} y={160 - output} width={series === "both" ? 11 : 26} height={output} fill="var(--ctp-peach)" />}
             </>}
             <text transform={"translate(" + (x + 6) + " 176) rotate(35)"} fontSize="9" fill="currentColor">{(group === "profile" ? profiles.find(([id]) => id === p.date)?.[1] || p.date : p.date).slice(-14)}</text>
           </g>;

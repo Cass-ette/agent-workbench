@@ -87,7 +87,7 @@ Claude requires an Anthropic Messages-compatible gateway. Codex requires an Open
 
 Requirements: macOS 14+, Swift 6.2+, Python 3, and whichever CLI you intend to use (`~/.local/bin/claude` and/or `~/.local/bin/codex`). The build script produces a universal arm64/x86_64 application. The included Docker Compose template is one optional gateway deployment path.
 
-For remote HTTPS metadata queries, the macOS app prefers Homebrew or Miniconda Python over the system Python, whose older LibreSSL may fail TLS negotiation even when a browser connects successfully. Set `CCHP_MANAGER_PYTHON` in the app's launch environment to choose a specific Python executable. This affects only the app's metadata backend, not the configured gateway or the Agent CLI. Windows uses Rustls and Android uses the system HTTPS implementation; neither depends on macOS Python.
+For remote HTTPS metadata queries, the macOS app prefers Homebrew or Miniconda Python over the system Python, whose older LibreSSL may fail TLS negotiation even when a browser connects successfully. Set `WORKBENCH_PYTHON` in the app's launch environment to choose a specific Python executable. This affects only the app's metadata backend, not the configured gateway or the Agent CLI. Windows uses Rustls and Android uses the system HTTPS implementation; neither depends on macOS Python.
 
 Run `./build-app.command`. The app bundle is written to `build/Agent Workbench.app`. Run `./package-friend.command` to create a client-only ZIP. This ad-hoc signed build is not notarized; broad distribution requires an Apple Developer ID signature and notarization.
 

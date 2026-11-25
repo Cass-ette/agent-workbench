@@ -14,7 +14,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 import gateway_billing as BILLING
 
-SPEC = importlib.util.spec_from_file_location("billing_backend", BACKEND_DIR / "claude-cchp-test.py")
+SPEC = importlib.util.spec_from_file_location("billing_backend", BACKEND_DIR / "workbench_backend.py")
 BACKEND = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BACKEND)
 

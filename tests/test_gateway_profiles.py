@@ -8,7 +8,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 
-BACKEND_PATH = Path(__file__).resolve().parents[1] / "backend" / "claude-cchp-test.py"
+BACKEND_PATH = Path(__file__).resolve().parents[1] / "backend" / "workbench_backend.py"
 SPEC = importlib.util.spec_from_file_location("claude_cchp_gateway_backend", BACKEND_PATH)
 BACKEND = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BACKEND)

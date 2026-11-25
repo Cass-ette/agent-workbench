@@ -329,9 +329,9 @@ private struct BackendClient: Sendable {
     let pythonPath: String
 
     init() throws {
-        let bundled = Bundle.main.resourceURL?.appendingPathComponent("backend/claude-cchp-test.py")
+        let bundled = Bundle.main.resourceURL?.appendingPathComponent("backend/workbench_backend.py")
         let development = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Projects/agent-workbench/backend/claude-cchp-test.py")
+            .appendingPathComponent("Projects/agent-workbench/backend/workbench_backend.py")
         if let bundled, FileManager.default.isReadableFile(atPath: bundled.path) {
             scriptURL = bundled
         } else if FileManager.default.isReadableFile(atPath: development.path) {
@@ -340,7 +340,7 @@ private struct BackendClient: Sendable {
             throw BackendError(message: "找不到本机 Claude 后端脚本。请重新构建应用。")
         }
         let environment = ProcessInfo.processInfo.environment
-        let configuredPython = environment["CCHP_MANAGER_PYTHON"].map { [$0] } ?? []
+        let configuredPython = (environment["WORKBENCH_PYTHON"] ?? environment["CCHP_MANAGER_PYTHON"]).map { [$0] } ?? []
         let pathCandidates = (environment["PATH"] ?? "")
             .split(separator: ":")
             .map { String($0) + "/python3" }

@@ -101,7 +101,7 @@ class UsageTests(unittest.TestCase):
 
     def test_bundled_usage_scan_does_not_modify_signed_resources(self):
         backend = Path(__file__).resolve().parents[1] / "backend"
-        for name in ("claude-cchp-test.py", "usage_records.py", "gateway_billing.py", "model_pricing.py", "pricing_service.py",
+        for name in ("workbench_backend.py", "usage_records.py", "gateway_billing.py", "model_pricing.py", "pricing_service.py",
                      "pricing_reference.json", "deepseek_reference.json", "session_history.py", "agent_reasoning.py"):
             shutil.copyfile(backend / name, self.root / name)
         # A normal interpreter, without -B, must leave the signed resource tree intact.
@@ -113,7 +113,7 @@ scan = runpy.run_path(sys.argv[1])["usage_snapshot"]
 root = Path(sys.argv[1]).parent
 scan.__globals__.update(CONFIG_DIR=root, CODEX_HOME_ROOT=root, CLAUDE_BRANCH_ROOT=root / "branches", TEST_ROOT=root / "data")
 scan()
-""", str(self.root / "claude-cchp-test.py")], capture_output=True, text=True, check=True)
+""", str(self.root / "workbench_backend.py")], capture_output=True, text=True, check=True)
         self.assertEqual(json.loads(result.stdout)["sessions"], [])
         self.assertFalse((self.root / "__pycache__").exists())
 

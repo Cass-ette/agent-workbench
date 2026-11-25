@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated Claude Code entry for the local CCHP free key. Stdlib only."""
+"""Isolated Claude Code / Codex launcher for Anthropic- and OpenAI-compatible gateways. Stdlib only."""
 
 import argparse
 import getpass
@@ -208,7 +208,7 @@ def prepare_isolated_config():
 
 def read_key():
     if not KEY_FILE.is_file():
-        raise RuntimeError("请先运行 claude-cchp-test setup，填入本机免费调用 Key。")
+        raise RuntimeError("请先运行 workbench_backend setup，填入本机免费调用 Key。")
     if KEY_FILE.is_symlink() or KEY_FILE.stat().st_mode & 0o077:
         raise RuntimeError("密钥文件权限不符合要求；请重新运行 setup。")
     value = KEY_FILE.read_text().strip()
@@ -582,15 +582,15 @@ def codex_config(profile_id, model, gateway=None, workspace=None, branch_home=No
     previous = (home / "config.toml").read_text() if (home / "config.toml").is_file() else ""
     config = (
         'model = ' + json.dumps(model, ensure_ascii=False) + '\n'
-        'model_provider = "cchp_local"\n'
+        'model_provider = "workbench_gateway"\n'
         + agent_reasoning.config_line(reasoning_effort, previous) +
         'sandbox_mode = "workspace-write"\n'
         'disable_response_storage = true\n\n'
-        '[model_providers.cchp_local]\n'
-        'name = "cchp_local"\n'
+        '[model_providers.workbench_gateway]\n'
+        'name = "Workbench gateway"\n'
         'base_url = ' + json.dumps(gateway_api_base(gateway or gateway_url()), ensure_ascii=False) + '\n'
         'wire_api = "responses"\n'
-        'env_key = "CCH_API_KEY"\n'
+        'env_key = "WORKBENCH_GATEWAY_KEY"\n'
     )
     private_write(home / "config.toml", config)
     if branch_home is None:
@@ -620,6 +620,22 @@ def local_network_bypass(environment):
     for name in ("NO_PROXY", "no_proxy"):
         entries.extend(value.strip() for value in environment.get(name, "").split(",") if value.strip())
     return ",".join(dict.fromkeys(entries))
+
+
+def codex_environment(home, key):
+    """Child environment for Codex: the workbench key under its own name, nothing else."""
+    environment = dict(os.environ)
+    for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_SQLITE_HOME", "CODEX_HOME",
+                 "WORKBENCH_GATEWAY_KEY", "CCH_API_KEY"):
+        environment.pop(name, None)
+    bypass = local_network_bypass(environment)
+    environment.update({
+        "CODEX_HOME": str(home),
+        "WORKBENCH_GATEWAY_KEY": key,
+        "NO_PROXY": bypass,
+        "no_proxy": bypass,
+    })
+    return environment
 
 
 def build_codex_command(model, workspace, session_mode, history_id=None, fork_history=True, permission_mode="restricted", reasoning_effort=None):
@@ -764,12 +780,7 @@ def launch_history(history_ref, session_id, client, profile_id, model, workspace
         if client == "codex":
             if not same_config:
                 codex_config(profile_id, model, gateway, workspace, branch_home=home, reasoning_effort=reasoning_effort)
-            environment = dict(os.environ)
-            for name in ("OPENAI_API_KEY", "CODEX_SQLITE_HOME", "OPENAI_BASE_URL"):
-                environment.pop(name, None)
-            bypass = local_network_bypass(environment)
-            environment.update(CODEX_HOME=str(home), CCH_API_KEY=key,
-                               NO_PROXY=bypass, no_proxy=bypass)
+            environment = codex_environment(home, key)
             command = build_codex_command(model, workspace, "resume", session_id, fork_history=not same_config,
                                           permission_mode=permission_mode, reasoning_effort=reasoning_effort)
             command += tool_args(home, "codex") or []
@@ -817,16 +828,7 @@ def launch_codex_profile(profile_id, model, workspace_value, session_mode, gatew
                               fingerprint=history_module().key_fingerprint(key), reasoning_effort=reasoning_effort)
     remember_workspace(workspace)
     save_last_launch(profile, model, workspace, session_mode, "codex", MANAGER_LAST_LAUNCH)
-    environment = dict(os.environ)
-    for name in ("OPENAI_API_KEY", "CODEX_HOME", "CCH_API_KEY"):
-        environment.pop(name, None)
-    bypass = local_network_bypass(environment)
-    environment.update({
-        "CODEX_HOME": str(codex_home),
-        "CCH_API_KEY": key,
-        "NO_PROXY": bypass,
-        "no_proxy": bypass,
-    })
+    environment = codex_environment(codex_home, key)
     command = build_codex_command(model, workspace, session_mode, permission_mode=permission_mode, reasoning_effort=reasoning_effort)
     command += tool_args(codex_home, "codex") or []
     os.chdir(workspace)
@@ -1217,7 +1219,7 @@ def menu():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="独立 Claude/CCHP 测试，不修改原客户端配置")
+    parser = argparse.ArgumentParser(description="独立启动 Claude / Codex，不修改原客户端配置")
     parser.add_argument("action", nargs="?", default="menu", choices=[
         "menu", "setup", "status", "models", "plan", "chat", "smoke", "usage",
         "profile-account", "profile-billing", "billing-settings", "save-billing-stdin", "remove-billing",

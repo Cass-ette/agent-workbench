@@ -9,7 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 import agent_reasoning as reasoning
 
-spec = importlib.util.spec_from_file_location("reasoning_backend", Path(__file__).resolve().parents[1] / "backend/claude-cchp-test.py")
+spec = importlib.util.spec_from_file_location("reasoning_backend", Path(__file__).resolve().parents[1] / "backend/workbench_backend.py")
 backend = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(backend)
 

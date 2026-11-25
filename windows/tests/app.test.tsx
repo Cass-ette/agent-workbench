@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import App from "../src/App";
 import { permissionStorageKey } from "../src/AgentPermissions";
 
-const { invoke, onDragDropEvent, terminalPaste } = vi.hoisted(() => ({ invoke: vi.fn(), onDragDropEvent: vi.fn(), terminalPaste: vi.fn() }));
+const { invoke, onDragDropEvent, terminalPaste, terminalOptions, terminalDispose } = vi.hoisted(() => ({ invoke: vi.fn(), onDragDropEvent: vi.fn(), terminalPaste: vi.fn(), terminalOptions: [] as { theme?: { background?: string } }[], terminalDispose: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
@@ -12,12 +12,14 @@ vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDr
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
+    options: { theme?: { background?: string } };
+    constructor(options: { theme?: { background?: string } }) { this.options = options; terminalOptions.push(this.options); }
     loadAddon() {}
     open() {}
     onData() { return { dispose() {} }; }
     writeln() {}
     paste(text: string) { terminalPaste(text); }
-    dispose() {}
+    dispose() { terminalDispose(); }
   },
 }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class {} }));
@@ -29,6 +31,8 @@ beforeEach(() => {
   window.localStorage.setItem(permissionStorageKey, JSON.stringify({ codex: "standard", claude: "standard" }));
   onDragDropEvent.mockReset().mockResolvedValue(() => undefined);
   terminalPaste.mockReset();
+  terminalOptions.length = 0;
+  terminalDispose.mockReset();
   invoke.mockReset();
   invoke.mockImplementation(async (command: string) => {
     if (command === "load_app_state") {
@@ -57,10 +61,28 @@ afterEach(() => {
 async function openApp() {
   render(<StrictMode><App /></StrictMode>);
   await screen.findByText("430 个可用");
-  return screen.getAllByRole<HTMLSelectElement>("combobox")[0];
+  return screen.getByRole<HTMLSelectElement>("combobox", { name: "选择模型" });
 }
 
 describe("工作会话配置", () => {
+  it("切换外观会立即更新终端配色，保留会话和进程", async () => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    const normalInvoke = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args: unknown) => command === "start_terminal"
+      ? { id: "theme-session", title: "主题验证", workspace: "C:\\project" } : normalInvoke(command, args));
+    await openApp();
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+    await screen.findByRole("tab");
+    const disposed = terminalDispose.mock.calls.length;
+    fireEvent.change(screen.getByRole("combobox", { name: "外观" }), { target: { value: "dark" } });
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(terminalOptions.at(-1)?.theme?.background).toBe("#1e1e2e");
+    expect(terminalDispose.mock.calls.length).toBe(disposed);
+    expect(invoke.mock.calls.filter(([command]) => command === "start_terminal")).toHaveLength(1);
+    expect(localStorage.getItem("appearance.mode")).toBe("dark");
+    fireEvent.change(screen.getByRole("combobox", { name: "外观" }), { target: { value: "light" } });
+    expect(terminalOptions.at(-1)?.theme?.background).toBe("#eff1f5");
+  });
   it("启动强度按模型保存，当前会话命令保持客户端并且不会自动发送", async () => {
     vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
     const normalInvoke = invoke.getMockImplementation()!;
@@ -171,13 +193,13 @@ describe("工作会话配置", () => {
     const tabs = screen.getAllByRole("tab");
     const pointer = window.PointerEvent;
     window.PointerEvent = MouseEvent as typeof PointerEvent;
-    const hitTest = document.elementFromPoint;
-    document.elementFromPoint = vi.fn(() => tabs[2]);
+    const tabContainers = tabs.map(tab => tab.parentElement!);
+    tabContainers.forEach((tab, index) => vi.spyOn(tab, "getBoundingClientRect").mockReturnValue({ left: index * 180, right: (index + 1) * 180, width: 180 } as DOMRect));
     try {
-      fireEvent.pointerDown(tabs[0].parentElement!, { button: 0, clientX: 20, clientY: 10 });
-      fireEvent.pointerMove(tabs[0].parentElement!, { clientX: -10, clientY: 10 });
-      fireEvent.pointerUp(tabs[0].parentElement!, { clientX: -10, clientY: 10 });
-    } finally { window.PointerEvent = pointer; document.elementFromPoint = hitTest; }
+      fireEvent.pointerDown(tabContainers[0], { button: 0, clientX: 20, clientY: 10 });
+      fireEvent.pointerMove(tabContainers[0], { clientX: 300, clientY: 10 });
+      fireEvent.pointerUp(tabContainers[0], { clientX: 300, clientY: 10 });
+    } finally { window.PointerEvent = pointer; }
     await waitFor(() => {
       const order = [...document.querySelectorAll(".terminal-tab .tab-label")].map((node) => node.textContent);
       expect(order[0]).toContain("folder-2");

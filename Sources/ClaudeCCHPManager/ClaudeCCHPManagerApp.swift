@@ -11,7 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.titlebarAppearsTransparent = true
             window.isOpaque = false
             window.backgroundColor = .clear
-            window.isMovableByWindowBackground = true
+            window.isMovableByWindowBackground = false
             window.setFrameAutosaveName("ClaudeCCHPManager")
         }
     }
@@ -22,12 +22,13 @@ struct ClaudeCCHPManagerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = ManagerModel()
     @StateObject private var updates = WorkbenchUpdates()
+    @StateObject private var appearance = WorkbenchAppearance()
 
     var body: some Scene {
         WindowGroup {
-            ManagerView(model: model, updates: updates)
+            WorkbenchRoot(model: model, updates: updates, appearance: appearance)
                 .frame(minWidth: 960, minHeight: 680)
-                .tint(.accentColor)
+                .preferredColorScheme(appearance.mode.colorScheme)
                 .task { await model.load(); model.restoreRemoteService() }
                 .task {
                     while !Task.isCancelled {
@@ -42,6 +43,11 @@ struct ClaudeCCHPManagerApp: App {
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("检查更新…") { updates.open() }
+            }
+            CommandMenu("外观") {
+                Picker("外观", selection: $appearance.mode) {
+                    ForEach(AppearanceMode.allCases) { Text($0.title).tag($0) }
+                }
             }
         }
     }

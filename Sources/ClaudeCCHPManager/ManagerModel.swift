@@ -525,7 +525,7 @@ final class ManagerModel: ObservableObject {
     @Published var isLoadingPricing = false
     @Published var pricingError = ""
     @Published private var favoriteKeys = Set(UserDefaults.standard.stringArray(forKey: "models.favorite") ?? [])
-    let terminalStyle = SharedTerminalStyle()
+    let terminalStyle: SharedTerminalStyle
     @Published private(set) var remoteEnabled = false
     private var remoteServer: RemoteHTTPServer?
     private let remoteDiscovery = RemoteDiscoveryPublisher()
@@ -703,7 +703,9 @@ final class ManagerModel: ObservableObject {
     private var billingSettingsProfileID = ""
 
     init(modelDefaults: UserDefaults = .standard,
-         modelLoader: (@Sendable (String) async throws -> ModelResponse)? = nil) {
+         modelLoader: (@Sendable (String) async throws -> ModelResponse)? = nil,
+         terminalStyle: SharedTerminalStyle? = nil) {
+        self.terminalStyle = terminalStyle ?? SharedTerminalStyle()
         modelCatalog = ModelCatalogCache(defaults: modelDefaults)
         reasoningDefaults = modelDefaults
         reasoningPreferences = modelDefaults.dictionary(forKey: "reasoning.preferences") as? [String: String] ?? [:]
@@ -733,6 +735,15 @@ final class ManagerModel: ObservableObject {
         guard sourceIndex != destination else { return }
         let session = terminalSessions.remove(at: sourceIndex)
         terminalSessions.insert(session, at: destination)
+    }
+
+    func moveTerminal(_ id: UUID, relativeTo target: UUID, after: Bool) {
+        guard id != target, let session = terminalSessions.first(where: { $0.id == id }),
+              terminalSessions.contains(where: { $0.id == target }) else { return }
+        var next = terminalSessions.filter { $0.id != id }
+        guard let index = next.firstIndex(where: { $0.id == target }) else { return }
+        next.insert(session, at: index + (after ? 1 : 0))
+        terminalSessions = next
     }
 
     var agentRunning: Bool { terminalSessions.contains(where: \.isRunning) }

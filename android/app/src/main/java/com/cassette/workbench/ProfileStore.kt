@@ -41,6 +41,10 @@ class ProfileStore(context: Context) {
     private val prefs = context.getSharedPreferences("workbench", Context.MODE_PRIVATE)
     private val secrets = context.getSharedPreferences("credentials", Context.MODE_PRIVATE)
     private val alias = "agent-workbench-aes-v1"
+    internal fun appearance() = AppearanceMode.parse(prefs.getString("appearance.mode", "system").orEmpty())
+    internal fun saveAppearance(value: AppearanceMode) {
+        check(prefs.edit().putString("appearance.mode", value.id).commit()) { "无法保存外观设置" }
+    }
     fun loadReasoningPreferences(): Map<String, String> = runCatching {
         val value = JSONObject(prefs.getString("reasoning.preferences", "{}") ?: "{}")
         value.keys().asSequence().mapNotNull { key -> value.optString(key).takeIf { it in ReasoningEffort.levels }?.let { key to it } }.toMap()

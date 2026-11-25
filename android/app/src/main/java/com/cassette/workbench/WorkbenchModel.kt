@@ -367,6 +367,10 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         }
     }
     private val store = ProfileStore(application)
+    internal var appearanceMode by mutableStateOf(store.appearance()); private set
+    internal fun setAppearance(value: AppearanceMode) {
+        runCatching { store.saveAppearance(value) }.onSuccess { appearanceMode = value }.onFailure { error = "无法保存外观设置" }
+    }
     val termux = TermuxConnection(application, store)
     private val worker = Executors.newFixedThreadPool(3)
     private val inputWorker = Executors.newSingleThreadExecutor()

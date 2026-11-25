@@ -1,5 +1,11 @@
 export interface OrderedSession { id: string }
 
+export function tabDropTarget(x: number, tabs: { id: string; left: number; right: number }[], movingId: string) {
+  const other = tabs.filter(tab => tab.id !== movingId);
+  const before = other.find(tab => x < (tab.left + tab.right) / 2);
+  return before ? { id: before.id, after: false } : other.length ? { id: other[other.length - 1].id, after: true } : null;
+}
+
 export function reorderSessions<T extends OrderedSession>(
   sessions: T[], movingId: string, targetId: string, afterTarget: boolean,
 ): T[] {

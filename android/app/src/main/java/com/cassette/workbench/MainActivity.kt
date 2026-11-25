@@ -111,13 +111,20 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermuxPermission: () -> Unit) {
-    val dark = isSystemInDarkTheme()
-    val colors = if (dark) darkColorScheme(primary = Color(0xffc7c8ff), secondary = Color(0xffc4c4d6), surface = Color(0xff15161c), background = Color(0xff15161c))
-        else lightColorScheme(primary = Color(0xff535684), secondary = Color(0xff5b5d70), surface = Color(0xfffaf9fc), background = Color(0xfffaf9fc))
-    MaterialTheme(colorScheme = colors) {
+    val palette = model.appearanceMode.palette(isSystemInDarkTheme())
+    CompositionLocalProvider(LocalWorkbenchPalette provides palette) {
+    MaterialTheme(colorScheme = palette.scheme()) {
         var page by rememberSaveable { mutableIntStateOf(0) }
         var fullscreen by rememberSaveable { mutableStateOf(false) }
         val activity = LocalContext.current as? MainActivity
+        SideEffect {
+            activity?.let {
+                WindowCompat.getInsetsController(it.window, it.window.decorView).apply {
+                    isAppearanceLightStatusBars = palette == WorkbenchPalette.light
+                    isAppearanceLightNavigationBars = palette == WorkbenchPalette.light
+                }
+            }
+        }
         DisposableEffect(fullscreen, page, activity) {
             activity?.setImmersiveFullscreen(fullscreen && page == 0)
             onDispose { activity?.setImmersiveFullscreen(false) }
@@ -134,6 +141,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                 Text(if (BuildConfig.DEBUG) "开发预览 · $connection" else connection,
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             } }, actions = {
+                AppearanceMenu(model)
                 TextButton(onClick = { model.showAgentPermissions = true }, enabled = model.localExecution) { Text("本地权限") }
                 TextButton(onClick = { model.showTools = true }, enabled = model.localExecution) { Text("本地工具") }
                 TextButton(onClick = updates::open) { Text(updates.nextVersion?.let { "新版 $it" } ?: "检查更新") }
@@ -159,6 +167,7 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
         WorkbenchUpdateDialog(updates, model.sessions.count { it.exitCode == null }, model.busy || model.runtimeInstalling || model.vmBusy)
         if (model.showAgentPermissions) AgentPermissionsDialog(model)
         if (model.showTools) ToolBridgeDialog(model)
+    }
     }
 }
 
@@ -888,12 +897,13 @@ private fun usageCompact(value: UsageSummary): String = if (value.inputTokens ==
         dismissButton = { TextButton(onClick = { terminating = false }) { Text("取消") } })
 }
 
-private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var scrollRequest: Int = 0, var bottomRequest: Int = 0)
+private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var scrollRequest: Int = 0, var bottomRequest: Int = 0, var theme: String = "")
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable private fun TerminalSurface(model: WorkbenchModel, session: TerminalSession, fontDelta: Int, keyboardRequest: Int, scrollRequest: Int, bottomRequest: Int,
     copyRequest: Int, pasteRequest: Int, onCopyText: (String) -> Unit, modifier: Modifier) {
     val context = LocalContext.current
+    val palette = LocalWorkbenchPalette.current
     var ready by remember { mutableStateOf(false) }
     val cursor = remember { TerminalCursor() }
     val replayThrough = remember { session.after }
@@ -902,7 +912,7 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
     val browser = remember {
         TerminalWebView(context) { model.send(session.id, it) }.apply {
             setOnFocusChangeListener { _, focused -> model.terminalFocusChanged(session.id, focused) }
-            setBackgroundColor(AndroidColor.rgb(22, 24, 31))
+            setBackgroundColor(AndroidColor.parseColor(palette["base"]))
             settings.javaScriptEnabled = true
             settings.allowFileAccess = false; settings.allowContentAccess = false
             settings.domStorageEnabled = false; settings.textZoom = 100
@@ -954,6 +964,11 @@ private class TerminalCursor(var serial: Long = 0, var fontDelta: Int = 0, var s
         AndroidView(factory = { browser }, modifier = Modifier.fillMaxSize(), update = { view ->
             view.inputEnabled = session.canWrite
             if (ready) {
+                if (cursor.theme != palette.name) {
+                    view.setBackgroundColor(AndroidColor.parseColor(palette["base"]))
+                    view.evaluateJavascript("window.setTerminalTheme(${palette.terminalTheme()})", null)
+                    cursor.theme = palette.name
+                }
                 view.evaluateJavascript("window.setInputEnabled(${session.canWrite})", null)
                 session.output.filter { it.serial > cursor.serial }.forEach { chunk ->
                     view.evaluateJavascript("window.writeChunk(${JSONObject.quote(chunk.encoded)}, ${chunk.replay || chunk.serial <= replayThrough})", null)

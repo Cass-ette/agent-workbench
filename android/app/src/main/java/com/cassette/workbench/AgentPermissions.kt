@@ -53,7 +53,7 @@ fun AgentPermissionsDialog(model: WorkbenchModel) {
                 Text("只影响之后新建、恢复和分支的本地会话。SSH 沿用电脑权限。Termux 授权和系统文件访问按需由 Android 提示，不能靠这份设置取得 root。")
                 TextButton(onClick = {
                     helpError = runCatching {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Cass-ette/claude-cchp-manager/blob/main/docs/agent-permissions.zh-CN.md")))
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Cass-ette/agent-workbench/blob/main/docs/agent-permissions.zh-CN.md")))
                     }.isFailure
                 }) { Text("权限与工具接入说明") }
                 if (helpError) Text("无法打开浏览器，请到仓库 docs/agent-permissions.zh-CN.md 查看说明。")

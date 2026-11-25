@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import ClaudeCCHPManager
+@testable import AgentWorkbench
 
 private final class URLRecorder: @unchecked Sendable {
     private let lock = NSLock()
@@ -66,6 +66,11 @@ final class ReleaseFeedTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.contains("HTTP 404"))
             XCTAssertTrue(error.localizedDescription.contains("HTTP 403"))
         }
+    }
+
+    func testAcceptsPackagesPublishedAfterTheRepositoryRename() {
+        let renamed = address.replacingOccurrences(of: "claude-cchp-manager", with: "agent-workbench")
+        XCTAssertEqual(ReleaseFeed.select([release(preview: true, published: "2026-01-01", address: renamed)])?.url.absoluteString, renamed)
     }
 
     func testRejectsUntrustedOrMissingManifest() {

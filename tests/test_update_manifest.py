@@ -30,11 +30,11 @@ class UpdateManifestTests(unittest.TestCase):
         mac_dir.mkdir(parents=True)
         mac_zip = mac_dir / "Agent-Workbench-macOS-universal.zip"
         info = plistlib.dumps({
-            "CFBundleIdentifier": "com.cassette.cchpmodelmanager",
+            "CFBundleIdentifier": "com.cassette.agentworkbench",
             "CFBundleShortVersionString": "0.1.2",
         })
         with zipfile.ZipFile(mac_zip, "w") as archive:
-            archive.writestr("CCHP Model Manager.app/Contents/Info.plist", info)
+            archive.writestr("Agent Workbench.app/Contents/Info.plist", info)
 
         windows_dir = self.artifacts / "windows-agent-workbench-installer"
         windows_dir.mkdir()
@@ -83,8 +83,8 @@ class UpdateManifestTests(unittest.TestCase):
 
     def _set_desktop_stable_versions(self):
         with zipfile.ZipFile(self.artifacts / "macos-agent-workbench" / "Agent-Workbench-macOS-universal.zip", "w") as archive:
-            archive.writestr("CCHP Model Manager.app/Contents/Info.plist", plistlib.dumps({
-                "CFBundleIdentifier": "com.cassette.cchpmodelmanager", "CFBundleShortVersionString": "1.0.0",
+            archive.writestr("Agent Workbench.app/Contents/Info.plist", plistlib.dumps({
+                "CFBundleIdentifier": "com.cassette.agentworkbench", "CFBundleShortVersionString": "1.0.0",
             }))
         (self.artifacts / "windows-agent-workbench-installer" / "version.txt").write_text("1.0.0")
 
@@ -123,8 +123,8 @@ class UpdateManifestTests(unittest.TestCase):
     def test_version_controls_status_even_when_release_mode_differs(self):
         info_path = self.artifacts / "macos-agent-workbench" / "Agent-Workbench-macOS-universal.zip"
         with zipfile.ZipFile(info_path, "w") as archive:
-            archive.writestr("CCHP Model Manager.app/Contents/Info.plist", plistlib.dumps({
-                "CFBundleIdentifier": "com.cassette.cchpmodelmanager", "CFBundleShortVersionString": "1.0.0",
+            archive.writestr("Agent Workbench.app/Contents/Info.plist", plistlib.dumps({
+                "CFBundleIdentifier": "com.cassette.agentworkbench", "CFBundleShortVersionString": "1.0.0",
             }))
         manifest = MANIFEST.build_manifest(self.artifacts, "notes", "workbench-preview-123-1", self.output)
         self.assertEqual(manifest["packages"][0]["channel"], "stable")

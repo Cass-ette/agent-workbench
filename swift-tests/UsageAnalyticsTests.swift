@@ -1,7 +1,7 @@
 import XCTest
 import AppKit
 import SwiftUI
-@testable import ClaudeCCHPManager
+@testable import AgentWorkbench
 
 final class UsageAnalyticsTests: XCTestCase {
     func testProjectsUseFullPathsAndExplicitDescendants() {

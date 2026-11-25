@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_SOURCE="$PROJECT_DIR/build/CCHP Model Manager.app"
+APP_SOURCE="$PROJECT_DIR/build/Agent Workbench.app"
 ZIP_PATH="${1:-$PROJECT_DIR/build/Agent-Workbench-macOS-universal-$(date +%Y%m%d-%H%M%S).zip}"
 
 if (( $# > 1 )); then
@@ -11,7 +11,7 @@ if (( $# > 1 )); then
 fi
 
 if [[ ! -d "$APP_SOURCE" ]]; then
-    print -u2 "未找到已构建的管理器应用：$APP_SOURCE"
+    print -u2 "未找到已构建的工作台应用：$APP_SOURCE"
     print -u2 "请先运行 ./build-app.command"
     exit 1
 fi

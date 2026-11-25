@@ -14,7 +14,7 @@ fi
 
 scratch="$repo/.build/local-update-test"
 swift build --scratch-path "$scratch" -Xswiftc -DWORKBENCH_LOCAL_UPDATE_TEST
-binary="$(swift build --scratch-path "$scratch" --show-bin-path)/ClaudeCCHPManager"
+binary="$(swift build --scratch-path "$scratch" --show-bin-path)/AgentWorkbench"
 app_name="Agent 工作台 更新测试.app"
 mkdir -p "$test_root/Update Feed"
 test_root="$(cd "$test_root" && pwd -P)"
@@ -22,7 +22,7 @@ candidate="$(mktemp -d "$test_root/.candidate.XXXXXX")"
 stage_app() {
     local app="$1" version="$2" build_number="$3"
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/backend"
-    cp "$binary" "$app/Contents/MacOS/ClaudeCCHPManager"
+    cp "$binary" "$app/Contents/MacOS/AgentWorkbench"
     cp Resources/Info.plist "$app/Contents/Info.plist"
     cp Resources/AppIcon.icns "$app/Contents/Resources/"
     cp backend/{session_history,usage_records,gateway_billing,model_pricing,pricing_service}.py "$app/Contents/Resources/backend/"
@@ -30,7 +30,7 @@ stage_app() {
     # Each test copy has its own settings and history directory alongside the app.
     sed 's@^USER_ROOT = Path.home()$@USER_ROOT = Path(__file__).resolve().parents[4] / ".test-home"@' \
         backend/claude-cchp-test.py > "$app/Contents/Resources/backend/claude-cchp-test.py"
-    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.cassette.cchpmodelmanager.updatetest" "$app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.cassette.agentworkbench.updatetest" "$app/Contents/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleName 工作台更新测试" "$app/Contents/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$app/Contents/Info.plist"

@@ -3,13 +3,13 @@ import CryptoKit
 import SwiftUI
 import os
 
-private let releasePage = URL(string: "https://github.com/Cass-ette/claude-cchp-manager/releases")!
+private let releasePage = URL(string: "https://github.com/Cass-ette/agent-workbench/releases")!
 
 private enum MacUpdateSource {
     #if WORKBENCH_LOCAL_UPDATE_TEST
     static let directory = Bundle.main.bundleURL.deletingLastPathComponent().appending(path: "Update Feed")
     static let manifest = directory.appending(path: "update.json")
-    static let bundleIdentifier = "com.cassette.cchpmodelmanager.updatetest"
+    static let bundleIdentifier = "com.cassette.agentworkbench.updatetest"
     static let channel = "local-test"
     static let architecture = "local"
 
@@ -18,7 +18,7 @@ private enum MacUpdateSource {
             url.resolvingSymlinksInPath().deletingLastPathComponent().path == directory.resolvingSymlinksInPath().path
     }
     #else
-    static let bundleIdentifier = "com.cassette.cchpmodelmanager"
+    static let bundleIdentifier = "com.cassette.agentworkbench"
     static let architecture = "universal"
 
     static func accepts(_ url: URL) -> Bool {

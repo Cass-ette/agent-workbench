@@ -17,8 +17,8 @@ struct ReleaseManifestSource: Equatable {
 
 enum ReleaseFeed {
     // Published only after all three installers and their release manifest are public.
-    static let manifestURL = URL(string: "https://raw.githubusercontent.com/Cass-ette/claude-cchp-manager/update-feed/update.json")!
-    static let url = URL(string: "https://api.github.com/repos/Cass-ette/claude-cchp-manager/releases?per_page=20")!
+    static let manifestURL = URL(string: "https://raw.githubusercontent.com/Cass-ette/agent-workbench/update-feed/update.json")!
+    static let url = URL(string: "https://api.github.com/repos/Cass-ette/agent-workbench/releases?per_page=20")!
 
     static func isPreview(_ version: String) -> Bool { version.split(separator: ".").first == "0" }
 
@@ -46,8 +46,14 @@ enum ReleaseFeed {
         url.scheme == "https" && url.host == "github.com" &&
         url.user == nil && url.password == nil && url.port == nil &&
         url.query == nil && url.fragment == nil &&
-        url.path.hasPrefix("/Cass-ette/claude-cchp-manager/releases/download/")
+        trustedDownloadPaths.contains { url.path.hasPrefix($0) }
     }
+
+    // The repository was renamed; older releases keep the previous path.
+    private static let trustedDownloadPaths = [
+        "/Cass-ette/agent-workbench/releases/download/",
+        "/Cass-ette/claude-cchp-manager/releases/download/",
+    ]
 
     static func select(_ releases: [WorkbenchRelease]) -> ReleaseManifestSource? {
         for release in releases.filter({ !$0.draft && $0.published_at != nil })

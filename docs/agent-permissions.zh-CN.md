@@ -38,7 +38,7 @@ Android 无 root。Debian 的 Codex 兼容模式如已启用，会关闭 Codex �
 | Canva、Figma 等应用 | 属于已安装的宿主连接器，未自动接入工作台 | 使用相应兼容服务并由用户重新授权账号 |
 | Codex 桌面线程、面板、工作树工具 | 桌面宿主专用 | 工作台提供自己的管理能力或使用公开接口，不能承诺原样迁移 |
 
-权限和基础工具入口均已接入三端，详见[工具接入说明](tool-bridge.zh-CN.md)。完整插件兼容、依赖/连接状态探测、OAuth 和 Android 本机屏幕捕获仍跟踪于 [工具能力桥接 #12](https://github.com/Cass-ette/claude-cchp-manager/issues/12)；登记工具不等于服务已连接或系统已授权。
+权限和基础工具入口均已接入三端，详见[工具接入说明](tool-bridge.zh-CN.md)。完整插件兼容、依赖/连接状态探测、OAuth 和 Android 本机屏幕捕获仍跟踪于 [工具能力桥接 #12](https://github.com/Cass-ette/agent-workbench/issues/12)；登记工具不等于服务已连接或系统已授权。
 
 ## 连接失败如何判断
 

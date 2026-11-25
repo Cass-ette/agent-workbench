@@ -331,7 +331,7 @@ private struct BackendClient: Sendable {
     init() throws {
         let bundled = Bundle.main.resourceURL?.appendingPathComponent("backend/claude-cchp-test.py")
         let development = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Projects/claude-cchp-manager/backend/claude-cchp-test.py")
+            .appendingPathComponent("Projects/agent-workbench/backend/claude-cchp-test.py")
         if let bundled, FileManager.default.isReadableFile(atPath: bundled.path) {
             scriptURL = bundled
         } else if FileManager.default.isReadableFile(atPath: development.path) {

@@ -1,7 +1,7 @@
 import AppKit
 import SwiftTerm
 import XCTest
-@testable import ClaudeCCHPManager
+@testable import AgentWorkbench
 
 final class TerminalDropTests: XCTestCase {
     @MainActor

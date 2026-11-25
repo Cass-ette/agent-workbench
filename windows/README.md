@@ -4,7 +4,7 @@ Windows desktop client for running Claude Code or Codex CLI in independent Power
 
 ## Requirements
 
-For normal use, download the Windows x64 installer from [GitHub Releases](https://github.com/Cass-ette/claude-cchp-manager/releases) and follow the [Chinese quick start](QUICKSTART.zh-CN.md). Docker, a local CCHP server, and local models are unnecessary when using an existing compatible gateway. The selected CLI may have its own runtime requirements.
+For normal use, download the Windows x64 installer from [GitHub Releases](https://github.com/Cass-ette/agent-workbench/releases) and follow the [Chinese quick start](QUICKSTART.zh-CN.md). Docker, a local CCHP server, and local models are unnecessary when using an existing compatible gateway. The selected CLI may have its own runtime requirements.
 
 - Windows 10/11 with the WebView2 Evergreen Runtime.
 - The selected agent CLI (`claude` or `codex`) installed and available on `PATH`.

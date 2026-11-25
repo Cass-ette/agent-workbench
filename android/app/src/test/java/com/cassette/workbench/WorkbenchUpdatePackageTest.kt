@@ -57,7 +57,7 @@ class WorkbenchUpdatePackageTest {
 
     @Test fun invalidPrimaryFallsBackAndFailuresKeepTheirDetails() {
         val reads = mutableListOf<String>()
-        val fallback = "https://github.com/Cass-ette/claude-cchp-manager/releases/download/test/update.json"
+        val fallback = "https://github.com/Cass-ette/agent-workbench/releases/download/test/update.json"
         assertEquals(16, loadWorkbenchUpdate(read = { url ->
             reads.add(url)
             when (url) {

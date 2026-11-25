@@ -20,7 +20,7 @@
 2. 在供应商管理中创建供应商、配置端点，并把自己的上游 API Key 保存在 CCHP 中。
 3. 在供应商分组和路由中限制模型范围；免费分组不要意外包含付费路由。
 4. 在下游 LLM 密钥页面创建一把客户端调用 Key，按需要绑定分组。
-5. 打开 `CCHP Model Manager.app`，添加这把下游调用 Key，选择模型和工作目录后启动 Claude 或 Codex。
+5. 打开 `Agent Workbench.app`，添加这把下游调用 Key，选择模型和工作目录后启动 Claude 或 Codex。
 
 官方文档：
 

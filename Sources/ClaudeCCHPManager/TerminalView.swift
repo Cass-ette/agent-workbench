@@ -166,10 +166,11 @@ final class EmbeddedTerminalControl: ObservableObject {
         _ = terminalView.process.updateWindowSize(&size)
     }
 
-    func apply(_ style: SharedTerminalStyle, to view: FileDropTerminalView) {
-        guard appliedStyle != style.effectiveSettings else { return }
-        style.apply(to: view)
-        appliedStyle = style.effectiveSettings
+    func apply(_ style: SharedTerminalStyle, palette: WorkbenchPalette, to view: FileDropTerminalView) {
+        let settings = style.effectiveSettings(for: palette)
+        guard appliedStyle != settings else { return }
+        style.apply(to: view, palette: palette)
+        appliedStyle = settings
     }
 
     func focus() {
@@ -182,6 +183,7 @@ final class EmbeddedTerminalControl: ObservableObject {
 struct EmbeddedAgentTerminal: NSViewRepresentable {
     @ObservedObject var control: EmbeddedTerminalControl
     @ObservedObject var style: SharedTerminalStyle
+    @Environment(\.workbenchPalette) private var palette
     let launch: TerminalLaunchSpec?
     let onExit: (Int32?) -> Void
 
@@ -194,7 +196,7 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
             view.processDelegate = context.coordinator
             control.keepProcessDelegate(context.coordinator)
             control.attach(view)
-            control.apply(style, to: view)
+            control.apply(style, palette: palette, to: view)
             return view
         }
         let view = FileDropTerminalView(frame: .zero, font: style.font,
@@ -202,7 +204,7 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
         view.processDelegate = context.coordinator
         control.keepProcessDelegate(context.coordinator)
         control.attach(view)
-        control.apply(style, to: view)
+        control.apply(style, palette: palette, to: view)
 
         if let launch {
             view.startProcess(executable: launch.executable,
@@ -216,7 +218,7 @@ struct EmbeddedAgentTerminal: NSViewRepresentable {
     }
 
     func updateNSView(_ view: FileDropTerminalView, context: Context) {
-        control.apply(style, to: view)
+        control.apply(style, palette: palette, to: view)
     }
 
     static func dismantleNSView(_ view: FileDropTerminalView, coordinator: Coordinator) {
@@ -325,13 +327,13 @@ struct TerminalPanel: View {
                     VStack(spacing: 10) {
                         Image(systemName: "terminal")
                             .font(.system(size: 28, weight: .light))
-                            .foregroundStyle(Color(nsColor: NSColor(hex: style.effectiveSettings.foreground)).opacity(0.58))
+                            .foregroundStyle(Color(nsColor: NSColor(hex: style.effectiveSettings(for: palette).foreground)).opacity(0.58))
                         Text("准备运行")
                             .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(Color(nsColor: NSColor(hex: style.effectiveSettings.foreground)))
+                            .foregroundStyle(Color(nsColor: NSColor(hex: style.effectiveSettings(for: palette).foreground)))
                         Text("选择模型和项目目录，然后启动一个 Agent 任务。")
                             .font(.system(size: 12))
-                            .foregroundStyle(Color(nsColor: NSColor(hex: style.effectiveSettings.foreground)).opacity(0.7))
+                            .foregroundStyle(Color(nsColor: NSColor(hex: style.effectiveSettings(for: palette).foreground)).opacity(0.7))
                         if model.workspace.isEmpty {
                             Button("选择项目目录", action: onChooseWorkspace)
                                 .buttonStyle(.bordered)
@@ -348,10 +350,10 @@ struct TerminalPanel: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: NSColor(hex: style.effectiveSettings.background)))
+            .background(Color(nsColor: NSColor(hex: style.effectiveSettings(for: palette).background)))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: NSColor(hex: style.effectiveSettings.background)))
+        .background(Color(nsColor: NSColor(hex: style.effectiveSettings(for: palette).background)))
     }
 }
 

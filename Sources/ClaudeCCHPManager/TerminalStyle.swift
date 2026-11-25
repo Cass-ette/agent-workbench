@@ -50,7 +50,6 @@ struct TerminalThemePreset: Identifiable {
 final class SharedTerminalStyle: ObservableObject {
     @Published private(set) var settings = TerminalStyleSettings.defaults
     @Published private(set) var errorMessage = ""
-    @Published private(set) var palette = WorkbenchPalette.light
 
     let configURL: URL
 
@@ -69,7 +68,7 @@ final class SharedTerminalStyle: ObservableObject {
             ?? NSFont.monospacedSystemFont(ofSize: settings.fontSize, weight: .regular)
     }
 
-    var effectiveSettings: TerminalStyleSettings {
+    func effectiveSettings(for palette: WorkbenchPalette) -> TerminalStyleSettings {
         var value = settings
         if value.followAppearance {
             value.foreground = palette["text"]
@@ -77,10 +76,6 @@ final class SharedTerminalStyle: ObservableObject {
             value.cursor = palette["rosewater"]
         }
         return value
-    }
-
-    func setAppearance(_ value: WorkbenchPalette) {
-        if palette != value { palette = value }
     }
 
     func update(_ value: TerminalStyleSettings) {
@@ -114,8 +109,8 @@ final class SharedTerminalStyle: ObservableObject {
         NSWorkspace.shared.open(configURL)
     }
 
-    func apply(to view: LocalProcessTerminalView) {
-        let settings = effectiveSettings
+    func apply(to view: LocalProcessTerminalView, palette: WorkbenchPalette) {
+        let settings = effectiveSettings(for: palette)
         view.font = font
         view.nativeForegroundColor = NSColor(hex: settings.foreground)
         view.nativeBackgroundColor = NSColor(hex: settings.background)
@@ -125,6 +120,14 @@ final class SharedTerminalStyle: ObservableObject {
         } else {
             view.installColors(SwiftTerm.Color.defaultInstalledColors)
         }
+        // Palette updates must precede both initial OSC 10/11 queries and any
+        // subscribed light/dark notification. Custom terminal colors take precedence.
+        let background = NSColor(hex: settings.background).usingColorSpace(.sRGB)!
+        let brightness = 0.299 * background.redComponent + 0.587 * background.greenComponent + 0.114 * background.blueComponent
+        view.updateColorScheme(brightness > 0.5 ? .light : .dark)
+        // A CLI can retain truecolor cells from its previous palette. Keep their
+        // text readable without rewriting the transcript or the CLI's colors.
+        view.minimumContrastRatio = 4.5
     }
 
     private func save(_ value: TerminalStyleSettings) {

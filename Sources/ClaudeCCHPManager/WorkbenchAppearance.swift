@@ -45,7 +45,6 @@ struct WorkbenchRoot: View {
             .foregroundStyle(palette.color("text"))
             .background(palette.color("base"))
             .preferredColorScheme(appearance.mode.colorScheme)
-            .onChange(of: palette, initial: true) { _, value in model.terminalStyle.setAppearance(value) }
     }
 }
 

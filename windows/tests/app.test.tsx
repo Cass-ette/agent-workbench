@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import App from "../src/App";
 import { permissionStorageKey } from "../src/AgentPermissions";
 
-const { invoke, onDragDropEvent, terminalPaste, terminalOptions, terminalDispose } = vi.hoisted(() => ({ invoke: vi.fn(), onDragDropEvent: vi.fn(), terminalPaste: vi.fn(), terminalOptions: [] as { theme?: { background?: string } }[], terminalDispose: vi.fn() }));
+const { invoke, onDragDropEvent, terminalPaste, terminalOptions, terminalDispose } = vi.hoisted(() => ({ invoke: vi.fn(), onDragDropEvent: vi.fn(), terminalPaste: vi.fn(), terminalOptions: [] as { theme?: { background?: string }; minimumContrastRatio?: number }[], terminalDispose: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
@@ -12,8 +12,8 @@ vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDr
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
-    options: { theme?: { background?: string } };
-    constructor(options: { theme?: { background?: string } }) { this.options = options; terminalOptions.push(this.options); }
+    options: { theme?: { background?: string }; minimumContrastRatio?: number };
+    constructor(options: { theme?: { background?: string }; minimumContrastRatio?: number }) { this.options = options; terminalOptions.push(this.options); }
     loadAddon() {}
     open() {}
     onData() { return { dispose() {} }; }
@@ -73,6 +73,7 @@ describe("工作会话配置", () => {
     await openApp();
     fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
     await screen.findByRole("tab");
+    expect(terminalOptions.at(-1)?.minimumContrastRatio).toBe(4.5);
     const disposed = terminalDispose.mock.calls.length;
     fireEvent.change(screen.getByRole("combobox", { name: "外观" }), { target: { value: "dark" } });
     expect(document.documentElement.dataset.theme).toBe("dark");

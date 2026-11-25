@@ -1142,6 +1142,7 @@ function TerminalPane({
       cursorStyle: "block",
       fontFamily: "Cascadia Code, Consolas, 'Courier New', monospace",
       fontSize: 13,
+      minimumContrastRatio: 4.5,
       lineHeight: 1.18,
       scrollback: 5000,
       theme: terminalTheme(initialTheme.current),

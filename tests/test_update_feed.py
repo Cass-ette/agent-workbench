@@ -39,6 +39,16 @@ class UpdateFeedTests(unittest.TestCase):
         self.assertFalse(FEED.may_advance(current, older))
         self.assertTrue(FEED.may_advance(older, current))
 
+    def test_preview_installs_can_advance_to_stable_without_removing_their_identity(self):
+        preview = manifest([package("macos", "0.1.44"), package("windows", "0.1.44"),
+                            package("android", "0.1.91", build=93, signing="development")])
+        stable = manifest([package("macos", "1.0.0"), package("windows", "1.0.0"),
+                           package("android", "1.0.0", build=95, signing="release"),
+                           package("android", "1.0.0", build=95, signing="development")])
+        FEED.validate_complete(stable)
+        self.assertTrue(FEED.may_advance(preview, stable))
+        self.assertFalse(FEED.may_advance(stable, preview))
+
 
 if __name__ == "__main__":
     unittest.main()

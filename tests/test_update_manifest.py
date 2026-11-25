@@ -74,10 +74,51 @@ class UpdateManifestTests(unittest.TestCase):
         metadata = stable / "output-metadata.json"
         data = json.loads(metadata.read_text())
         data["variantName"] = "release"
+        data["elements"][0]["versionName"] = "1.0.0"
         metadata.write_text(json.dumps(data))
-        manifest = MANIFEST.build_manifest(self.artifacts, "stable notes", "workbench-v0.1.2", self.output, "stable")
-        self.assertTrue(all(p["channel"] == "preview" for p in manifest["packages"]))
+        self._set_desktop_stable_versions()
+        manifest = MANIFEST.build_manifest(self.artifacts, "stable notes", "workbench-v1.0.0", self.output, "stable")
+        self.assertTrue(all(p["channel"] == "stable" for p in manifest["packages"]))
         self.assertEqual(manifest["packages"][-1]["signing"], "release")
+
+    def _set_desktop_stable_versions(self):
+        with zipfile.ZipFile(self.artifacts / "macos-agent-workbench" / "Agent-Workbench-macOS-universal.zip", "w") as archive:
+            archive.writestr("CCHP Model Manager.app/Contents/Info.plist", plistlib.dumps({
+                "CFBundleIdentifier": "com.cassette.cchpmodelmanager", "CFBundleShortVersionString": "1.0.0",
+            }))
+        (self.artifacts / "windows-agent-workbench-installer" / "version.txt").write_text("1.0.0")
+
+    def test_stable_migration_offers_same_apk_to_both_installed_build_types(self):
+        self._set_desktop_stable_versions()
+        stable = self.artifacts / "android-agent-workbench-stable"
+        (self.artifacts / "android-agent-workbench-preview-apk").rename(stable)
+        metadata = stable / "output-metadata.json"
+        data = json.loads(metadata.read_text())
+        data["variantName"] = "release"
+        data["elements"][0].update(versionName="1.0.0", versionCode=95)
+        metadata.write_text(json.dumps(data))
+        result = MANIFEST.build_manifest(self.artifacts, "stable", "workbench-v1.0.0", self.output,
+                                         "stable", android_development_compatible=True)
+        packages = [p for p in result["packages"] if p["platform"] == "android"]
+        self.assertEqual({p["signing"] for p in packages}, {"release", "development"})
+        self.assertEqual({p["url"] for p in packages}, {packages[0]["url"]})
+        self.assertEqual({p["sha256"] for p in packages}, {packages[0]["sha256"]})
+        self.assertEqual(len((self.output / "SHA256SUMS.txt").read_text().splitlines()), 3)
+
+    def test_stable_rejects_mismatched_installer_versions(self):
+        stable = self.artifacts / "android-agent-workbench-stable"
+        (self.artifacts / "android-agent-workbench-preview-apk").rename(stable)
+        metadata = stable / "output-metadata.json"
+        data = json.loads(metadata.read_text())
+        data["variantName"] = "release"
+        metadata.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "match the stable release tag"):
+            MANIFEST.build_manifest(self.artifacts, "notes", "workbench-v1.0.0", self.output, "stable")
+
+    def test_preview_cannot_claim_stable_signing_migration(self):
+        with self.assertRaisesRegex(ValueError, "migration alias"):
+            MANIFEST.build_manifest(self.artifacts, "notes", "workbench-preview-123-1", self.output,
+                                    android_development_compatible=True)
 
     def test_version_controls_status_even_when_release_mode_differs(self):
         info_path = self.artifacts / "macos-agent-workbench" / "Agent-Workbench-macOS-universal.zip"

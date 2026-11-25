@@ -5,15 +5,48 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      channel:
+        description: 'Stable requires explicit maintainer authorization'
+        type: choice
+        options: [preview, stable]
+        default: preview
+      stable_version:
+        description: 'Exact stable version, e.g. 1.0.0 (leave empty for previews)'
+        type: string
       release_notes:
-        description: 'Optional notes for this preview build'
+        description: 'Optional release notes'
         type: string
 
 permissions:
   contents: read
 
 jobs:
+  configure:
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.release.outputs.channel }}
+      stable_version: ${{ steps.release.outputs.stable_version }}
+    steps:
+      - name: Validate explicit release mode
+        id: release
+        env:
+          CHANNEL: ${{ inputs.channel || 'preview' }}
+          STABLE_VERSION: ${{ inputs.stable_version }}
+        run: |
+          python - <<'PY'
+          import os, re
+          channel, version = os.environ['CHANNEL'], os.environ['STABLE_VERSION'].strip()
+          if channel == 'stable':
+              assert os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch' and os.environ['GITHUB_REF'] == 'refs/heads/main', 'Stable releases require an explicit dispatch on main'
+              assert re.fullmatch(r'[1-9][0-9]*\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', version), 'Provide a stable MAJOR.MINOR.PATCH version'
+          else:
+              assert channel == 'preview' and not version, 'Preview builds must not specify a stable version'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'channel={channel}\nstable_version={version}\n')
+          PY
+
   macos:
+    needs: configure
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -21,8 +54,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Stamp preview version
-        run: python scripts/prepare-preview-version.py --sequence ${{ github.run_number }}
+      - name: Stamp installer version
+        env:
+          STABLE_VERSION: ${{ needs.configure.outputs.stable_version }}
+        run: python scripts/prepare-preview-version.py --sequence ${{ github.run_number }} --stable-version "$STABLE_VERSION"
       - name: Test backend and updater
         run: |
           python -m unittest discover -s tests
@@ -38,6 +73,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: configure
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
@@ -48,8 +84,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Stamp preview version
-        run: python ../scripts/prepare-preview-version.py --sequence ${{ github.run_number }}
+      - name: Stamp installer version
+        env:
+          STABLE_VERSION: ${{ needs.configure.outputs.stable_version }}
+        run: python ../scripts/prepare-preview-version.py --sequence ${{ github.run_number }} --stable-version "$env:STABLE_VERSION"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -81,6 +119,7 @@ jobs:
           if-no-files-found: error
 
   android:
+    needs: configure
     runs-on: ubuntu-latest
     timeout-minutes: 45
     defaults:
@@ -91,8 +130,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Stamp preview version
-        run: python ../scripts/prepare-preview-version.py --sequence ${{ github.run_number }}
+      - name: Stamp installer version
+        env:
+          STABLE_VERSION: ${{ needs.configure.outputs.stable_version }}
+        run: python ../scripts/prepare-preview-version.py --sequence ${{ github.run_number }} --stable-version "$STABLE_VERSION"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -106,26 +147,51 @@ jobs:
           path="$RUNNER_TEMP/workbench-preview.keystore"
           printf '%s' "$PREVIEW_KEYSTORE" | base64 --decode > "$path"
           printf 'WORKBENCH_ANDROID_PREVIEW_KEYSTORE_PATH=%s\n' "$path" >> "$GITHUB_ENV"
-      - name: Test and build Android preview
+      - name: Test and build Android
+        env:
+          CHANNEL: ${{ needs.configure.outputs.channel }}
         run: |
           python -m unittest discover -s tests
           ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
-      - name: Verify APK uses the restored preview certificate
+          if [ "$CHANNEL" = stable ]; then
+            ./gradlew :app:testReleaseUnitTest :app:assembleRelease
+          fi
+      - name: Verify APK uses the existing certificate and correct build mode
+        env:
+          CHANNEL: ${{ needs.configure.outputs.channel }}
         run: |
+          variant=debug
+          if [ "$CHANNEL" = stable ]; then variant=release; fi
+          apk="app/build/outputs/apk/$variant/app-$variant.apk"
           expected=$(keytool -exportcert -keystore "$WORKBENCH_ANDROID_PREVIEW_KEYSTORE_PATH" -storepass android -alias AndroidDebugKey | sha256sum | cut -d ' ' -f1)
-          actual=$("$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs app/build/outputs/apk/debug/app-debug.apk | sed -n 's/Signer #1 certificate SHA-256 digest: //p')
+          actual=$("$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "$apk" | sed -n 's/Signer #1 certificate SHA-256 digest: //p')
           test -n "$expected" && test "$actual" = "$expected"
+          if [ "$CHANNEL" = stable ]; then
+            if "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$apk" | grep -q '^application-debuggable'; then
+              echo 'Stable APK must not be debuggable' >&2
+              exit 1
+            fi
+          fi
       - uses: actions/upload-artifact@v4
+        if: needs.configure.outputs.channel == 'preview'
         with:
           name: android-agent-workbench-preview-apk
           path: |
             android/app/build/outputs/apk/debug/app-debug.apk
             android/app/build/outputs/apk/debug/output-metadata.json
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: needs.configure.outputs.channel == 'stable'
+        with:
+          name: android-agent-workbench-stable
+          path: |
+            android/app/build/outputs/apk/release/app-release.apk
+            android/app/build/outputs/apk/release/output-metadata.json
+          if-no-files-found: error
 
   release:
     if: github.repository == 'Cass-ette/claude-cchp-manager' && github.ref == 'refs/heads/main'
-    needs: [macos, windows, android]
+    needs: [configure, macos, windows, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -140,30 +206,48 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Prepare preview release
+      - name: Prepare complete release
         env:
           RELEASE_NOTES: ${{ inputs.release_notes }}
+          CHANNEL: ${{ needs.configure.outputs.channel }}
+          STABLE_VERSION: ${{ needs.configure.outputs.stable_version }}
         run: |
           tag="workbench-preview-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          migration=()
+          if [ "$CHANNEL" = stable ]; then
+            tag="workbench-v$STABLE_VERSION"
+            migration=(--android-development-compatible)
+          fi
           printf 'RELEASE_TAG=%s\n' "$tag" >> "$GITHUB_ENV"
           python - <<'PY'
           from pathlib import Path
           import os
           notes = os.environ.get('RELEASE_NOTES', '').strip()
           if not notes:
-              notes = Path('docs/preview-notes.zh-CN.md').read_text(encoding='utf-8')
-          Path('release-notes.md').write_text('测试版（Pre-release），可下载安装，尚未经维护者确认为正式版。\n\n' + notes + '\n\n源码提交：' + os.environ['GITHUB_SHA'] + '\n', encoding='utf-8')
+              name = 'stable-notes.zh-CN.md' if os.environ['CHANNEL'] == 'stable' else 'preview-notes.zh-CN.md'
+              notes = Path('docs', name).read_text(encoding='utf-8')
+          heading = ('正式版 ' + os.environ['STABLE_VERSION']) if os.environ['CHANNEL'] == 'stable' else '测试版（Pre-release），可下载安装，尚未经维护者确认为正式版。'
+          Path('release-notes.md').write_text(heading + '\n\n' + notes + '\n\n源码提交：' + os.environ['GITHUB_SHA'] + '\n', encoding='utf-8')
           PY
           python scripts/build-update-manifest.py --artifacts artifacts --notes release-notes.md \
-            --tag "$tag" --channel preview --output release-assets
-      - name: Publish downloadable preview with manifest
+            --tag "$tag" --channel "$CHANNEL" --output release-assets "${migration[@]}"
+      - name: Publish all installers with manifest
         env:
           GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ needs.configure.outputs.channel }}
+          STABLE_VERSION: ${{ needs.configure.outputs.stable_version }}
         run: |
+          if [ "$CHANNEL" = stable ]; then
+            gh release create "$RELEASE_TAG" --draft --target "$GITHUB_SHA" \
+              --title "Agent Workbench $STABLE_VERSION 正式版" --notes-file release-notes.md
+            gh release upload "$RELEASE_TAG" release-assets/*
+            gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest
+          else
           gh release create "$RELEASE_TAG" --draft --prerelease --target "$GITHUB_SHA" \
             --title "Agent Workbench 测试版 #${GITHUB_RUN_NUMBER}" --notes-file release-notes.md
           gh release upload "$RELEASE_TAG" release-assets/*
           gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          fi
       - name: Publish fixed update feed after all release assets are public
         env:
           GH_TOKEN: ${{ github.token }}

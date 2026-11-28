@@ -98,8 +98,16 @@ struct ToolBridgeSheet: View {
                                 let granted = model.requestScreenCapturePermission()
                                 message = granted ? "macOS 已授权屏幕录制。还需确认当前模型和网关支持图片工具。" : "尚未获得授权，请在系统设置中允许工作台；授权后可回到这里重新检查。"
                             }
-                            Button("打开屏幕录制设置") { model.openScreenCaptureSettings() }
-                            Button("打开辅助功能设置") { model.openAccessibilitySettings() }
+                            Button("打开屏幕录制设置") {
+                                if !model.openScreenCaptureSettings() {
+                                    message = "无法打开 macOS 系统设置，请手动打开‘系统设置 → 隐私与安全性 → 屏幕录制’。"
+                                }
+                            }
+                            Button("打开辅助功能设置") {
+                                if !model.openAccessibilitySettings() {
+                                    message = "无法打开 macOS 系统设置，请手动打开‘系统设置 → 隐私与安全性 → 辅助功能’。"
+                                }
+                            }
                         }
                     }
                     .padding(12)

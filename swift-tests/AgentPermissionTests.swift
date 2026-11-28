@@ -2,6 +2,15 @@ import XCTest
 @testable import AgentWorkbench
 
 final class AgentPermissionTests: XCTestCase {
+    func testPrivacySettingsUseModernMacOSDeepLinksBeforeLegacyFallback() {
+        XCTAssertEqual(SystemPrivacyPane.screenCapture.settingsURLs.first?.absoluteString,
+                       "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?Privacy_ScreenCapture")
+        XCTAssertEqual(SystemPrivacyPane.accessibility.settingsURLs.first?.absoluteString,
+                       "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?Privacy_Accessibility")
+        XCTAssertEqual(SystemPrivacyPane.screenCapture.settingsURLs.last?.absoluteString,
+                       "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+    }
+
     func testLocalTerminalKeepsProxyButDoesNotCopyOtherClientCredentials() {
         let environment = agentNetworkEnvironment([
             "HTTPS_PROXY": "http://127.0.0.1:7890",

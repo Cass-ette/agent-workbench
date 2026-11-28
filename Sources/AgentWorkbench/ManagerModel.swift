@@ -4,6 +4,21 @@ import Combine
 import CoreGraphics
 import Foundation
 
+enum SystemPrivacyPane: String, CaseIterable {
+    case screenCapture = "Privacy_ScreenCapture"
+    case accessibility = "Privacy_Accessibility"
+
+    /// macOS moved Privacy & Security panes from the legacy preference
+    /// bundle to the Login Items settings extension. Keep the legacy URL as
+    /// a fallback for older supported systems.
+    var settingsURLs: [URL] {
+        [
+            "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?\(rawValue)",
+            "x-apple.systempreferences:com.apple.preference.security?\(rawValue)"
+        ].compactMap(URL.init(string:))
+    }
+}
+
 struct KeyProfile: Decodable, Identifiable, Hashable {
     let id: String
     let name: String
@@ -440,14 +455,22 @@ final class ManagerModel: ObservableObject {
         return screenCaptureAuthorized
     }
 
-    func openScreenCaptureSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
-        NSWorkspace.shared.open(url)
+    @discardableResult
+    func openScreenCaptureSettings() -> Bool {
+        openPrivacySettings(.screenCapture)
     }
 
-    func openAccessibilitySettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
-        NSWorkspace.shared.open(url)
+    @discardableResult
+    func openAccessibilitySettings() -> Bool {
+        openPrivacySettings(.accessibility)
+    }
+
+    @discardableResult
+    private func openPrivacySettings(_ pane: SystemPrivacyPane) -> Bool {
+        for url in pane.settingsURLs where NSWorkspace.shared.open(url) {
+            return true
+        }
+        return false
     }
 
     /// Reads the enabled tool configuration and resolves TCC state before a

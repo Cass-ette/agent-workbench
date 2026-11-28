@@ -27,6 +27,8 @@ def gateway_from_api_base(base):
 MAX_SESSION_FILE_BYTES = 64 * 1024 * 1024
 MAX_SESSION_ROWS = 2000
 MAX_TITLE_CHARS = 180
+MAX_PROJECT_NAME_CHARS = 120
+METADATA_VERSION = 1
 
 
 def _text(value: object) -> str:
@@ -328,6 +330,185 @@ def public_rows(rows: Iterable[dict]) -> list[dict]:
          "configured_model": row.get("_configured_model") or row.get("model", "")}
         for row in rows
     ]
+
+
+def _metadata_path(root: Path) -> Path:
+    return root / "history-metadata.json"
+
+
+def load_metadata(root: Path) -> dict:
+    """Read app-owned history labels and project relationships."""
+    path = _metadata_path(root)
+    try:
+        if path.is_symlink():
+            return {"version": METADATA_VERSION, "sessions": {}, "projects": []}
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        value = {}
+    if not isinstance(value, dict):
+        value = {}
+    sessions = value.get("sessions") if isinstance(value.get("sessions"), dict) else {}
+    projects = value.get("projects") if isinstance(value.get("projects"), list) else []
+    valid_projects = []
+    project_ids = set()
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+        project_id = project.get("id")
+        name = project.get("name")
+        parent_id = project.get("parent_id")
+        if not (_valid_id(project_id) and isinstance(name, str) and name.strip()
+                and len(name.strip()) <= MAX_PROJECT_NAME_CHARS):
+            continue
+        if parent_id is not None and not _valid_id(parent_id):
+            parent_id = None
+        if project_id in project_ids:
+            continue
+        project_ids.add(project_id)
+        valid_projects.append({"id": project_id, "name": name.strip(), "parent_id": parent_id})
+    valid_sessions = {}
+    for reference, entry in sessions.items():
+        if not isinstance(reference, str) or len(reference) != 32 or not isinstance(entry, dict):
+            continue
+        title = entry.get("title")
+        project_id = entry.get("project_id")
+        clean = {}
+        if isinstance(title, str) and title.strip():
+            clean["title"] = title.strip()[:MAX_TITLE_CHARS]
+        if project_id in project_ids:
+            clean["project_id"] = project_id
+        if clean:
+            valid_sessions[reference] = clean
+    return {"version": METADATA_VERSION, "sessions": valid_sessions, "projects": valid_projects}
+
+
+def save_metadata(root: Path, metadata: dict) -> None:
+    if root.is_symlink():
+        raise ValueError("历史元数据目录无效。")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = _metadata_path(root)
+    fd, temporary = tempfile.mkstemp(prefix=".history-metadata-", dir=root)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(metadata, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def apply_metadata(rows: Iterable[dict], root: Path) -> list[dict]:
+    metadata = load_metadata(root)
+    projects = {project["id"]: project for project in metadata["projects"]}
+    paths = {}
+
+    def project_path(project_id: str, seen: set[str] | None = None) -> str:
+        if project_id in paths:
+            return paths[project_id]
+        seen = set() if seen is None else seen
+        if project_id in seen or project_id not in projects:
+            return ""
+        seen.add(project_id)
+        project = projects[project_id]
+        parent = project.get("parent_id")
+        prefix = project_path(parent, seen) if isinstance(parent, str) else ""
+        result = "/".join(part for part in (prefix, project["name"]) if part)
+        paths[project_id] = result
+        return result
+
+    result = []
+    for row in rows:
+        entry = metadata["sessions"].get(row.get("history_ref"), {})
+        merged = dict(row)
+        if entry.get("title"):
+            merged["title"] = entry["title"]
+            merged["custom_title"] = True
+        project_id = entry.get("project_id")
+        if project_id in projects:
+            merged["project_id"] = project_id
+            merged["project_path"] = project_path(project_id)
+        else:
+            merged["project_id"] = None
+            merged["project_path"] = ""
+        result.append(merged)
+    return result
+
+
+def _require_reference(reference: str) -> str:
+    if not isinstance(reference, str) or len(reference) != 32 or not re.fullmatch(r"[0-9a-f]{32}", reference):
+        raise ValueError("历史会话标识无效。")
+    return reference
+
+
+def rename_session(reference: str, title: str, root: Path) -> None:
+    reference = _require_reference(reference)
+    if not isinstance(title, str) or not title.strip() or len(title.strip()) > MAX_TITLE_CHARS:
+        raise ValueError("会话名称不能为空且不能超过 180 个字符。")
+    metadata = load_metadata(root)
+    current = metadata["sessions"].setdefault(reference, {})
+    current["title"] = title.strip()
+    save_metadata(root, metadata)
+
+
+def _require_project(metadata: dict, project_id: str) -> dict:
+    if not _valid_id(project_id):
+        raise ValueError("项目标识无效。")
+    for project in metadata["projects"]:
+        if project["id"] == project_id:
+            return project
+    raise ValueError("找不到该项目。")
+
+
+def create_project(name: str, parent_id: str | None, root: Path) -> dict:
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > MAX_PROJECT_NAME_CHARS:
+        raise ValueError("项目名称不能为空且不能超过 120 个字符。")
+    metadata = load_metadata(root)
+    if parent_id is not None:
+        _require_project(metadata, parent_id)
+    project = {"id": str(uuid4()), "name": name.strip(), "parent_id": parent_id}
+    metadata["projects"].append(project)
+    save_metadata(root, metadata)
+    return project
+
+
+def rename_project(project_id: str, name: str, root: Path) -> dict:
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > MAX_PROJECT_NAME_CHARS:
+        raise ValueError("项目名称不能为空且不能超过 120 个字符。")
+    metadata = load_metadata(root)
+    project = _require_project(metadata, project_id)
+    project["name"] = name.strip()
+    save_metadata(root, metadata)
+    return project
+
+
+def delete_project(project_id: str, root: Path) -> None:
+    metadata = load_metadata(root)
+    _require_project(metadata, project_id)
+    children = {project["id"] for project in metadata["projects"] if project.get("parent_id") == project_id}
+    if children:
+        raise ValueError("请先删除或移动子项目。")
+    metadata["projects"] = [project for project in metadata["projects"] if project["id"] != project_id]
+    for entry in metadata["sessions"].values():
+        if entry.get("project_id") == project_id:
+            entry.pop("project_id", None)
+    save_metadata(root, metadata)
+
+
+def assign_session_project(reference: str, project_id: str | None, root: Path) -> None:
+    reference = _require_reference(reference)
+    metadata = load_metadata(root)
+    if project_id is not None:
+        _require_project(metadata, project_id)
+    entry = metadata["sessions"].setdefault(reference, {})
+    if project_id is None:
+        entry.pop("project_id", None)
+    else:
+        entry["project_id"] = project_id
+    if not entry:
+        metadata["sessions"].pop(reference, None)
+    save_metadata(root, metadata)
 
 
 def _archive_marker(row: dict, root: Path) -> Path:

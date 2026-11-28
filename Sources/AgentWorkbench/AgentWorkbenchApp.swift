@@ -29,7 +29,13 @@ struct AgentWorkbenchApp: App {
             WorkbenchRoot(model: model, updates: updates, appearance: appearance)
                 .frame(minWidth: 960, minHeight: 680)
                 .preferredColorScheme(appearance.mode.colorScheme)
-                .task { await model.load(); model.restoreRemoteService() }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                    model.refreshSystemPermissionStatus()
+                }
+                .task {
+                    await model.load()
+                    model.restoreRemoteService()
+                }
                 .task {
                     while !Task.isCancelled {
                         await updates.check()

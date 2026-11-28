@@ -1,8 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     io::{BufRead, BufReader},
@@ -26,6 +26,11 @@ pub struct Conversation {
     pub updated_at: u64,
     pub scope: String,
     pub archived: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
+    pub custom_title: bool,
     #[serde(skip)]
     pub home: PathBuf,
     #[serde(skip)]
@@ -34,6 +39,129 @@ pub struct Conversation {
     pub key_fingerprint: String,
     #[serde(skip)]
     pub configured_model: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct HistoryMetadata {
+    version: u32,
+    sessions: HashMap<String, SessionMetadata>,
+    projects: Vec<HistoryProject>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct SessionMetadata {
+    title: Option<String>,
+    project_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HistoryProject {
+    pub id: String,
+    pub name: String,
+    pub parent_id: Option<String>,
+}
+
+fn metadata_path(root: &Path) -> PathBuf { root.join("history-metadata.json") }
+
+fn load_metadata(root: &Path) -> HistoryMetadata {
+    fs::read(metadata_path(root)).ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| HistoryMetadata { version: 1, ..Default::default() })
+}
+
+fn save_metadata(root: &Path, metadata: &HistoryMetadata) -> Result<(), String> {
+    if root.is_symlink() { return Err("历史元数据路径无效".into()); }
+    fs::create_dir_all(root).map_err(|_| "无法创建历史元数据目录")?;
+    let path = metadata_path(root);
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(metadata).map_err(|_| "无法编码历史元数据")?)
+        .map_err(|_| "无法保存历史元数据")?;
+    fs::rename(&temporary, &path).map_err(|_| "无法替换历史元数据".to_owned())
+}
+
+fn project_path(project_id: &str, projects: &HashMap<String, HistoryProject>) -> Option<String> {
+    let mut names = Vec::new();
+    let mut current = Some(project_id.to_owned());
+    let mut seen = HashSet::new();
+    while let Some(id) = current {
+        if !seen.insert(id.clone()) { return None; }
+        let project = projects.get(&id)?;
+        names.push(project.name.clone());
+        current = project.parent_id.clone();
+        if names.len() > 100 { return None; }
+    }
+    names.reverse();
+    Some(names.join(" / "))
+}
+
+fn apply_metadata(root: &Path, rows: &mut [Conversation]) {
+    let metadata = load_metadata(root);
+    let projects = metadata.projects.iter().cloned().map(|project| (project.id.clone(), project)).collect::<HashMap<_, _>>();
+    for row in rows {
+        let Some(entry) = metadata.sessions.get(&row.history_ref) else { continue };
+        if let Some(title) = entry.title.as_deref().filter(|title| !title.trim().is_empty()) {
+            row.title = title.to_owned();
+            row.custom_title = true;
+        }
+        row.project_id = entry.project_id.clone();
+        row.project_path = entry.project_id.as_deref().and_then(|id| project_path(id, &projects));
+    }
+}
+
+pub fn list_projects(root: &Path) -> Vec<HistoryProject> { load_metadata(root).projects }
+
+pub fn rename_session(root: &Path, reference: &str, title: &str) -> Result<(), String> {
+    let title = title.trim();
+    if reference.is_empty() || title.is_empty() || title.chars().count() > 180 { return Err("对话名称不能为空且不能超过 180 个字符".into()); }
+    let mut metadata = load_metadata(root);
+    metadata.sessions.entry(reference.to_owned()).or_default().title = Some(title.to_owned());
+    save_metadata(root, &metadata)
+}
+
+pub fn create_project(root: &Path, name: &str, parent_id: Option<String>) -> Result<HistoryProject, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 120 { return Err("项目名称不能为空且不能超过 120 个字符".into()); }
+    let mut metadata = load_metadata(root);
+    if let Some(parent) = parent_id.as_deref() {
+        if !metadata.projects.iter().any(|project| project.id == parent) { return Err("父项目不存在".into()); }
+    }
+    let project = HistoryProject { id: Uuid::new_v4().to_string(), name: name.to_owned(), parent_id };
+    metadata.projects.push(project.clone());
+    save_metadata(root, &metadata)?;
+    Ok(project)
+}
+
+pub fn rename_project(root: &Path, project_id: &str, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 120 { return Err("项目名称不能为空且不能超过 120 个字符".into()); }
+    let mut metadata = load_metadata(root);
+    let project = metadata.projects.iter_mut().find(|project| project.id == project_id).ok_or("项目不存在")?;
+    project.name = name.to_owned();
+    save_metadata(root, &metadata)
+}
+
+pub fn delete_project(root: &Path, project_id: &str) -> Result<(), String> {
+    let mut metadata = load_metadata(root);
+    if metadata.projects.iter().any(|project| project.parent_id.as_deref() == Some(project_id)) { return Err("请先移除子项目".into()); }
+    if !metadata.projects.iter().any(|project| project.id == project_id) { return Err("项目不存在".into()); }
+    metadata.projects.retain(|project| project.id != project_id);
+    for entry in metadata.sessions.values_mut() {
+        if entry.project_id.as_deref() == Some(project_id) { entry.project_id = None; }
+    }
+    save_metadata(root, &metadata)
+}
+
+pub fn assign_session_project(root: &Path, reference: &str, project_id: Option<String>) -> Result<(), String> {
+    let mut metadata = load_metadata(root);
+    if let Some(project) = project_id.as_deref() {
+        if !metadata.projects.iter().any(|item| item.id == project) { return Err("项目不存在".into()); }
+    }
+    let entry = metadata.sessions.entry(reference.to_owned()).or_default();
+    entry.project_id = project_id;
+    if entry.title.is_none() && entry.project_id.is_none() { metadata.sessions.remove(reference); }
+    save_metadata(root, &metadata)
 }
 
 fn text(value: &Value) -> &str {
@@ -111,6 +239,7 @@ fn read(client: &str, home: PathBuf, path: &Path, updated: SystemTime,
         updated_at: updated.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(), home,
         source: path.to_owned(),
         scope: scope.into(), archived: false,
+        project_id: None, project_path: None, custom_title: false,
         key_fingerprint: text(&manifest["key_fingerprint"]).into(),
         configured_model: text(&manifest["model"]).into(),
     };
@@ -337,14 +466,18 @@ pub fn scan_all(root: &Path) -> Vec<Conversation> {
     let mut rows = scan(root);
     rows.extend(scan_global());
     rows.sort_unstable_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.source.cmp(&b.source)));
-    annotate_archives(root, rows.into_iter().take(1000).collect())
+    let mut rows = annotate_archives(root, rows.into_iter().take(1000).collect());
+    apply_metadata(root, &mut rows);
+    rows
 }
 
 pub fn scan_project(root: &Path, workspace: &Path) -> Vec<Conversation> {
     let mut rows = scan_workspace(root, workspace);
     rows.extend(scan_global_matching(Some(workspace)));
     rows.sort_unstable_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.source.cmp(&b.source)));
-    annotate_archives(root, rows)
+    let mut rows = annotate_archives(root, rows);
+    apply_metadata(root, &mut rows);
+    rows
 }
 
 fn archive_marker(root: &Path, row: &Conversation) -> PathBuf {
@@ -459,6 +592,7 @@ mod tests {
             title: "title".into(), preview: "preview".into(), workspace: "/work/project".into(),
             model: "model-a".into(), profile_id: "p-one".into(), profile_name: "One".into(),
             gateway: "https://gateway.test".into(), updated_at: 0, scope: "workbench".into(), archived: false,
+            project_id: None, project_path: None, custom_title: false,
             home: PathBuf::from("original/branch-home"), source: PathBuf::new(), key_fingerprint: "key-one".into(),
             configured_model: "model-a".into(),
         };

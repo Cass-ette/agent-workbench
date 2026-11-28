@@ -729,6 +729,7 @@ def history_list(workspace=None, client=None, include_archived=False):
     rows = session_history.mark_scope(
         session_history.scan_history(codex_roots, claude_roots, workspace=workspace, client=client), "workbench")
     rows = session_history.archive_rows(rows, TEST_ROOT / "history-archive", include_archived)
+    rows = session_history.apply_metadata(rows, TEST_ROOT)
     print(json.dumps({"sessions": session_history.public_rows(rows)}, ensure_ascii=False))
 
 
@@ -739,6 +740,7 @@ def global_history_list(workspace=None, client=None, include_archived=False):
     rows = session_history.scan_all_history(
         workbench_codex, workbench_claude, codex_roots, claude_roots, workspace=workspace, client=client)
     rows = session_history.archive_rows(rows, TEST_ROOT / "history-archive", include_archived)
+    rows = session_history.apply_metadata(rows, TEST_ROOT)
     print(json.dumps({"sessions": session_history.public_rows(rows)}, ensure_ascii=False))
 
 
@@ -753,6 +755,38 @@ def archive_history_from_stdin():
                                           codex_roots + global_codex, claude_roots + global_claude)
     session_history.set_archived(row, TEST_ROOT / "history-archive", payload["archived"])
     print(json.dumps({"archived": payload["archived"]}))
+
+
+def history_metadata_from_stdin(action: str):
+    payload = json.load(sys.stdin)
+    if not isinstance(payload, dict):
+        raise RuntimeError("历史整理请求格式不正确。")
+    session_history = history_module()
+    if action == "rename":
+        session_history.rename_session(payload.get("history_ref"), payload.get("title"), TEST_ROOT)
+        print(json.dumps({"history_ref": payload.get("history_ref"), "title": payload.get("title").strip()}, ensure_ascii=False))
+        return
+    if action == "project-create":
+        project = session_history.create_project(payload.get("name"), payload.get("parent_id"), TEST_ROOT)
+        print(json.dumps(project, ensure_ascii=False))
+        return
+    if action == "project-rename":
+        project = session_history.rename_project(payload.get("project_id"), payload.get("name"), TEST_ROOT)
+        print(json.dumps(project, ensure_ascii=False))
+        return
+    if action == "project-delete":
+        session_history.delete_project(payload.get("project_id"), TEST_ROOT)
+        print(json.dumps({"deleted": payload.get("project_id")}))
+        return
+    if action == "project-assign":
+        session_history.assign_session_project(payload.get("history_ref"), payload.get("project_id"), TEST_ROOT)
+        print(json.dumps({"history_ref": payload.get("history_ref"), "project_id": payload.get("project_id")}))
+        return
+    raise RuntimeError("未知的历史整理操作。")
+
+
+def history_projects():
+    print(json.dumps({"projects": history_module().load_metadata(TEST_ROOT)["projects"]}, ensure_ascii=False))
 
 
 def launch_history(history_ref, session_id, client, profile_id, model, workspace_value,
@@ -1253,7 +1287,7 @@ def main():
         "menu", "setup", "status", "models", "plan", "chat", "smoke", "usage",
         "profile-account", "profile-billing", "billing-settings", "save-billing-stdin", "remove-billing",
         "profile-pricing", "save-pricing-source-stdin",
-        "gui-state", "history-list", "history-list-global", "history-archive-stdin", "history-launch", "history-import-launch", "history-resume-original",
+        "gui-state", "history-list", "history-list-global", "history-archive-stdin", "history-rename-stdin", "history-projects", "history-project-create-stdin", "history-project-rename-stdin", "history-project-delete-stdin", "history-project-assign-stdin", "history-launch", "history-import-launch", "history-resume-original",
         "profile-models", "add-profile-stdin", "remove-profile", "set-gateway-stdin",
         "set-profile-gateway-stdin", "launch", "codex-launch",
         "tools-get", "tools-save", "tools-import",
@@ -1309,6 +1343,12 @@ def main():
     if arguments.action == "history-list": history_list(arguments.workspace, arguments.client, arguments.include_archived); return 0
     if arguments.action == "history-list-global": global_history_list(arguments.workspace, arguments.client, arguments.include_archived); return 0
     if arguments.action == "history-archive-stdin": archive_history_from_stdin(); return 0
+    if arguments.action == "history-rename-stdin": history_metadata_from_stdin("rename"); return 0
+    if arguments.action == "history-projects": history_projects(); return 0
+    if arguments.action == "history-project-create-stdin": history_metadata_from_stdin("project-create"); return 0
+    if arguments.action == "history-project-rename-stdin": history_metadata_from_stdin("project-rename"); return 0
+    if arguments.action == "history-project-delete-stdin": history_metadata_from_stdin("project-delete"); return 0
+    if arguments.action == "history-project-assign-stdin": history_metadata_from_stdin("project-assign"); return 0
     if arguments.action == "history-resume-original":
         if not all((arguments.history_ref, arguments.session_id, arguments.client, arguments.workspace)):
             raise RuntimeError("恢复会话缺少历史来源或工作目录。")

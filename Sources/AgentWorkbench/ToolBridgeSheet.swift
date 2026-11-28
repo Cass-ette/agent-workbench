@@ -1,5 +1,4 @@
 import AppKit
-import CoreGraphics
 import SwiftUI
 
 struct ToolBridgeItem: Decodable, Identifiable {
@@ -31,6 +30,7 @@ struct ToolBridgeSheet: View {
     private func accept(_ value: ToolBridgeState) {
         config = value.config
         screen = value.screen
+        model.applyScreenCaptureSetting(value.screen, client: client)
         items = value.items
         disabled = Set(items.filter { !$0.enabled }.map(\.id))
         loaded = true
@@ -75,6 +75,36 @@ struct ToolBridgeSheet: View {
             }.pickerStyle(.segmented)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Label("系统权限预检", systemImage: model.screenCaptureAuthorized ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                            .font(.headline)
+                            .foregroundStyle(model.screenCaptureAuthorized || !screen ? Color.primary : Color.red)
+                        HStack {
+                            Text("屏幕录制")
+                            Spacer()
+                            Text(model.screenCaptureAuthorized ? "已授权" : "尚未授权")
+                                .foregroundStyle(model.screenCaptureAuthorized ? .green : .red)
+                        }
+                        HStack {
+                            Text("辅助功能")
+                            Spacer()
+                            Text(model.accessibilityAuthorized ? "已授权" : "未授权")
+                                .foregroundStyle(model.accessibilityAuthorized ? .green : .secondary)
+                        }
+                        Text("内置屏幕读取只需要屏幕录制权限。辅助功能只在另接需要控制鼠标或键盘的工具时使用。系统权限已授权，也不代表当前模型或网关支持图片工具。")
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("请求／检查屏幕录制授权") {
+                                let granted = model.requestScreenCapturePermission()
+                                message = granted ? "macOS 已授权屏幕录制。还需确认当前模型和网关支持图片工具。" : "尚未获得授权，请在系统设置中允许工作台；授权后可回到这里重新检查。"
+                            }
+                            Button("打开屏幕录制设置") { model.openScreenCaptureSettings() }
+                            Button("打开辅助功能设置") { model.openAccessibilitySettings() }
+                        }
+                    }
+                    .padding(12)
+                    .background(.red.opacity(screen && !model.screenCaptureAuthorized ? 0.08 : 0.04), in: RoundedRectangle(cornerRadius: 8))
+
                     Text("MCP 服务（JSON）").font(.headline)
                     Text("填入 mcpServers 或 mcp_servers 对象。command/args 启动本机程序，url 连接 HTTP 服务。保存仅登记；之后启动会话才连接或执行。凭据请优先通过环境变量提供。")
                         .foregroundStyle(.secondary)
@@ -90,20 +120,6 @@ struct ToolBridgeSheet: View {
                     Toggle("启用本机屏幕读取（Codex / Claude 皆可）", isOn: $screen)
                     Text("只按工具调用截取主屏幕，不点击或输入。截图会发给所选模型和网关，需图片支持及 macOS 屏幕录制授权。启用不代表已通过授权或模型验证。")
                         .foregroundStyle(.secondary)
-                    Button("请求／检查屏幕录制授权") {
-                        let granted = CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
-                        message = granted ? "macOS 已授权工作台读取屏幕。工具连接与模型图片能力仍需在会话中验证。" : "尚未获得屏幕录制授权，请在系统设置中允许工作台。macOS 可能要求之后重新打开工作台；当前终端不会自动重启。"
-                    }
-                    Button("打开屏幕录制系统设置") {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
-                    Button("打开辅助功能系统设置（用于另接的控制工具）") {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
                     HStack {
                         Button("导入技能目录…") { importDirectory("skill") }
                         if client == .claude { Button("导入 Claude 插件目录…") { importDirectory("plugin") } }
@@ -142,7 +158,10 @@ struct ToolBridgeSheet: View {
         .font(.system(size: 13)).padding(24).frame(width: 650, height: 700)
         .task(id: client) { await load() }
         .onChange(of: config) { _, _ in confirmed = false }
-        .onChange(of: screen) { _, _ in confirmed = false }
+        .onChange(of: screen) { _, enabled in
+            confirmed = false
+            model.screenCaptureSettingChanged(enabled, client: client)
+        }
         .disabled(busy)
     }
 }

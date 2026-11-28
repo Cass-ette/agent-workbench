@@ -26,9 +26,17 @@ data class LocalConversation(
     val configuredModel: String = model,
     val gateway: String = "",
     val archived: Boolean = false,
+    val projectId: String? = null,
+    val projectPath: String = "",
+    val customTitle: Boolean = false,
 ) {
     val displayTitle get() = if (title.trimStart().startsWith("# AGENTS.md instructions")) preview.ifBlank { "未命名对话" } else title
 }
+data class HistoryProject(
+    val id: String,
+    val name: String,
+    val parentId: String? = null,
+)
 data class UsageSummary(
     val inputTokens: Long? = null,
     val outputTokens: Long? = null,
@@ -444,6 +452,7 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
         notice = "已保存权限设置；之后新建、恢复和分支的本地会话使用此设置"
     }
     var history by mutableStateOf(emptyList<LocalConversation>()); private set
+    var historyProjects by mutableStateOf(emptyList<HistoryProject>()); private set
     private var reasoningPreferences by mutableStateOf(store.loadReasoningPreferences())
     private fun reasoningFor(client: String, profile: String, model: String) = reasoningPreferences[ReasoningEffort.key(client, profile, model)] ?: "default"
     val startupReasoningEffort get() = reasoningFor(options.client, options.profileId, options.model)
@@ -468,7 +477,9 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
     var historyLoading by mutableStateOf(false); private set
     var historyError by mutableStateOf(""); private set
     var historyArchiving by mutableStateOf(""); private set
+    var historyMutating by mutableStateOf(""); private set
     val canArchiveHistory get() = localExecution || remoteWorkbench?.capabilities?.contains("history-archive") == true
+    val canManageHistoryProjects get() = localExecution || remoteWorkbench?.capabilities?.contains("history-projects") == true
     var selectedHistory by mutableStateOf<LocalConversation?>(null); private set
     var sessions by mutableStateOf(emptyList<TerminalSession>()); private set
     var selectedSession by mutableStateOf("")
@@ -589,7 +600,8 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
             LocalConversation(row.getString("id"), row.getString("history_ref"), row.getString("client"),
                 row.getString("title"), row.getString("workspace"), row.getString("model"),
                 row.getString("profile_id"), row.getLong("updated_at"), row.optString("preview"),
-                row.optString("configured_model", row.getString("model")), row.optString("gateway"), row.optBoolean("archived"))
+                row.optString("configured_model", row.getString("model")), row.optString("gateway"), row.optBoolean("archived"),
+                row.optString("project_id").takeIf { it.isNotBlank() }, row.optString("project_path"), row.optBoolean("custom_title"))
         }
     }
 
@@ -607,13 +619,160 @@ class WorkbenchModel(application: Application) : AndroidViewModel(application) {
                 (0 until rows.length()).map { index -> val row = rows.getJSONObject(index)
                     LocalConversation(row.getString("id"), row.getString("history_ref"), row.getString("client"), row.getString("title"),
                         row.getString("workspace"), row.getString("model"), row.getString("profile_id"), row.getLong("updated_at"),
-                        row.optString("preview"), row.optString("configured_model", row.getString("model")), row.optString("gateway"), row.optBoolean("archived"))
+                        row.optString("preview"), row.optString("configured_model", row.getString("model")), row.optString("gateway"), row.optBoolean("archived"),
+                        row.optString("project_id").takeIf { it.isNotBlank() }, row.optString("project_path"), row.optBoolean("custom_title"))
                 }
             } }
             main.post {
                 result.onSuccess { rows -> if (sshTarget?.id == remote && (directory == null || historyWorkspace == directory)) history = rows }
                     .onFailure { historyError = if (remote == null) "无法读取本地历史，请在运行环境页重新连接 Termux" else it.message ?: "无法读取电脑历史" }
                 historyLoading = false
+            }
+        }
+    }
+
+    private fun parseHistoryProjects(value: JSONObject): List<HistoryProject> {
+        val rows = value.optJSONArray("projects") ?: JSONArray()
+        return (0 until rows.length()).mapNotNull { index ->
+            rows.optJSONObject(index)?.let { row ->
+                val id = row.optString("id")
+                val name = row.optString("name")
+                if (id.isBlank() || name.isBlank()) null else HistoryProject(id, name, row.optString("parent_id").takeIf { it.isNotBlank() })
+            }
+        }
+    }
+
+    fun refreshHistoryProjects() {
+        if (!canManageHistoryProjects) return
+        val remote = sshTarget?.id
+        worker.execute {
+            val result = runCatching {
+                if (remote == null) parseHistoryProjects(termux.request("/history/projects"))
+                else parseHistoryProjects(remoteRequest(remote, JSONObject().put("op", "history-projects")))
+            }
+            main.post {
+                if (sshTarget?.id == remote) result.onSuccess { historyProjects = it }
+                    .onFailure { historyError = it.message ?: "无法读取历史项目" }
+            }
+        }
+    }
+
+    private fun projectPath(projectId: String?): String {
+        if (projectId == null) return ""
+        val projects = historyProjects.associateBy { it.id }
+        val names = mutableListOf<String>()
+        val seen = mutableSetOf<String>()
+        var current = projectId
+        while (current != null && seen.add(current)) {
+            val project = projects[current] ?: break
+            names += project.name
+            current = project.parentId
+        }
+        return names.asReversed().joinToString(" / ")
+    }
+
+    fun renameHistory(entry: LocalConversation, title: String) {
+        val clean = title.trim()
+        if (clean.isBlank()) { historyError = "会话名称不能为空"; return }
+        if (historyMutating.isNotEmpty()) return
+        historyMutating = entry.reference
+        worker.execute {
+            val result = runCatching {
+                val payload = JSONObject().put("history_ref", entry.reference).put("title", clean)
+                if (sshTarget?.id == null) termux.request("/history/rename", "POST", payload)
+                else remoteRequest(sshTarget!!.id, payload.put("op", "history-rename"))
+            }
+            main.post {
+                result.onSuccess {
+                    history = history.map { if (it.reference == entry.reference) it.copy(title = clean, customTitle = true) else it }
+                    notice = "已重命名会话"
+                }.onFailure { historyError = it.message ?: "会话重命名失败" }
+                historyMutating = ""
+            }
+        }
+    }
+
+    fun assignHistoryProject(entry: LocalConversation, projectId: String?) {
+        if (!canManageHistoryProjects || historyMutating.isNotEmpty()) return
+        historyMutating = entry.reference
+        worker.execute {
+            val result = runCatching {
+                val payload = JSONObject().put("history_ref", entry.reference)
+                    .put("project_id", projectId ?: JSONObject.NULL)
+                if (sshTarget?.id == null) termux.request("/history/project", "POST", payload.put("action", "assign"))
+                else remoteRequest(sshTarget!!.id, payload.put("op", "history-project-assign"))
+            }
+            main.post {
+                result.onSuccess {
+                    history = history.map { if (it.reference == entry.reference) it.copy(projectId = projectId, projectPath = projectPath(projectId)) else it }
+                    notice = if (projectId == null) "已移出项目" else "已归类到项目"
+                }.onFailure { historyError = it.message ?: "会话归类失败" }
+                historyMutating = ""
+            }
+        }
+    }
+
+    fun createHistoryProject(name: String, parentId: String? = null) {
+        val clean = name.trim()
+        if (clean.isBlank()) { historyError = "项目名称不能为空"; return }
+        if (!canManageHistoryProjects || historyMutating.isNotEmpty()) return
+        historyMutating = "project-create"
+        worker.execute {
+            val result = runCatching {
+                val payload = JSONObject().put("name", clean).put("parent_id", parentId ?: JSONObject.NULL)
+                val value = if (sshTarget?.id == null) termux.request("/history/project", "POST", payload.put("action", "create"))
+                    else remoteRequest(sshTarget!!.id, payload.put("op", "history-project-create"))
+                val project = value.optJSONObject("project") ?: value
+                HistoryProject(project.getString("id"), project.getString("name"), project.optString("parent_id").takeIf { it.isNotBlank() })
+            }
+            main.post {
+                result.onSuccess { historyProjects = historyProjects + it; notice = "已创建项目" }
+                    .onFailure { historyError = it.message ?: "创建项目失败" }
+                historyMutating = ""
+            }
+        }
+    }
+
+    fun renameHistoryProject(project: HistoryProject, name: String) {
+        val clean = name.trim()
+        if (clean.isBlank()) { historyError = "项目名称不能为空"; return }
+        if (!canManageHistoryProjects || historyMutating.isNotEmpty()) return
+        historyMutating = project.id
+        worker.execute {
+            val result = runCatching {
+                val payload = JSONObject().put("project_id", project.id).put("name", clean)
+                val value = if (sshTarget?.id == null) termux.request("/history/project", "POST", payload.put("action", "rename"))
+                    else remoteRequest(sshTarget!!.id, payload.put("op", "history-project-rename"))
+                val row = value.optJSONObject("project") ?: value
+                HistoryProject(row.getString("id"), row.getString("name"), row.optString("parent_id").takeIf { it.isNotBlank() })
+            }
+            main.post {
+                result.onSuccess { updated ->
+                    historyProjects = historyProjects.map { if (it.id == updated.id) updated else it }
+                    history = history.map { if (it.projectId == updated.id) it.copy(projectPath = projectPath(updated.id)) else it }
+                    notice = "已重命名项目"
+                }.onFailure { historyError = it.message ?: "项目重命名失败" }
+                historyMutating = ""
+            }
+        }
+    }
+
+    fun deleteHistoryProject(project: HistoryProject) {
+        if (!canManageHistoryProjects || historyMutating.isNotEmpty()) return
+        historyMutating = project.id
+        worker.execute {
+            val result = runCatching {
+                val payload = JSONObject().put("project_id", project.id)
+                if (sshTarget?.id == null) termux.request("/history/project", "POST", payload.put("action", "delete"))
+                else remoteRequest(sshTarget!!.id, payload.put("op", "history-project-delete"))
+            }
+            main.post {
+                result.onSuccess {
+                    historyProjects = historyProjects.filterNot { it.id == project.id }
+                    history = history.map { if (it.projectId == project.id) it.copy(projectId = null, projectPath = "") else it }
+                    notice = "已删除项目"
+                }.onFailure { historyError = it.message ?: "删除项目失败" }
+                historyMutating = ""
             }
         }
     }

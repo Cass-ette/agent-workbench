@@ -437,25 +437,56 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
 @Composable private fun HistoryPicker(model: WorkbenchModel, allProjects: Boolean, onDismiss: () -> Unit, onSelect: (LocalConversation) -> Unit) {
     var query by remember { mutableStateOf("") }
     var showArchived by remember { mutableStateOf(false) }
-    var directory by remember { mutableStateOf<List<String>?>(null) }
+    var historyView by remember { mutableStateOf(if (allProjects) "recent" else "directory") }
+    var directory by remember { mutableStateOf<List<String>?>(if (allProjects) null else emptyList()) }
+    var selectedProjectId by remember { mutableStateOf<String?>(null) }
+    var renameEntry by remember { mutableStateOf<LocalConversation?>(null) }
+    var renameText by remember { mutableStateOf("") }
+    var projectMenuEntry by remember { mutableStateOf<String?>(null) }
+    var createProjectOpen by remember { mutableStateOf(false) }
+    var createProjectParent by remember { mutableStateOf<String?>(null) }
+    var createProjectName by remember { mutableStateOf("") }
+    var renameProject by remember { mutableStateOf<HistoryProject?>(null) }
+    var renameProjectText by remember { mutableStateOf("") }
+    var deleteProject by remember { mutableStateOf<HistoryProject?>(null) }
+    LaunchedEffect(Unit) {
+        model.refreshHistory(allProjects)
+        model.refreshHistoryProjects()
+    }
     fun parts(row: LocalConversation) = row.workspace.replace('\\', '/').split('/').filter(String::isNotBlank)
     val matches = model.history.filter { row ->
-        row.archived == showArchived && listOf(row.title, row.preview, row.workspace, row.model, row.client)
+        row.archived == showArchived && listOf(row.displayTitle, row.preview, row.workspace, row.model, row.client, row.projectPath)
             .any { it.contains(query.trim(), ignoreCase = true) }
     }
     val prefix = directory
-    val rows = if (prefix == null) matches else matches.filter { parts(it) == prefix }
-    val folders = if (prefix == null) emptyList() else matches.mapNotNull { row ->
+    val rows = when (historyView) {
+        "directory" -> if (prefix == null) matches else matches.filter { parts(it) == prefix }
+        "project" -> matches.filter { it.projectId == selectedProjectId }
+        else -> matches
+    }
+    val folders = if (historyView != "directory" || prefix == null) emptyList() else matches.mapNotNull { row ->
         val path = parts(row)
         if (path.take(prefix.size) == prefix) path.getOrNull(prefix.size) else null
     }.distinct().sorted()
+    val flatProjects = remember(model.historyProjects) {
+        val result = mutableListOf<Pair<HistoryProject, Int>>()
+        fun append(parent: String?, depth: Int) {
+            model.historyProjects.filter { it.parentId == parent }.sortedBy { it.name }.forEach {
+                result += it to depth
+                append(it.id, depth + 1)
+            }
+        }
+        append(null, 0)
+        result
+    }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(shape = RoundedCornerShape(20.dp), tonalElevation = 6.dp,
-            modifier = Modifier.widthIn(max = 960.dp).fillMaxWidth(0.94f).fillMaxHeight(0.85f)) {
+            modifier = Modifier.widthIn(max = 960.dp).fillMaxWidth(0.94f).fillMaxHeight(0.9f)) {
         Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(if (allProjects) "恢复最近对话" else "从当前项目的历史创建分支", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-                TextButton(onClick = { model.refreshHistory(allProjects) }, enabled = !model.historyLoading && model.historyArchiving.isEmpty()) { Text("刷新") }
+                if (model.canManageHistoryProjects) TextButton(onClick = { createProjectParent = null; createProjectName = ""; createProjectOpen = true }) { Text("新建项目") }
+                TextButton(onClick = { model.refreshHistory(allProjects); model.refreshHistoryProjects() }, enabled = !model.historyLoading && model.historyMutating.isEmpty()) { Text("刷新") }
                 TextButton(onClick = onDismiss) { Text("关闭") }
             }
             Text((if (model.localExecution) "手机本地" else "电脑 · ${model.executionName}") + " · " +
@@ -465,44 +496,84 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
                 FilterChip(selected = !showArchived, onClick = { showArchived = false }, label = { Text("未归档") })
                 FilterChip(selected = showArchived, onClick = { showArchived = true }, label = { Text("已归档") })
             } else Text("对话归档需要更新电脑工作台", style = MaterialTheme.typography.labelSmall)
-            if (allProjects) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = prefix == null, onClick = { directory = null }, label = { Text("最近") })
-                FilterChip(selected = prefix != null, onClick = { directory = emptyList() }, label = { Text("按目录") })
+            if (allProjects || model.canManageHistoryProjects) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (allProjects) FilterChip(selected = historyView == "recent", onClick = { historyView = "recent"; directory = null }, label = { Text("最近") })
+                if (allProjects) FilterChip(selected = historyView == "directory", onClick = { historyView = "directory"; directory = emptyList() }, label = { Text("按目录") })
+                FilterChip(selected = historyView == "project", onClick = { historyView = "project"; selectedProjectId = null; directory = null }, label = { Text("按项目") })
             }
-            OutlinedTextField(query, { query = it; if (prefix != null) directory = emptyList() },
+            OutlinedTextField(query, { query = it; if (historyView == "directory" && prefix != null) directory = emptyList() },
                 label = { Text("搜索标题、内容、模型或项目") }, singleLine = true,
                 modifier = Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) model.terminalFocusChanged("", true) })
-            if (prefix != null && prefix.isNotEmpty()) {
+            if (historyView == "directory" && prefix != null && prefix.isNotEmpty()) {
                 TextButton(onClick = { directory = prefix.dropLast(1) }) { Text("‹ 上一级") }
-                Text(prefix.joinToString("/", prefix = "/"), maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.labelSmall)
+                Text(prefix.joinToString("/", prefix = "/"), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
+            }
+            if (historyView == "project") {
+                if (model.historyProjects.isEmpty()) Text("还没有项目；可以从上方新建项目。", style = MaterialTheme.typography.bodySmall)
+                else {
+                    Text("项目树", style = MaterialTheme.typography.titleSmall)
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 180.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        item {
+                            TextButton(onClick = { selectedProjectId = null }, modifier = Modifier.fillMaxWidth()) {
+                                Text("未分类", modifier = Modifier.weight(1f), color = if (selectedProjectId == null) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+                                Text("${matches.count { it.projectId == null }} 条")
+                            }
+                        }
+                        items(flatProjects, key = { "project:${it.first.id}" }) { (project, depth) ->
+                            Row(Modifier.fillMaxWidth().padding(start = (depth * 16).dp), verticalAlignment = Alignment.CenterVertically) {
+                                TextButton(onClick = { selectedProjectId = project.id }, modifier = Modifier.weight(1f)) {
+                                    Text(project.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        color = if (selectedProjectId == project.id) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+                                    Spacer(Modifier.width(6.dp)); Text("${matches.count { it.projectId == project.id }} 条", style = MaterialTheme.typography.labelSmall)
+                                }
+                                if (model.canManageHistoryProjects) {
+                                    TextButton(onClick = { createProjectParent = project.id; createProjectName = ""; createProjectOpen = true }) { Text("子项目") }
+                                    TextButton(onClick = { renameProject = project; renameProjectText = project.name }) { Text("改名") }
+                                    TextButton(onClick = { deleteProject = project }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             when {
                 model.historyLoading -> LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 10.dp))
-                model.historyError.isNotEmpty() -> Text(model.historyError, Modifier.padding(top = 10.dp))
+                model.historyError.isNotEmpty() -> Text(model.historyError, Modifier.padding(top = 10.dp), color = MaterialTheme.colorScheme.error)
                 rows.isEmpty() && folders.isEmpty() -> Text(if (model.localExecution) "暂无匹配的本地对话" else "暂无匹配的电脑对话", Modifier.padding(top = 10.dp))
                 else -> LazyColumn(Modifier.fillMaxWidth().weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (prefix != null) items(folders, key = { "folder:$it" }) { folder ->
+                    if (historyView == "directory" && prefix != null) items(folders, key = { "folder:$it" }) { folder ->
                         TextButton(onClick = { directory = prefix + folder }, modifier = Modifier.fillMaxWidth()) {
-                            Text(folder, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("›")
+                            Text(folder, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis); Text("›")
                         }
                     }
                     items(rows, key = { it.reference }) { row ->
                         val profile = if (model.localExecution) model.profiles.firstOrNull { it.id == row.profileId }?.name ?: "来源配置未知"
                             else if (row.profileId == "global") "系统 CLI" else model.remoteWorkbench?.profiles?.firstOrNull { it.id == row.profileId }?.name ?: "电脑原配置"
-                        Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
-                            .clickable { onSelect(row) }.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(row.displayTitle, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                        var menuOpen by remember { mutableStateOf(false) }
+                        Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(onClick = { onSelect(row) }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(0.dp)) {
+                                Text(row.displayTitle, modifier = Modifier.fillMaxWidth(), maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                            }
                             if (row.preview.isNotBlank() && row.preview != row.displayTitle) Text(row.preview, maxLines = 3, overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text("${if (row.client == "codex") "Codex" else "Claude"} · ${row.model.ifBlank { "模型未知" }} · $profile",
                                 style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(row.workspace, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            Text(java.text.DateFormat.getDateTimeInstance().format(java.util.Date(row.updatedAt * 1000)),
-                                style = MaterialTheme.typography.labelSmall)
-                            if(model.canArchiveHistory) TextButton(onClick = { model.archiveHistory(row) }, enabled = model.historyArchiving.isEmpty()) {
-                                Text(if(row.archived) "取消归档" else "归档")
+                            if (row.projectPath.isNotBlank()) Text("项目：${row.projectPath}", style = MaterialTheme.typography.labelSmall)
+                            Text(java.text.DateFormat.getDateTimeInstance().format(java.util.Date(row.updatedAt * 1000)), style = MaterialTheme.typography.labelSmall)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                TextButton(onClick = { renameEntry = row; renameText = row.displayTitle }, enabled = model.historyMutating.isEmpty()) { Text("重命名") }
+                                if (model.canManageHistoryProjects) Box {
+                                    TextButton(onClick = { menuOpen = true }, enabled = model.historyMutating.isEmpty()) { Text("归类") }
+                                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                        DropdownMenuItem(text = { Text("未分类") }, onClick = { menuOpen = false; model.assignHistoryProject(row, null) })
+                                        model.historyProjects.forEach { project ->
+                                            DropdownMenuItem(text = { Text(project.name) }, onClick = { menuOpen = false; model.assignHistoryProject(row, project.id) })
+                                        }
+                                    }
+                                }
+                                Spacer(Modifier.weight(1f))
+                                if(model.canArchiveHistory) TextButton(onClick = { model.archiveHistory(row) }, enabled = model.historyArchiving.isEmpty()) { Text(if(row.archived) "取消归档" else "归档") }
                             }
                         }
                     }
@@ -511,6 +582,24 @@ fun WorkbenchApp(model: WorkbenchModel, updates: WorkbenchUpdates, requestTermux
         }
         }
     }
+    renameEntry?.let { entry ->
+        AlertDialog(onDismissRequest = { renameEntry = null }, title = { Text("重命名会话") },
+            text = { OutlinedTextField(renameText, { renameText = it }, label = { Text("会话名称") }, singleLine = true) },
+            confirmButton = { TextButton(onClick = { model.renameHistory(entry, renameText); renameEntry = null }) { Text("保存") } },
+            dismissButton = { TextButton(onClick = { renameEntry = null }) { Text("取消") } })
+    }
+    if (createProjectOpen) AlertDialog(onDismissRequest = { createProjectOpen = false }, title = { Text(if (createProjectParent == null) "新建项目" else "新建子项目") },
+        text = { OutlinedTextField(createProjectName, { createProjectName = it }, label = { Text("项目名称") }, singleLine = true) },
+        confirmButton = { TextButton(onClick = { model.createHistoryProject(createProjectName, createProjectParent); createProjectOpen = false }) { Text("创建") } },
+        dismissButton = { TextButton(onClick = { createProjectOpen = false }) { Text("取消") } })
+    renameProject?.let { project -> AlertDialog(onDismissRequest = { renameProject = null }, title = { Text("重命名项目") },
+        text = { OutlinedTextField(renameProjectText, { renameProjectText = it }, label = { Text("项目名称") }, singleLine = true) },
+        confirmButton = { TextButton(onClick = { model.renameHistoryProject(project, renameProjectText); renameProject = null }) { Text("保存") } },
+        dismissButton = { TextButton(onClick = { renameProject = null }) { Text("取消") } }) }
+    deleteProject?.let { project -> AlertDialog(onDismissRequest = { deleteProject = null }, title = { Text("删除项目？") },
+        text = { Text("删除“${project.name}”不会删除会话。项目必须没有子项目。") },
+        confirmButton = { TextButton(onClick = { model.deleteHistoryProject(project); deleteProject = null }) { Text("删除", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = { deleteProject = null }) { Text("取消") } }) }
 }
 
 @Composable internal fun ChoiceField(label: String, value: String, modifier: Modifier = Modifier, choices: List<Pair<String, String>>, choose: (String) -> Unit, empty: () -> Unit = {}) {

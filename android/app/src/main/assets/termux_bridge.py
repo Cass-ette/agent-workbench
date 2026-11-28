@@ -521,7 +521,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.command == "GET" and uri.path == "/health":
                 return self.reply(200, {"service": "agent-workbench-termux", "version": self.server.version,
-                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "ssh-address-verification", "remote-workbench", "remote-connection-state", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions", "history-archive", "tool-bridge"]})
+                                        "build": self.server.build, "capabilities": ["pty", "ssh", "ssh-pairing", "ssh-address-verification", "remote-workbench", "remote-connection-state", "debian-runtime", "debian-shell", "linux-vm", "vm-agent", "versioned-runtime", "usage", "history", "history-actions", "history-archive", "history-projects", "tool-bridge"]})
             if self.command == "GET" and uri.path == "/usage":
                 return self.reply(200, usage_snapshot())
             if self.command == "GET" and uri.path == "/tools":
@@ -545,7 +545,7 @@ class Handler(BaseHTTPRequestHandler):
                 rows = history.archive_rows(rows, Path.home() / ".local/share/agent-workbench/history-archive",
                                             include_archived=query.get("archive") == ["all"])
                 return self.reply(200, {"sessions": history.public_rows(
-                    history.mark_scope(rows, "workbench"))})
+                    history.apply_metadata(history.mark_scope(rows, "workbench"), Path.home() / ".local/share/agent-workbench"))})
             payload = {}
             if self.command == "POST":
                 length = int(self.headers.get("Content-Length", 0))
@@ -559,6 +559,23 @@ class Handler(BaseHTTPRequestHandler):
                                               codex_homes, claude_homes)
                 history.set_archived(row, Path.home() / ".local/share/agent-workbench/history-archive", payload.get("archived"))
                 return self.reply(200, {"archived": payload["archived"]})
+            if self.command == "GET" and uri.path == "/history/projects":
+                history, _, _ = history_context(Path.home())
+                return self.reply(200, {"projects": history.load_metadata(Path.home() / ".local/share/agent-workbench")["projects"]})
+            if self.command == "POST" and uri.path == "/history/rename":
+                history, _, _ = history_context(Path.home())
+                history.rename_session(payload.get("history_ref"), payload.get("title"), Path.home() / ".local/share/agent-workbench")
+                return self.reply(200, {"renamed": True})
+            if self.command == "POST" and uri.path == "/history/project":
+                history, _, _ = history_context(Path.home())
+                root = Path.home() / ".local/share/agent-workbench"
+                action = payload.get("action")
+                if action == "create": value = history.create_project(payload.get("name"), payload.get("parent_id"), root)
+                elif action == "rename": value = history.rename_project(payload.get("project_id"), payload.get("name"), root)
+                elif action == "delete": history.delete_project(payload.get("project_id"), root); value = {"deleted": True}
+                elif action == "assign": history.assign_session_project(payload.get("history_ref"), payload.get("project_id"), root); value = {"assigned": True}
+                else: raise ValueError("历史项目操作无效")
+                return self.reply(200, {"project": value} if action in ("create", "rename") else value)
             if self.command == "POST" and uri.path == "/remote/verify-address":
                 from remote_workbench import verify_ssh_address
                 return self.reply(200, verify_ssh_address(payload.get("ssh", {}), payload.get("host"), payload.get("port", 22)))

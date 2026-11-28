@@ -385,7 +385,7 @@ fn operation(app: &tauri::AppHandle, request: Value) -> Result<Value, String> {
             .cloned()
             .collect();
         return Ok(
-            json!({"schema":1,"platform":"windows","capabilities":["sessions","launch","system-cli","history","history-archive","reasoning-effort","models","attachments"],
+            json!({"schema":1,"platform":"windows","capabilities":["sessions","launch","system-cli","history","history-archive","history-projects","reasoning-effort","models","attachments"],
             "profiles":config.profiles,"workspace":config.workspace,"workspaces":[],"profile_id":config.selected_profile_id,
             "client":config.client,"model":config.model,"permissions":config.remote_permissions,"sessions":sessions}),
         );
@@ -408,6 +408,31 @@ fn operation(app: &tauri::AppHandle, request: Value) -> Result<Value, String> {
         let archived = request["archived"].as_bool().ok_or("归档状态无效")?;
         crate::history::set_archived(&root, text("history_ref"), text("history_id"), text("client"), archived)?;
         return Ok(json!({"archived":archived}));
+    }
+    if op == "history-projects" {
+        return Ok(json!({"projects": crate::history::list_projects(&root)}));
+    }
+    if op == "history-rename" {
+        crate::history::rename_session(&root, text("history_ref"), text("title"))?;
+        return Ok(json!({"renamed":true}));
+    }
+    if op == "history-project-create" {
+        let parent_id = request.get("parent_id").and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_owned);
+        let project = crate::history::create_project(&root, text("name"), parent_id)?;
+        return Ok(json!({"project":project}));
+    }
+    if op == "history-project-rename" {
+        crate::history::rename_project(&root, text("project_id"), text("name"))?;
+        return Ok(json!({"renamed":true}));
+    }
+    if op == "history-project-delete" {
+        crate::history::delete_project(&root, text("project_id"))?;
+        return Ok(json!({"deleted":true}));
+    }
+    if op == "history-project-assign" {
+        let project_id = request.get("project_id").and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_owned);
+        crate::history::assign_session_project(&root, text("history_ref"), project_id)?;
+        return Ok(json!({"assigned":true}));
     }
     if op == "models" {
         let models = tauri::async_runtime::block_on(crate::models_for_profile(

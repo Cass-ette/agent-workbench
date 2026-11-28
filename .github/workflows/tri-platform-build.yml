@@ -190,7 +190,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.repository == 'Cass-ette/claude-cchp-manager' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Cass-ette/agent-workbench' && github.ref == 'refs/heads/main'
     needs: [configure, macos, windows, android]
     runs-on: ubuntu-latest
     permissions:

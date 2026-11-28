@@ -1,5 +1,7 @@
 import AppKit
+import ApplicationServices
 import Combine
+import CoreGraphics
 import Foundation
 
 struct KeyProfile: Decodable, Identifiable, Hashable {
@@ -44,11 +46,14 @@ struct LocalHistoryEntry: Decodable, Identifiable, Equatable {
     let updated_at: Int
     let scope: String?
     let preview: String?
+    var project_id: String? = nil
+    var project_path: String? = nil
+    var custom_title: Bool? = nil
     var archived: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "id"
-        case history_ref, client, title, workspace, model, configured_model, profile_id, profile_name, gateway, updated_at, scope, preview, archived
+        case history_ref, client, title, workspace, model, configured_model, profile_id, profile_name, gateway, updated_at, scope, preview, archived, project_id, project_path, custom_title
     }
 
     var id: String { history_ref }
@@ -58,9 +63,17 @@ struct LocalHistoryEntry: Decodable, Identifiable, Equatable {
     var updatedDate: Date { Date(timeIntervalSince1970: TimeInterval(updated_at)) }
 }
 
+struct HistoryProject: Decodable, Identifiable, Equatable {
+    let id: String
+    var name: String
+    let parent_id: String?
+}
+
 private struct HistoryListResponse: Decodable {
     let sessions: [LocalHistoryEntry]
 }
+
+private struct HistoryProjectsResponse: Decodable { let projects: [HistoryProject] }
 
 struct UsageUnitPrice: Decodable, Equatable, Hashable {
     let model: String
@@ -397,11 +410,105 @@ private struct BackendClient: Sendable {
 final class ManagerModel: ObservableObject {
     @Published var isToolsPresented = false
 
+    // TCC permissions are granted by macOS, so the workbench can only check
+    // them and bring the user to the system prompt/settings before a session.
+    @Published private(set) var screenCaptureAuthorized = CGPreflightScreenCaptureAccess()
+    @Published private(set) var accessibilityAuthorized = AXIsProcessTrusted()
+    @Published private(set) var screenCaptureRequired = false
+    @Published private(set) var screenCaptureRequiredClients = Set<String>()
+    @Published private(set) var permissionsPreflightComplete = false
+
     func manageTools(_ action: String, client: ClientKind, payload: [String: Any]? = nil) async throws -> ToolBridgeState {
         guard let backend else { throw BackendError(message: "后端尚未就绪") }
         let input = try payload.map { try JSONSerialization.data(withJSONObject: $0) }
         let result = try await backend.run([action, "--client", client.rawValue], stdin: input)
         return try JSONDecoder().decode(ToolBridgeState.self, from: result)
+    }
+
+    func refreshSystemPermissionStatus() {
+        screenCaptureAuthorized = CGPreflightScreenCaptureAccess()
+        accessibilityAuthorized = AXIsProcessTrusted()
+    }
+
+    @discardableResult
+    func requestScreenCapturePermission() -> Bool {
+        refreshSystemPermissionStatus()
+        if !screenCaptureAuthorized {
+            _ = CGRequestScreenCaptureAccess()
+            refreshSystemPermissionStatus()
+        }
+        return screenCaptureAuthorized
+    }
+
+    func openScreenCaptureSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func openAccessibilitySettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Reads the enabled tool configuration and resolves TCC state before a
+    /// model session is launched. The active client is checked first, then
+    /// the other client so switching clients does not defer the first prompt.
+    func prepareSystemPermissions() async {
+        refreshSystemPermissionStatus()
+        guard backend != nil else { return }
+        var requiredClients = Set<String>()
+        for client in [activeClient, activeClient == .codex ? .claude : .codex] {
+            if let state = try? await manageTools("tools-get", client: client) {
+                if state.screen { requiredClients.insert(client.rawValue) }
+            }
+        }
+        screenCaptureRequiredClients = requiredClients
+        screenCaptureRequired = !requiredClients.isEmpty
+        if screenCaptureRequired && !screenCaptureAuthorized {
+            _ = requestScreenCapturePermission()
+        }
+        permissionsPreflightComplete = true
+        if screenCaptureRequired && !screenCaptureAuthorized {
+            statusMessage = "已启用屏幕读取，但 macOS 尚未授权屏幕录制；请先完成系统授权，再启动 Agent。"
+            isStatusError = true
+            if !isAgentPermissionsPresented { isToolsPresented = true }
+        }
+    }
+
+    /// Called when the user enables screen reading in the tool sheet. This
+    /// keeps the system prompt adjacent to the setting change.
+    func prepareScreenCapture(client: ClientKind) async {
+        refreshSystemPermissionStatus()
+        guard let state = try? await manageTools("tools-get", client: client), state.screen else {
+            updateScreenRequirement(client: client, enabled: false)
+            return
+        }
+        updateScreenRequirement(client: client, enabled: true)
+        if !screenCaptureAuthorized { _ = requestScreenCapturePermission() }
+    }
+
+    private func updateScreenRequirement(client: ClientKind, enabled: Bool) {
+        if enabled { screenCaptureRequiredClients.insert(client.rawValue) }
+        else { screenCaptureRequiredClients.remove(client.rawValue) }
+        screenCaptureRequired = !screenCaptureRequiredClients.isEmpty
+    }
+
+    /// Called while the tool sheet is being edited. The saved requirement is
+    /// updated only after tools-save succeeds, so cancelling the sheet cannot
+    /// leave a stale launch block behind.
+    func screenCaptureSettingChanged(_ enabled: Bool, client: ClientKind) {
+        if enabled && !screenCaptureAuthorized {
+            _ = requestScreenCapturePermission()
+        }
+    }
+
+    func applyScreenCaptureSetting(_ enabled: Bool, client: ClientKind) {
+        updateScreenRequirement(client: client, enabled: enabled)
+        screenCaptureSettingChanged(enabled, client: client)
+    }
+
+    func canLaunchWithConfiguredScreenTool(for client: ClientKind) -> Bool {
+        !screenCaptureRequiredClients.contains(client.rawValue) || screenCaptureAuthorized
     }
 
     @Published private(set) var agentPermissions = AgentPermissions.load()
@@ -414,6 +521,7 @@ final class ManagerModel: ObservableObject {
         isAgentPermissionsPresented = false
         statusMessage = "已保存权限设置；之后新建、恢复和分支的工作台会话使用此设置。"
         isStatusError = false
+        Task { await prepareSystemPermissions() }
     }
 
     private func ensureAgentPermissions() -> Bool {
@@ -477,6 +585,7 @@ final class ManagerModel: ObservableObject {
     @Published var isHistoryPresented = false
     @Published var isLoadingHistory = false
     @Published var historySessions: [LocalHistoryEntry] = []
+    @Published var historyProjects: [HistoryProject] = []
     @Published var selectedHistory: LocalHistoryEntry?
     @Published var archivingHistoryRef = ""
     @Published private var reasoningPreferences: [String: String] = [:]
@@ -595,7 +704,7 @@ final class ManagerModel: ObservableObject {
         if op == "ping" { return ["schema": 1] }
         guard let backend else { throw RemoteWorkbenchError.invalid("电脑工作台正在读取配置") }
         if op == "state" {
-            return ["schema": 1, "platform": "macos", "capabilities": ["sessions", "launch", "system-cli", "history", "history-archive", "reasoning-effort", "models", "attachments"],
+            return ["schema": 1, "platform": "macos", "capabilities": ["sessions", "launch", "system-cli", "history", "history-archive", "history-projects", "reasoning-effort", "models", "attachments"],
                     "profiles": profiles.map { ["id": $0.id, "name": $0.name, "gateway": $0.gateway ?? defaultGateway, "model_catalog_url": $0.model_catalog_url ?? ""] },
                     "workspace": workspace, "workspaces": workspaces, "client": activeClient.rawValue,
                     "profile_id": selectedProfileID, "model": selectedModel,
@@ -619,12 +728,32 @@ final class ManagerModel: ObservableObject {
             try await updateHistoryArchive(reference: text("history_ref"), sessionID: text("history_id"), client: text("client"), archived: archived)
             return ["archived": archived]
         }
+        if op == "history-projects" {
+            return try JSONSerialization.jsonObject(with: await backend.run(["history-projects"]))
+        }
+        let historyMetadataOperations: [String: (String, [String: Any])] = [
+            "history-rename": ("history-rename-stdin", ["history_ref": text("history_ref"), "title": text("title")]),
+            "history-project-create": ("history-project-create-stdin", ["name": text("name"), "parent_id": request["parent_id"] ?? NSNull()]),
+            "history-project-rename": ("history-project-rename-stdin", ["project_id": text("project_id"), "name": text("name")]),
+            "history-project-delete": ("history-project-delete-stdin", ["project_id": text("project_id")]),
+            "history-project-assign": ("history-project-assign-stdin", ["history_ref": text("history_ref"), "project_id": request["project_id"] ?? NSNull()])
+        ]
+        if let (action, payload) = historyMetadataOperations[op] {
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            return try JSONSerialization.jsonObject(with: await backend.run([action], stdin: data))
+        }
         if op == "launch" {
             let requestedEffort = request["reasoning_effort"] as? String
             if request["reasoning_effort"] != nil && (requestedEffort == nil || !ReasoningEffort.levels.contains(requestedEffort!)) {
                 throw RemoteWorkbenchError.invalid("思考强度无效")
             }
             guard !installingApplicationUpdate, let client = ClientKind(rawValue: text("client")) else { throw RemoteWorkbenchError.invalid("电脑正在更新或客户端无效") }
+            if text("scope") != "system" {
+                if !permissionsPreflightComplete { await prepareSystemPermissions() }
+                guard canLaunchWithConfiguredScreenTool(for: client) else {
+                    throw RemoteWorkbenchError.invalid("电脑屏幕读取工具尚未获得 macOS 屏幕录制授权，请先在电脑工作台完成系统授权")
+                }
+            }
             let directory = text("workspace")
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: directory, isDirectory: &isDirectory), isDirectory.boolValue else { throw RemoteWorkbenchError.invalid("电脑项目目录不存在") }
@@ -874,6 +1003,9 @@ final class ManagerModel: ObservableObject {
                 workspace = state.workspaces.first ?? NSHomeDirectory()
             }
             if let profileGateway = selectedProfile?.gateway { gateway = profileGateway }
+            // Resolve TCC permissions before model catalog and usage requests.
+            // A first-run screen prompt should not wait for a slow gateway.
+            await prepareSystemPermissions()
             isLoading = false
             if !selectedProfileID.isEmpty {
                 await loadModels(for: selectedProfileID)
@@ -1222,6 +1354,16 @@ final class ManagerModel: ObservableObject {
             launchGlobal(client: activeClient)
             return
         }
+        guard permissionsPreflightComplete else {
+            Task { await prepareSystemPermissions() }
+            setError("正在检查系统权限，请稍候再启动 Agent。")
+            return
+        }
+        guard canLaunchWithConfiguredScreenTool(for: activeClient) else {
+            isToolsPresented = true
+            setError("屏幕读取工具尚未获得 macOS 屏幕录制授权。请先完成授权，再启动 Agent。")
+            return
+        }
         guard ensureAgentPermissions() else { return }
         if sessionMode == .continue {
             restoreRecentInProject()
@@ -1286,6 +1428,7 @@ final class ManagerModel: ObservableObject {
         do {
             let data = try await backend.run(["history-list-global", "--workspace", workspace, "--include-archived"])
             historySessions = try JSONDecoder().decode(HistoryListResponse.self, from: data).sessions
+            await loadHistoryProjects()
         } catch {
             historyError = error.localizedDescription
         }
@@ -1302,10 +1445,63 @@ final class ManagerModel: ObservableObject {
         do {
             let data = try await backend.run(["history-list-global", "--include-archived"])
             historySessions = try JSONDecoder().decode(HistoryListResponse.self, from: data).sessions
+            await loadHistoryProjects()
         } catch {
             historyError = error.localizedDescription
         }
         isLoadingHistory = false
+    }
+
+    func loadHistoryProjects() async {
+        guard let backend else { return }
+        do {
+            let data = try await backend.run(["history-projects"])
+            historyProjects = try JSONDecoder().decode(HistoryProjectsResponse.self, from: data).projects
+        } catch { historyProjects = [] }
+    }
+
+    func renameHistory(_ entry: LocalHistoryEntry, title: String) async {
+        do {
+            let payload = try JSONSerialization.data(withJSONObject: ["history_ref": entry.history_ref, "title": title])
+            _ = try await backend?.run(["history-rename-stdin"], stdin: payload)
+            historySessions = historySessions.map { row in
+                guard row.history_ref == entry.history_ref else { return row }
+                var updated = row
+                updated = LocalHistoryEntry(sessionID: row.sessionID, history_ref: row.history_ref, client: row.client, title: title,
+                    workspace: row.workspace, model: row.model, configured_model: row.configured_model, profile_id: row.profile_id,
+                    profile_name: row.profile_name, gateway: row.gateway, updated_at: row.updated_at, scope: row.scope,
+                    preview: row.preview, project_id: row.project_id, project_path: row.project_path, custom_title: true, archived: row.archived)
+                return updated
+            }
+            statusMessage = "会话名称已保存。"; isStatusError = false
+        } catch { setError("保存会话名称失败：\(error.localizedDescription)") }
+    }
+
+    func assignHistoryProject(_ entry: LocalHistoryEntry, projectID: String?) async {
+        do {
+            let payload = try JSONSerialization.data(withJSONObject: ["history_ref": entry.history_ref, "project_id": projectID as Any])
+            _ = try await backend?.run(["history-project-assign-stdin"], stdin: payload)
+            await showHistoryData()
+        } catch { setError("调整项目归属失败：\(error.localizedDescription)") }
+    }
+
+    private func showHistoryData() async {
+        guard let backend else { return }
+        do {
+            var args = ["history-list-global", "--include-archived"]
+            if historyScope == "workspace" { args += ["--workspace", workspace] }
+            let data = try await backend.run(args)
+            historySessions = try JSONDecoder().decode(HistoryListResponse.self, from: data).sessions
+            await loadHistoryProjects()
+        } catch { historyError = error.localizedDescription }
+    }
+
+    func createHistoryProject(name: String, parentID: String?) async {
+        do {
+            let payload = try JSONSerialization.data(withJSONObject: ["name": name, "parent_id": parentID as Any])
+            _ = try await backend?.run(["history-project-create-stdin"], stdin: payload)
+            await loadHistoryProjects()
+        } catch { setError("创建项目失败：\(error.localizedDescription)") }
     }
 
     private func updateHistoryArchive(reference: String, sessionID: String, client: String, archived: Bool) async throws {
@@ -1356,6 +1552,16 @@ final class ManagerModel: ObservableObject {
         }
         if entry.isGlobal {
             launchGlobal(client: entry.clientKind, history: entry)
+            return
+        }
+        guard permissionsPreflightComplete else {
+            Task { await prepareSystemPermissions() }
+            setError("正在检查系统权限，请稍候再恢复 Agent 对话。")
+            return
+        }
+        guard canLaunchWithConfiguredScreenTool(for: entry.clientKind) else {
+            isToolsPresented = true
+            setError("屏幕读取工具尚未获得 macOS 屏幕录制授权。请先完成授权，再恢复 Agent 对话。")
             return
         }
         guard ensureAgentPermissions() else { return }

@@ -682,6 +682,48 @@ async fn set_history_archived(app: tauri::AppHandle, history_ref: String, histor
 }
 
 #[tauri::command]
+async fn list_history_projects(app: tauri::AppHandle) -> Result<Vec<history::HistoryProject>, String> {
+    let root = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || Ok(history::list_projects(&root)))
+        .await.map_err(|_| "读取历史项目失败".to_string())?
+}
+
+#[tauri::command]
+async fn rename_history(app: tauri::AppHandle, history_ref: String, title: String) -> Result<(), String> {
+    let root = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || history::rename_session(&root, &history_ref, &title))
+        .await.map_err(|_| "重命名对话失败".to_string())?
+}
+
+#[tauri::command]
+async fn create_history_project(app: tauri::AppHandle, name: String, parent_id: Option<String>) -> Result<history::HistoryProject, String> {
+    let root = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || history::create_project(&root, &name, parent_id))
+        .await.map_err(|_| "创建历史项目失败".to_string())?
+}
+
+#[tauri::command]
+async fn rename_history_project(app: tauri::AppHandle, project_id: String, name: String) -> Result<(), String> {
+    let root = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || history::rename_project(&root, &project_id, &name))
+        .await.map_err(|_| "重命名历史项目失败".to_string())?
+}
+
+#[tauri::command]
+async fn delete_history_project(app: tauri::AppHandle, project_id: String) -> Result<(), String> {
+    let root = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || history::delete_project(&root, &project_id))
+        .await.map_err(|_| "删除历史项目失败".to_string())?
+}
+
+#[tauri::command]
+async fn assign_history_project(app: tauri::AppHandle, history_ref: String, project_id: Option<String>) -> Result<(), String> {
+    let root = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || history::assign_session_project(&root, &history_ref, project_id))
+        .await.map_err(|_| "归类对话失败".to_string())?
+}
+
+#[tauri::command]
 fn start_terminal(
     mut request: StartTerminalRequest,
     app: tauri::AppHandle,
@@ -1237,6 +1279,12 @@ pub fn run() {
             list_history,
             list_all_history,
             set_history_archived,
+            list_history_projects,
+            rename_history,
+            create_history_project,
+            rename_history_project,
+            delete_history_project,
+            assign_history_project,
             write_terminal,
             attachments::stage_clipboard_image,
             resize_terminal,

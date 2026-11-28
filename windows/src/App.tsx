@@ -88,6 +88,16 @@ interface LocalConversation {
   updated_at: number;
   scope?: "local" | "workbench" | "global";
   archived?: boolean;
+  project_id?: string;
+  project_path?: string;
+  custom_title?: boolean;
+  gateway?: string;
+}
+
+interface HistoryProject {
+  id: string;
+  name: string;
+  parent_id?: string | null;
 }
 
 interface Session extends TerminalInfo {
@@ -141,6 +151,8 @@ function App() {
   const [history, setHistory] = useState<LocalConversation[]>([]);
   const [showSSHConnection, setShowSSHConnection] = useState(false);
   const [historyByDirectory, setHistoryByDirectory] = useState(false);
+  const [historyView, setHistoryView] = useState<"recent" | "directory" | "project">("recent");
+  const [historyProjects, setHistoryProjects] = useState<HistoryProject[]>([]);
   const [historyScope, setHistoryScope] = useState<"workspace" | "global">("workspace");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -188,7 +200,7 @@ function App() {
     catch { setError("无法保存思考强度设置，请重试。"); }
   }
 
-  const matchingHistory = history.filter((entry) => Boolean(entry.archived) === historyArchived && [entry.title, entry.preview ?? "", entry.workspace, entry.client, entry.model, entry.profile_name].some(
+  const matchingHistory = history.filter((entry) => Boolean(entry.archived) === historyArchived && [entry.title, entry.preview ?? "", entry.workspace, entry.client, entry.model, entry.profile_name, entry.project_path ?? ""].some(
     (value) => value.toLocaleLowerCase().includes(historyQuery.trim().toLocaleLowerCase()),
   ));
 
@@ -545,6 +557,7 @@ function App() {
     if (scope === "workspace" && !config.workspace.trim()) { setError("请先选择项目目录。"); return; }
     setHistoryScope(scope);
     setHistoryByDirectory(false);
+    setHistoryView("recent");
     setHistoryArchived(false);
     setHistoryQuery("");
     setHistoryOpen(true);
@@ -555,6 +568,7 @@ function App() {
         ? await invoke<LocalConversation[]>("list_all_history")
         : await invoke<LocalConversation[]>("list_history", { workspace: config.workspace });
       setHistory(rows);
+      setHistoryProjects(scope === "global" ? await invoke<HistoryProject[]>("list_history_projects") : []);
     } catch (cause) {
       setHistoryError(errorMessage(cause));
     } finally {
@@ -583,6 +597,32 @@ function App() {
       setNotice(entry.archived ? "已取消归档。" : "已归档；可在「已归档」中查找和取消归档。");
     } catch (cause) { setHistoryError(errorMessage(cause)); }
     finally { setHistoryArchiveBusy(""); }
+  }
+
+  async function renameHistory(entry: LocalConversation) {
+    const title = window.prompt("重命名对话", entry.title)?.trim();
+    if (!title || title === entry.title) return;
+    try {
+      await invoke("rename_history", { historyRef: entry.history_ref, title });
+      setHistory((rows) => rows.map((row) => row.history_ref === entry.history_ref ? { ...row, title, custom_title: true } : row));
+    } catch (cause) { setHistoryError(errorMessage(cause)); }
+  }
+
+  async function assignHistoryProject(entry: LocalConversation, projectId: string) {
+    try {
+      await invoke("assign_history_project", { historyRef: entry.history_ref, projectId: projectId || null });
+      const project = historyProjects.find((item) => item.id === projectId);
+      setHistory((rows) => rows.map((row) => row.history_ref === entry.history_ref ? { ...row, project_id: projectId || undefined, project_path: project ? project.name : undefined } : row));
+    } catch (cause) { setHistoryError(errorMessage(cause)); }
+  }
+
+  async function createHistoryProject(parentId?: string) {
+    const name = window.prompt(parentId ? "新建子项目" : "新建项目")?.trim();
+    if (!name) return;
+    try {
+      const project = await invoke<HistoryProject>("create_history_project", { name, parentId: parentId ?? null });
+      setHistoryProjects((items) => [...items, project]);
+    } catch (cause) { setHistoryError(errorMessage(cause)); }
   }
 
   function selectHistory(entry: LocalConversation) {
@@ -985,8 +1025,12 @@ function App() {
               <button aria-pressed={historyArchived} onClick={() => setHistoryArchived(true)}>已归档</button>
             </div>
             {historyScope === "global" && <div className="segmented-control history-view-switch" role="group" aria-label="浏览方式">
-              <button aria-pressed={!historyByDirectory} onClick={() => setHistoryByDirectory(false)}>最近</button>
-              <button aria-pressed={historyByDirectory} onClick={() => setHistoryByDirectory(true)}>按目录</button>
+              <button aria-pressed={historyView === "recent"} onClick={() => { setHistoryView("recent"); setHistoryByDirectory(false); }}>最近</button>
+              <button aria-pressed={historyView === "directory"} onClick={() => { setHistoryView("directory"); setHistoryByDirectory(true); }}>按目录</button>
+              <button aria-pressed={historyView === "project"} onClick={() => { setHistoryView("project"); setHistoryByDirectory(false); }}>按项目</button>
+            </div>}
+            {historyScope === "global" && historyView === "project" && <div className="history-project-actions">
+              <button className="secondary-button" onClick={() => void createHistoryProject()}>新建项目</button>
             </div>}
             <label className="dialog-field">
               搜索对话
@@ -995,11 +1039,17 @@ function App() {
             </label>
             <div className="history-list">
               {historyLoading ? <p>正在读取本地会话…</p> : historyError ? <p role="alert">{historyError}</p>
+                : historyView === "project" ? <HistoryProjectOutline
+                    rows={matchingHistory} projects={historyProjects} profiles={config.profiles}
+                    onSelect={selectHistory} onArchive={(entry) => void archiveHistory(entry)}
+                    onRename={(entry) => void renameHistory(entry)} onAssign={(entry, projectId) => void assignHistoryProject(entry, projectId)}
+                    onCreateChild={(projectId) => void createHistoryProject(projectId)} archiving={Boolean(historyArchiveBusy)} />
                 : <HistoryOutline
                     rows={matchingHistory.map((entry) => ({ entry, path: historyByDirectory ? historyPathParts(entry.workspace) : [] }))}
                     profiles={config.profiles}
                     onSelect={selectHistory}
                     onArchive={(entry) => void archiveHistory(entry)}
+                    onRename={(entry) => void renameHistory(entry)}
                     archiving={Boolean(historyArchiveBusy)}
                   />}
               {!historyLoading && !historyError && !matchingHistory.length && <p>暂无可恢复的本地对话。</p>}
@@ -1057,11 +1107,12 @@ function historyPathParts(workspace: string): string[] {
   return unc && parts.length >= 2 ? ["\\\\" + parts[0] + "\\" + parts[1], ...parts.slice(2)] : parts;
 }
 
-function HistoryOutline({ rows, profiles, onSelect, onArchive, archiving }: {
+function HistoryOutline({ rows, profiles, onSelect, onArchive, onRename, archiving }: {
   rows: { entry: LocalConversation; path: string[] }[];
   profiles: KeyProfile[];
   onSelect: (entry: LocalConversation) => void;
   onArchive: (entry: LocalConversation) => void;
+  onRename: (entry: LocalConversation) => void;
   archiving: boolean;
 }) {
   const folders = new Map<string, typeof rows>();
@@ -1084,7 +1135,7 @@ function HistoryOutline({ rows, profiles, onSelect, onArchive, archiving }: {
         <summary title={label}><FolderOpen size={16} /> <strong>{label}</strong></summary>
         <div className="history-directory-children">
           <HistoryOutline rows={group.map((row) => ({ ...row, path: row.path.slice(parts.length) }))}
-            profiles={profiles} onSelect={onSelect} onArchive={onArchive} archiving={archiving} />
+            profiles={profiles} onSelect={onSelect} onArchive={onArchive} onRename={onRename} archiving={archiving} />
         </div>
       </details>;
     })}
@@ -1095,11 +1146,43 @@ function HistoryOutline({ rows, profiles, onSelect, onArchive, archiving }: {
         {entry.preview && <small>{entry.preview}</small>}
         <small title={entry.workspace}>{entry.workspace || "项目目录未知"}</small>
       </button>
+      <button className="history-archive-button" onClick={() => onRename(entry)} aria-label={`重命名对话：${entry.title}`} title="重命名对话">重命名</button>
       <button className="history-archive-button" disabled={archiving} onClick={() => onArchive(entry)}
         aria-label={`${entry.archived ? "取消归档" : "归档"}对话：${entry.title}`}
         title="只改变历史列表显示，保留对话、原配置和运行终端">{entry.archived ? "取消归档" : "归档"}</button></div>
     ))}
   </>;
+}
+
+function HistoryProjectOutline({ rows, projects, profiles, onSelect, onArchive, onRename, onAssign, onCreateChild, archiving }: {
+  rows: LocalConversation[]; projects: HistoryProject[]; profiles: KeyProfile[];
+  onSelect: (entry: LocalConversation) => void; onArchive: (entry: LocalConversation) => void;
+  onRename: (entry: LocalConversation) => void; onAssign: (entry: LocalConversation, projectId: string) => void;
+  onCreateChild: (projectId: string) => void; archiving: boolean;
+}) {
+  const children = (parentId?: string | null) => projects.filter((project) => (project.parent_id ?? undefined) === (parentId ?? undefined));
+  const renderProject = (project: HistoryProject) => <details key={project.id} open className="history-directory">
+    <summary><FolderOpen size={16} /> <strong>{project.name}</strong> <button className="history-archive-button" onClick={(event) => { event.preventDefault(); onCreateChild(project.id); }}>新建子项目</button></summary>
+    <div className="history-directory-children">
+      {rows.filter((entry) => entry.project_id === project.id).map((entry) => <HistoryProjectRow key={entry.history_ref} entry={entry} projects={projects} profiles={profiles} onSelect={onSelect} onArchive={onArchive} onRename={onRename} onAssign={onAssign} archiving={archiving} />)}
+      {children(project.id).map(renderProject)}
+    </div>
+  </details>;
+  return <>{children().map(renderProject)}{rows.filter((entry) => !entry.project_id).map((entry) => <HistoryProjectRow key={entry.history_ref} entry={entry} projects={projects} profiles={profiles} onSelect={onSelect} onArchive={onArchive} onRename={onRename} onAssign={onAssign} archiving={archiving} />)}</>;
+}
+
+function HistoryProjectRow({ entry, projects, profiles, onSelect, onArchive, onRename, onAssign, archiving }: {
+  entry: LocalConversation; projects: HistoryProject[]; profiles: KeyProfile[]; onSelect: (entry: LocalConversation) => void;
+  onArchive: (entry: LocalConversation) => void; onRename: (entry: LocalConversation) => void;
+  onAssign: (entry: LocalConversation, projectId: string) => void; archiving: boolean;
+}) {
+  return <div className="history-row"><button onClick={() => onSelect(entry)}>
+    <strong>{entry.title}</strong><small>{entry.client === "codex" ? "Codex" : "Claude"} · {entry.model || "模型未知"} · {entry.scope === "global" ? "系统 CLI" : (profiles.find((profile) => profile.id === entry.profile_id)?.name ?? (entry.profile_name || "来源配置未知"))} · {new Date(entry.updated_at * 1000).toLocaleString()}</small>
+    {entry.preview && <small>{entry.preview}</small>}<small title={entry.workspace}>{entry.workspace || "项目目录未知"}</small>
+  </button>
+  <select aria-label="归类到项目" value={entry.project_id ?? ""} onChange={(event) => onAssign(entry, event.currentTarget.value)}><option value="">未分类</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
+  <button className="history-archive-button" onClick={() => onRename(entry)}>重命名</button>
+  <button className="history-archive-button" disabled={archiving} onClick={() => onArchive(entry)}>{entry.archived ? "取消归档" : "归档"}</button></div>;
 }
 
 function TerminalPane({

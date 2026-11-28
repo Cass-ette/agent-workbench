@@ -14,17 +14,28 @@ def capture():
     fd, name = tempfile.mkstemp(suffix=".png")
     os.close(fd)
     try:
-        subprocess.run(["/usr/sbin/screencapture", "-x", "-m", "-t", "png", name],
-                       check=True, capture_output=True, timeout=20)
-        subprocess.run(["/usr/bin/sips", "-Z", "1600", name],
-                       check=True, capture_output=True, timeout=20)
+        capture_result = subprocess.run(
+            ["/usr/sbin/screencapture", "-x", "-m", "-t", "png", name],
+            check=False, capture_output=True, timeout=20)
+        if capture_result.returncode != 0:
+            detail = capture_result.stderr.decode(errors="replace").strip()
+            if "permission" in detail.lower() or "not permitted" in detail.lower():
+                raise RuntimeError("macOS 屏幕录制权限未授予。请在系统设置 → 隐私与安全性 → 屏幕录制中允许 Agent 工作台，然后重新检查工具权限。")
+            raise RuntimeError("macOS 没有返回屏幕图像，可能是桌面已锁定、当前没有可捕获的显示器，或截图进程未获得屏幕录制权限。请先在工作台工具设置中检查系统权限。")
+        resize_result = subprocess.run(
+            ["/usr/bin/sips", "-Z", "1600", name],
+            check=False, capture_output=True, timeout=20)
+        if resize_result.returncode != 0:
+            raise RuntimeError("截图已生成，但缩放失败；请重试屏幕读取。")
         data = Path(name).read_bytes()
         if not data or len(data) > 12 * 1024 * 1024:
             raise RuntimeError("截图为空或过大")
         return {"content": [{"type": "image", "mimeType": "image/png",
                               "data": base64.b64encode(data).decode()}]}
+    except RuntimeError:
+        raise
     except (subprocess.SubprocessError, OSError):
-        raise RuntimeError("无法截取屏幕。请在 macOS 系统设置 → 隐私与安全性 → 屏幕录制中授权工作台或实际截图进程，并确认桌面已解锁。") from None
+        raise RuntimeError("无法启动 macOS 截图服务。请确认桌面已解锁，并在工作台工具设置中检查屏幕录制权限。") from None
     finally:
         Path(name).unlink(missing_ok=True)
 

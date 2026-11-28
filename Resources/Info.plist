@@ -24,6 +24,8 @@
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>让已配对的手机在同一局域网找到这台电脑，换网后更新连接地址。</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>允许 Agent 工作台在启用屏幕读取工具时读取当前主屏幕。</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_agent-wb._tcp</string>

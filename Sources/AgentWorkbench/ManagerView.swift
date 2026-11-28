@@ -581,6 +581,12 @@ private struct HistoryPickerSheet: View {
     }
 
     @State private var byDirectory = false
+    @State private var byProject = false
+    @State private var renameEntry: LocalHistoryEntry?
+    @State private var renameDraft = ""
+    @State private var showNewProject = false
+    @State private var newProjectName = ""
+    @State private var newProjectParent = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -614,6 +620,16 @@ private struct HistoryPickerSheet: View {
                 .padding(.horizontal, 16)
                 .padding(.bottom, 10)
             }
+            HStack {
+                Picker("整理方式", selection: $byProject) {
+                    Text("全部对话").tag(false)
+                    Text("按项目").tag(true)
+                }
+                .pickerStyle(.segmented)
+                Button { showNewProject = true } label: { Label("新建项目", systemImage: "folder.badge.plus") }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 10)
             TextField("搜索标题、项目或配置", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal, 16)
@@ -629,7 +645,13 @@ private struct HistoryPickerSheet: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
-                    if byDirectory {
+                    if byProject {
+                        ForEach(Array(projectGroups.enumerated()), id: \.offset) { _, group in
+                            Section(group.key.isEmpty ? "未分类" : group.key) {
+                                ForEach(group.value) { entry in conversation(entry) }
+                            }
+                        }
+                    } else if byDirectory {
                         OutlineGroup(HistoryNode.outline(filtered), children: \.children) { node in
                             if let entry = node.entry {
                                 conversation(entry)
@@ -645,6 +667,31 @@ private struct HistoryPickerSheet: View {
             }
         }
         .frame(minWidth: 620, minHeight: 440)
+        .alert("重命名会话", isPresented: Binding(get: { renameEntry != nil }, set: { if !$0 { renameEntry = nil } })) {
+            TextField("会话名称", text: $renameDraft)
+            Button("取消", role: .cancel) { renameEntry = nil }
+            Button("保存") {
+                if let entry = renameEntry { Task { await model.renameHistory(entry, title: renameDraft); renameEntry = nil } }
+            }
+        }
+        .alert("新建项目", isPresented: $showNewProject) {
+            TextField("项目名称", text: $newProjectName)
+            Picker("父项目", selection: $newProjectParent) {
+                Text("无（顶层项目）").tag("")
+                ForEach(model.historyProjects) { project in Text(project.name).tag(project.id) }
+            }
+            Button("取消", role: .cancel) { newProjectName = "" }
+            Button("创建") {
+                let name = newProjectName; let parent = newProjectParent.isEmpty ? nil : newProjectParent
+                newProjectName = ""; newProjectParent = ""
+                Task { await model.createHistoryProject(name: name, parentID: parent) }
+            }
+        }
+    }
+
+    private var projectGroups: [(key: String, value: [LocalHistoryEntry])] {
+        Dictionary(grouping: filtered) { $0.project_path ?? "" }
+            .sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }
     }
 
     private func conversation(_ entry: LocalHistoryEntry) -> some View {
@@ -671,6 +718,9 @@ private struct HistoryPickerSheet: View {
                 Text(entry.workspace.isEmpty ? "项目目录未知" : entry.workspace)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                if let project = entry.project_path, !project.isEmpty {
+                    Text("项目：\(project)").font(.caption2).foregroundStyle(.tint)
+                }
             }
             .contentShape(Rectangle())
         }
@@ -681,6 +731,18 @@ private struct HistoryPickerSheet: View {
         }
         .disabled(!model.archivingHistoryRef.isEmpty)
         .help("只改变历史列表显示；保留对话内容、原配置和正在运行的终端。")
+        Menu {
+            Button("未分类") { Task { await model.assignHistoryProject(entry, projectID: nil) } }
+            ForEach(model.historyProjects) { project in
+                Button(project.name) { Task { await model.assignHistoryProject(entry, projectID: project.id) } }
+            }
+        } label: { Image(systemName: "folder") }
+        .help("整理到项目")
+        Button {
+            renameDraft = entry.title
+            renameEntry = entry
+        } label: { Image(systemName: "pencil") }
+        .help("重命名会话")
         }
         .padding(.vertical, 4)
     }

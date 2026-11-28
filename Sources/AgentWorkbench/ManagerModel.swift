@@ -8,12 +8,13 @@ enum SystemPrivacyPane: String, CaseIterable {
     case screenCapture = "Privacy_ScreenCapture"
     case accessibility = "Privacy_Accessibility"
 
-    /// macOS moved Privacy & Security panes from the legacy preference
-    /// bundle to the Login Items settings extension. Keep the legacy URL as
-    /// a fallback for older supported systems.
+    /// macOS Ventura and later expose these panes through the Privacy &
+    /// Security settings extension. Keep the pre-Ventura URL as a fallback
+    /// for older supported systems. The Login Items extension is a separate
+    /// pane and must not be used for either permission.
     var settingsURLs: [URL] {
         [
-            "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?\(rawValue)",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?\(rawValue)",
             "x-apple.systempreferences:com.apple.preference.security?\(rawValue)"
         ].compactMap(URL.init(string:))
     }
@@ -1377,6 +1378,7 @@ final class ManagerModel: ObservableObject {
             launchGlobal(client: activeClient)
             return
         }
+        refreshSystemPermissionStatus()
         guard permissionsPreflightComplete else {
             Task { await prepareSystemPermissions() }
             setError("正在检查系统权限，请稍候再启动 Agent。")
@@ -1563,6 +1565,7 @@ final class ManagerModel: ObservableObject {
 
     private func restoreOriginal(_ entry: LocalHistoryEntry, reasoningEffort: String? = nil) {
         guard !installingApplicationUpdate else { return }
+        refreshSystemPermissionStatus()
         var isDirectory: ObjCBool = false
         guard !entry.workspace.isEmpty, FileManager.default.fileExists(atPath: entry.workspace, isDirectory: &isDirectory),
               isDirectory.boolValue else {

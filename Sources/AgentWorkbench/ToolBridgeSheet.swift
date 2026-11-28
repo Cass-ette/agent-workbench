@@ -165,6 +165,12 @@ struct ToolBridgeSheet: View {
         }
         .font(.system(size: 13)).padding(24).frame(width: 650, height: 700)
         .task(id: client) { await load() }
+        .onAppear { model.refreshSystemPermissionStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // TCC changes are made in System Settings, so refresh when the
+            // user returns instead of leaving the old status in the sheet.
+            model.refreshSystemPermissionStatus()
+        }
         .onChange(of: config) { _, _ in confirmed = false }
         .onChange(of: screen) { _, enabled in
             confirmed = false

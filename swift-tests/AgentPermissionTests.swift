@@ -4,9 +4,12 @@ import XCTest
 final class AgentPermissionTests: XCTestCase {
     func testPrivacySettingsUseModernMacOSDeepLinksBeforeLegacyFallback() {
         XCTAssertEqual(SystemPrivacyPane.screenCapture.settingsURLs.first?.absoluteString,
-                       "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?Privacy_ScreenCapture")
+                       "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture")
         XCTAssertEqual(SystemPrivacyPane.accessibility.settingsURLs.first?.absoluteString,
-                       "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?Privacy_Accessibility")
+                       "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility")
+        XCTAssertFalse(SystemPrivacyPane.screenCapture.settingsURLs.contains {
+            $0.absoluteString.contains("LoginItems-Settings")
+        })
         XCTAssertEqual(SystemPrivacyPane.screenCapture.settingsURLs.last?.absoluteString,
                        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
     }

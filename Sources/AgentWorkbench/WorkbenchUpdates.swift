@@ -19,12 +19,24 @@ private enum MacUpdateSource {
     }
     #else
     static let bundleIdentifier = "com.cassette.agentworkbench"
+    // The first public builds used this bundle identity even after the UI was
+    // renamed. Keep it valid as an installed source so those builds can move
+    // to the current product without a manual reinstall.
+    static let legacyBundleIdentifiers = ["com.cassette.cchpmodelmanager"]
     static let architecture = "universal"
 
     static func accepts(_ url: URL) -> Bool {
         ReleaseFeed.trusted(url)
     }
     #endif
+
+    static func acceptsInstalledBundle(_ identifier: String?) -> Bool {
+        #if WORKBENCH_LOCAL_UPDATE_TEST
+        return identifier == bundleIdentifier
+        #else
+        return identifier == bundleIdentifier || legacyBundleIdentifiers.contains(identifier ?? "")
+        #endif
+    }
 }
 
 private struct UpdateManifest: Decodable {
@@ -158,7 +170,7 @@ private struct MacUpdateService: Sendable {
         let files = FileManager.default
         let destination = destination.resolvingSymlinksInPath()
         guard destination.pathExtension == "app", let installed = Bundle(url: destination),
-              installed.bundleIdentifier == MacUpdateSource.bundleIdentifier else {
+              MacUpdateSource.acceptsInstalledBundle(installed.bundleIdentifier) else {
             throw UpdateFailure("请从已安装的工作台应用运行更新。")
         }
         let parent = destination.deletingLastPathComponent()
@@ -172,7 +184,7 @@ private struct MacUpdateService: Sendable {
         guard apps.count == 1, let candidate = apps.first,
               try candidate.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]).isDirectory == true,
               try candidate.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == false,
-              let bundle = Bundle(url: candidate), bundle.bundleIdentifier == installed.bundleIdentifier,
+              let bundle = Bundle(url: candidate), bundle.bundleIdentifier == MacUpdateSource.bundleIdentifier,
               bundle.infoDictionary?["CFBundleShortVersionString"] as? String == package.version else {
             throw UpdateFailure("安装包的应用或版本与发布清单不符。")
         }

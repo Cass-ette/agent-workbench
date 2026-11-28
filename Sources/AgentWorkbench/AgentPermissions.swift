@@ -93,8 +93,21 @@ struct AgentPermissionsSheet: View {
                 Toggle("我确认启用上述高权限，理解它可访问当前账号可读写的项目外文件。", isOn: $confirmed)
                     .foregroundStyle(.orange)
             }
-            Text("只影响之后新建、恢复和分支的工作台会话。系统 CLI 沿用外部设置。macOS 隐私目录仍由系统授权；工作台不会自动获取管理员权限。")
+            Text("这里的设置只影响之后新建、恢复和分支的工作台会话。已经运行的终端沿用启动时的权限参数。系统 CLI 沿用外部设置；macOS 隐私目录、屏幕录制和辅助功能仍由系统单独授权。")
                 .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("权限来源").font(.headline)
+                Text("工作台设置控制 CLI 是否询问命令。系统设置控制屏幕录制和辅助功能。模型或 MCP 自己的工具确认属于第三层，工作台不能用前两项替它批准。应用更新后如果 macOS 将新签名视为新应用，系统权限可能需要重新勾选。")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Label(model.screenCaptureAuthorized ? "屏幕录制已授权" : "屏幕录制未授权",
+                          systemImage: model.screenCaptureAuthorized ? "checkmark.circle.fill" : "exclamationmark.circle")
+                        .foregroundStyle(model.screenCaptureAuthorized ? .green : .orange)
+                    Label(model.accessibilityAuthorized ? "辅助功能已授权" : "辅助功能未授权",
+                          systemImage: model.accessibilityAuthorized ? "checkmark.circle.fill" : "exclamationmark.circle")
+                        .foregroundStyle(model.accessibilityAuthorized ? .green : .orange)
+                }
+            }
             Link("权限与工具接入说明（浏览器、技能、MCP）",
                  destination: URL(string: "https://github.com/Cass-ette/agent-workbench/blob/main/docs/agent-permissions.zh-CN.md")!)
             HStack {

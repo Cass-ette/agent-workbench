@@ -91,7 +91,7 @@ struct ToolBridgeSheet: View {
                             Text(model.accessibilityAuthorized ? "已授权" : "未授权")
                                 .foregroundStyle(model.accessibilityAuthorized ? .green : .secondary)
                         }
-                        Text("内置屏幕读取只需要屏幕录制权限。辅助功能只在另接需要控制鼠标或键盘的工具时使用。系统权限已授权，也不代表当前模型或网关支持图片工具。")
+                        Text("内置屏幕读取只需要屏幕录制权限。辅助功能只在另接需要控制鼠标或键盘的工具时使用。系统权限已授权，也不代表当前模型或网关支持图片工具。工作台启动时只检查状态；需要重新请求时请点击按钮，避免重复弹出系统确认。")
                             .foregroundStyle(.secondary)
                         HStack {
                             Button("请求／检查屏幕录制授权") {

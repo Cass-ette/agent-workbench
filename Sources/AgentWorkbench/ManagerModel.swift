@@ -424,6 +424,8 @@ private struct BackendClient: Sendable {
 
 @MainActor
 final class ManagerModel: ObservableObject {
+    private static let screenCapturePromptedKey = "systemPermission.screenCapturePrompted.v1"
+
     @Published var isToolsPresented = false
 
     // TCC permissions are granted by macOS, so the workbench can only check
@@ -450,6 +452,10 @@ final class ManagerModel: ObservableObject {
     func requestScreenCapturePermission() -> Bool {
         refreshSystemPermissionStatus()
         if !screenCaptureAuthorized {
+            // macOS remembers this decision per app identity. Calling the
+            // request API on every launch makes a stale TCC entry look like a
+            // repeated workbench prompt, especially after an ad-hoc update.
+            UserDefaults.standard.set(true, forKey: Self.screenCapturePromptedKey)
             _ = CGRequestScreenCaptureAccess()
             refreshSystemPermissionStatus()
         }
@@ -489,7 +495,13 @@ final class ManagerModel: ObservableObject {
         screenCaptureRequiredClients = requiredClients
         screenCaptureRequired = !requiredClients.isEmpty
         if screenCaptureRequired && !screenCaptureAuthorized {
-            _ = requestScreenCapturePermission()
+            // Preflight every launch, but only open the macOS consent prompt
+            // once. Later launches show the settings action instead of
+            // asking again when the app identity or TCC state changed.
+            let prompted = UserDefaults.standard.bool(forKey: Self.screenCapturePromptedKey)
+            if !prompted {
+                _ = requestScreenCapturePermission()
+            }
         }
         permissionsPreflightComplete = true
         if screenCaptureRequired && !screenCaptureAuthorized {

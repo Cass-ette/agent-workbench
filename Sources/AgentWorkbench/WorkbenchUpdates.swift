@@ -69,7 +69,7 @@ private struct MacUpdateService: Sendable {
         return numbers.count == 3 ? numbers : nil
     }
 
-    static func lookup(current: String) async throws -> AvailableUpdate? {
+    static func lookup(current: String, channel: String) async throws -> AvailableUpdate? {
         let limit = 512 * 1024
         #if WORKBENCH_LOCAL_UPDATE_TEST
         let file = try FileHandle(forReadingFrom: MacUpdateSource.manifest)
@@ -77,8 +77,8 @@ private struct MacUpdateService: Sendable {
         let data = try file.read(upToCount: limit + 1) ?? Data()
         return try parse(data, current: current, channel: MacUpdateSource.channel)
         #else
-        return try await ReleaseFeed.load(read: readRemote) { data in
-            try parse(data, current: current)
+        return try await ReleaseFeed.load(channel: channel, read: readRemote) { data in
+            try parse(data, current: current, channel: channel)
         }
         #endif
     }
@@ -90,9 +90,10 @@ private struct MacUpdateService: Sendable {
         let packages = manifest.packages.filter {
             $0.platform == "macos" && (channel == nil || $0.channel == channel) && $0.arch == MacUpdateSource.architecture
         }
-        guard packages.count == 1, let package = packages.first, package.valid,
+        guard packages.count <= 1, let package = packages.first, package.valid,
               let latest = version(package.version) else { throw UpdateFailure("发布清单没有适用于这台 Mac 的安装包。") }
-        return installed.lexicographicallyPrecedes(latest) ? AvailableUpdate(package: package, notes: manifest.notes) : nil
+        let baseline = channel == "preview" && installed.first != 0 ? [0, 0, 0] : installed
+        return baseline.lexicographicallyPrecedes(latest) ? AvailableUpdate(package: package, notes: manifest.notes) : nil
     }
 
     private static func readRemote(_ url: URL) async throws -> Data {
@@ -287,11 +288,13 @@ final class WorkbenchUpdates: ObservableObject {
     @Published private(set) var status = ""
     @Published private(set) var archive: URL?
     @Published var show = false
+    @Published private(set) var receivePreviewUpdates = false
     private var transfer: Task<Void, Never>?
     private var showCheckResult = false
     private var installedBundle: URL?
-    private var cacheKey: String { "workbench.update.available." + cacheScope }
-    private var checkKey: String { "workbench.update.checked." + cacheScope }
+    private var channel: String { receivePreviewUpdates ? "preview" : "stable" }
+    private var cacheKey: String { "workbench.update.available." + cacheScope + "." + channel }
+    private var checkKey: String { "workbench.update.checked." + cacheScope + "." + channel }
     private var cacheScope: String {
         #if WORKBENCH_LOCAL_UPDATE_TEST
         let hash = SHA256.hash(data: Data(MacUpdateSource.directory.path.utf8))
@@ -302,6 +305,7 @@ final class WorkbenchUpdates: ObservableObject {
     }
 
     init() {
+        receivePreviewUpdates = UserDefaults.standard.bool(forKey: "workbench.update.receivePreview")
         if let data = UserDefaults.standard.data(forKey: cacheKey) {
             available = try? JSONDecoder().decode(AvailableUpdate.self, from: data)
         }
@@ -310,6 +314,14 @@ final class WorkbenchUpdates: ObservableObject {
     var nextVersion: String? { installed ? nil : available?.package.version }
     var notes: String { available?.notes ?? "" }
     var isPreview: Bool { available.map { ReleaseFeed.isPreview($0.package.version) } ?? false }
+    func setReceivePreviewUpdates(_ enabled: Bool) {
+        guard receivePreviewUpdates != enabled, !checking, !downloading, !installing else { return }
+        receivePreviewUpdates = enabled
+        UserDefaults.standard.set(enabled, forKey: "workbench.update.receivePreview")
+        available = nil
+        status = enabled ? "已切换到测试版通道。" : "已切换到稳定版通道。"
+        Task { await check(manual: true) }
+    }
     func open() {
         show = true
         if available == nil && !installed { Task { await check(manual: true) } }
@@ -334,7 +346,7 @@ final class WorkbenchUpdates: ObservableObject {
         if manual { status = "正在检查更新…" }
         defer { checking = false }
         do {
-            let result = try await MacUpdateService.lookup(current: current)
+            let result = try await MacUpdateService.lookup(current: current, channel: channel)
             if let archive, result?.package != available?.package {
                 try? FileManager.default.removeItem(at: archive)
                 self.archive = nil
@@ -359,7 +371,7 @@ final class WorkbenchUpdates: ObservableObject {
         transfer = Task { [self] in
             defer { downloading = false; transfer = nil }
             do {
-                let latest = try await MacUpdateService.lookup(current: current)
+                let latest = try await MacUpdateService.lookup(current: current, channel: channel)
                 guard latest?.package == selected.package else {
                     available = latest
                     UserDefaults.standard.set(latest.flatMap { try? JSONEncoder().encode($0) }, forKey: cacheKey)
@@ -445,6 +457,13 @@ struct WorkbenchUpdateSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("工作台更新").font(.headline)
+            Toggle("接收测试版更新", isOn: Binding(
+                get: { updates.receivePreviewUpdates },
+                set: { updates.setReceivePreviewUpdates($0) }
+            ))
+            .disabled(updates.checking || updates.downloading || updates.installing)
+            Text(updates.receivePreviewUpdates ? "测试版通道 · 可能包含未完成改动" : "稳定版通道")
+                .font(.callout).foregroundStyle(updates.receivePreviewUpdates ? .orange : .secondary)
             #if WORKBENCH_LOCAL_UPDATE_TEST
             Text("本机更新测试").foregroundStyle(.secondary)
             #endif

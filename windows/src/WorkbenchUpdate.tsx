@@ -6,21 +6,29 @@ import { version } from "../package.json";
 const releasePage = "https://github.com/Cass-ette/agent-workbench/releases";
 const key = "workbench.update." + version;
 
+function storageKeyForChannel(channel: string): string {
+  return channel === "stable" ? key : key + ".preview";
+}
+
 interface Available {
   package: { version: string; sha256: string; channel?: string };
   notes: string;
 }
 
-function cached(): Available | null {
+function cached(channel: string): Available | null {
   try {
-    return JSON.parse(localStorage.getItem(key + ".available") || "null");
+    return JSON.parse(localStorage.getItem(storageKeyForChannel(channel) + ".available") || "null");
   } catch {
     return null;
   }
 }
 
 export function WorkbenchUpdate({ running }: { running: number }) {
-  const [available, setAvailable] = useState(cached);
+  const [preview, setPreview] = useState(() => localStorage.getItem("workbench.update.receivePreview") === "true");
+  const channel = preview ? "preview" : "stable";
+  const storageKey = storageKeyForChannel(channel);
+  const channelRef = useRef(channel);
+  const [available, setAvailable] = useState(() => cached(channel));
   const [visible, setVisible] = useState(false);
   const [state, setState] = useState<"idle" | "checking" | "downloading" | "ready" | "installing">("idle");
   const [progress, setProgress] = useState(0);
@@ -40,23 +48,23 @@ export function WorkbenchUpdate({ running }: { running: number }) {
       return;
     }
     if (activity.current !== "idle" || !isTauri()) return;
-    if (!manual && (document.visibilityState === "hidden" || Number(localStorage.getItem(key + ".next")) > Date.now())) return;
+    if (!manual && (document.visibilityState === "hidden" || Number(localStorage.getItem(storageKey + ".next")) > Date.now())) return;
     change("checking");
     showCheckResult.current = manual;
     if (manual) setStatus("正在检查更新…");
     try {
-      const result = await invoke<Available | null>("check_workbench_update");
+      const result = await invoke<Available | null>("check_workbench_update", { channel });
       setAvailable(result);
-      localStorage.setItem(key + ".available", JSON.stringify(result));
-      localStorage.setItem(key + ".next", String(Date.now() + 86_400_000));
+      localStorage.setItem(storageKey + ".available", JSON.stringify(result));
+      localStorage.setItem(storageKey + ".next", String(Date.now() + 86_400_000));
       if (showCheckResult.current) setStatus(result ? "" : "当前已是最新版本。");
     } catch (error) {
-      localStorage.setItem(key + ".next", String(Date.now() + 1_800_000));
+      localStorage.setItem(storageKey + ".next", String(Date.now() + 1_800_000));
       if (showCheckResult.current) setStatus(String(error));
     } finally {
       change("idle");
     }
-  }, [change]);
+  }, [channel, change, storageKey]);
 
   useEffect(() => {
     void check();
@@ -68,6 +76,21 @@ export function WorkbenchUpdate({ running }: { running: number }) {
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [check]);
+
+  useEffect(() => {
+    if (channelRef.current !== channel) {
+      channelRef.current = channel;
+      void check(true);
+    }
+  }, [channel, check]);
+
+  function setPreviewChannel(enabled: boolean) {
+    if (activity.current !== "idle") return;
+    setPreview(enabled);
+    localStorage.setItem("workbench.update.receivePreview", String(enabled));
+    setAvailable(null);
+    setStatus(enabled ? "已切换到测试版通道。" : "已切换到稳定版通道。");
+  }
 
   async function download() {
     if (!available || activity.current !== "idle") return;
@@ -115,6 +138,8 @@ export function WorkbenchUpdate({ running }: { running: number }) {
       }}>
         <section className="profile-dialog update-dialog" role="dialog" aria-modal="true" aria-label="工作台更新">
           <h2>工作台更新</h2>
+          <label className="update-channel-toggle"><input type="checkbox" checked={preview} disabled={state !== "idle"} onChange={event => setPreviewChannel(event.target.checked)} /> 接收测试版更新</label>
+          <p>{preview ? "测试版通道 · 可能包含未完成改动" : "稳定版通道"}</p>
           {available?.package.version.startsWith("0.") && <p>测试版 · 可下载安装</p>}
           <p>当前版本 {version}{available && ` · 新版本 ${available.package.version}`}</p>
           {available && <div className="update-notes">{available.notes || "此版本暂无更新说明。"}</div>}

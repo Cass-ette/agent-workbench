@@ -18,18 +18,18 @@ class WorkbenchUpdatePackageTest {
         )
 
         assertEquals("1.1.0", selectAndroidUpdatePackage(
-            packages, listOf("x86_64", "arm64-v8a"), "release",
+            packages, listOf("x86_64", "arm64-v8a"), "release", "stable",
         )?.version)
         assertEquals("2.0.0", selectAndroidUpdatePackage(
-            packages, listOf("arm64-v8a"), "development",
+            packages, listOf("arm64-v8a"), "development", "preview",
         )?.version)
-        assertNull(selectAndroidUpdatePackage(packages, listOf("x86_64"), "development"))
+        assertNull(selectAndroidUpdatePackage(packages, listOf("x86_64"), "development", "stable"))
     }
 
     @Test fun releaseSignedPreviewDoesNotMatchDevelopmentClient() {
         val packages = listOf(AndroidUpdateCandidate(0, "android", "preview", "universal", "2.0.0", "release"))
-        assertNull(selectAndroidUpdatePackage(packages, listOf("arm64-v8a"), "development"))
-        assertEquals("2.0.0", selectAndroidUpdatePackage(packages, listOf("arm64-v8a"), "release")?.version)
+        assertNull(selectAndroidUpdatePackage(packages, listOf("arm64-v8a"), "development", "preview"))
+        assertEquals("2.0.0", selectAndroidUpdatePackage(packages, listOf("arm64-v8a"), "release", "preview")?.version)
     }
 
     @Test fun selectsPublishedPreviewAndRejectsUntrustedOrDraftManifests() {
@@ -78,9 +78,20 @@ class WorkbenchUpdatePackageTest {
 
     @Test fun packageAndPreviewStatusIgnoreGithubAndManifestLabels() {
         val packageInfo = AndroidUpdateCandidate(0, "android", "stable", "universal", "0.1.32", "development")
-        assertEquals(packageInfo, selectAndroidUpdatePackage(listOf(packageInfo), listOf("arm64-v8a"), "development"))
+        assertEquals(packageInfo, selectAndroidUpdatePackage(listOf(packageInfo), listOf("arm64-v8a"), "development", "stable"))
         org.junit.Assert.assertTrue(isPreviewVersion(packageInfo.version))
         org.junit.Assert.assertFalse(isPreviewVersion("1.0.0"))
+    }
+
+    @Test fun stableAndPreviewFixedFeedsAreIndependent() {
+        assertEquals(UPDATE_FEED + "stable.json", UPDATE_MANIFEST)
+        val reads = mutableListOf<String>()
+        val value = loadWorkbenchUpdate("preview", read = { url ->
+            reads.add(url)
+            "preview"
+        }, parse = { it }, selectFallback = { error("Should not request API") })
+        assertEquals("preview", value)
+        assertEquals(listOf(UPDATE_FEED + "preview.json"), reads)
     }
 
     @Test fun rejectsDuplicatePackagesForThePreferredArchitecture() {

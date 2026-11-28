@@ -49,7 +49,7 @@ it("缓存到期后刷新已经显示的版本提示", async () => {
 
   expect(screen.getByRole("button", { name: "新版 9.0.1" })).toBeTruthy();
   await screen.findByRole("button", { name: "新版 9.0.2" });
-  expect(invoke).toHaveBeenCalledWith("check_workbench_update");
+  expect(invoke).toHaveBeenCalledWith("check_workbench_update", { channel: "stable" });
 });
 
 it("有运行中的终端时不安装，安装包丢失时可以重新下载", async () => {
@@ -80,4 +80,23 @@ it("测试版显示标记并允许下载", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "测试版 0.1.16" }));
   expect(screen.getByText("测试版 · 可下载安装")).toBeTruthy();
   expect(screen.getByRole("button", { name: "下载更新" })).toBeTruthy();
+});
+
+it("勾选测试版后立即检查测试通道，取消后恢复稳定通道", async () => {
+  invoke.mockResolvedValue(null);
+  render(<WorkbenchUpdate running={0} />);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("check_workbench_update", { channel: "stable" }));
+  fireEvent.click(screen.getByRole("button", { name: "检查更新" }));
+  await screen.findByText("当前已是最新版本。");
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "接收测试版更新" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("check_workbench_update", { channel: "preview" }));
+  await screen.findByText("测试版通道 · 可能包含未完成改动");
+  await screen.findByText("当前已是最新版本。");
+  expect(localStorage.getItem("workbench.update.receivePreview")).toBe("true");
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "接收测试版更新" }));
+  await waitFor(() => expect(invoke.mock.calls.filter(([command, options]) => command === "check_workbench_update" && options?.channel === "stable")).toHaveLength(3));
+  await screen.findByText("稳定版通道");
+  expect(localStorage.getItem("workbench.update.receivePreview")).toBe("false");
 });

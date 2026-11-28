@@ -13,8 +13,8 @@ use std::{
 };
 use tauri::{AppHandle, Manager, State, ipc::Channel};
 
-const UPDATE_MANIFEST: &str =
-    "https://raw.githubusercontent.com/Cass-ette/agent-workbench/update-feed/update.json";
+const UPDATE_FEED: &str =
+    "https://raw.githubusercontent.com/Cass-ette/agent-workbench/update-feed/";
 
 const RELEASE_FEED: &str =
     "https://api.github.com/repos/Cass-ette/agent-workbench/releases?per_page=20";
@@ -54,26 +54,27 @@ fn trusted_download_path(path: &str) -> bool {
         .any(|prefix| path.starts_with(prefix))
 }
 
-fn select_manifest(mut releases: Vec<Release>) -> Option<String> {
+fn select_manifests(mut releases: Vec<Release>) -> Vec<String> {
     releases.retain(|r| !r.draft && r.published_at.is_some());
     releases.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+    let mut sources = Vec::new();
     for release in releases {
         let assets: Vec<_> = release
             .assets
             .into_iter()
             .filter(|a| a.name == "update.json")
             .collect();
-        if assets.len() == 1
-            && trusted_release_url(&assets[0].browser_download_url)
-            && Url::parse(&assets[0].browser_download_url)
-                .ok()?
-                .path()
-                .ends_with("/update.json")
+        if assets.len() == 1 && trusted_release_url(&assets[0].browser_download_url)
+            && Url::parse(&assets[0].browser_download_url).is_ok_and(|url| url.path().ends_with("/update.json"))
         {
-            return Some(assets[0].browser_download_url.clone());
+            sources.push(assets[0].browser_download_url.clone());
         }
     }
-    None
+    sources
+}
+
+fn select_manifest(releases: Vec<Release>) -> Option<String> {
+    select_manifests(releases).into_iter().next()
 }
 
 #[derive(Deserialize)]
@@ -185,14 +186,16 @@ async fn read_document(client: &Client, url: &str) -> Result<Vec<u8>, String> {
 async fn load_update<F, Fut>(
     current: &str,
     arch: &str,
+    channel: &str,
     mut read: F,
 ) -> Result<Option<Available>, String>
 where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
 {
-    let primary = match read(UPDATE_MANIFEST.into()).await {
-        Ok(bytes) => match parse_update(&bytes, current, arch) {
+    let fixed = format!("{UPDATE_FEED}{channel}.json");
+    let primary = match read(fixed).await {
+        Ok(bytes) => match parse_update(&bytes, current, arch, channel) {
             Ok(update) => return Ok(update),
             Err(error) => error,
         },
@@ -201,26 +204,37 @@ where
     let fallback = async {
         let releases: Vec<Release> = serde_json::from_slice(&read(RELEASE_FEED.into()).await?)
             .map_err(|_| "无法识别发布列表。")?;
-        let url = select_manifest(releases).ok_or("发布页暂时没有完整更新包。")?;
-        parse_update(&read(url).await?, current, arch)
+        let sources = select_manifests(releases);
+        if sources.is_empty() { return Err("发布页暂时没有完整更新包。".into()); }
+        let mut last_error = None;
+        for url in sources {
+            match read(url).await {
+                Ok(bytes) => match parse_update(&bytes, current, arch, channel) {
+                    Ok(update) => return Ok(update),
+                    Err(error) => last_error = Some(error),
+                },
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| "发布页暂时没有适用于当前通道的更新包。".into()))
     }
     .await;
     fallback.map_err(|error: String| format!("固定更新清单：{primary}\n备用发布列表：{error}"))
 }
 
-async fn lookup(client: &Client, current: &str) -> Result<Option<Available>, String> {
+async fn lookup(client: &Client, current: &str, channel: &str) -> Result<Option<Available>, String> {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x64",
         "aarch64" => "arm64",
         _ => return Err("当前系统架构暂无安装包。".into()),
     };
-    load_update(current, arch, |url| async move {
+    load_update(current, arch, channel, |url| async move {
         read_document(client, &url).await
     })
     .await
 }
 
-fn parse_update(bytes: &[u8], current: &str, arch: &str) -> Result<Option<Available>, String> {
+fn parse_update(bytes: &[u8], current: &str, arch: &str, channel: &str) -> Result<Option<Available>, String> {
     let manifest: Manifest = serde_json::from_slice(bytes).map_err(|_| "无法识别发布清单。")?;
     if manifest.schema != 1 {
         return Err("无法识别发布清单版本。".into());
@@ -228,8 +242,8 @@ fn parse_update(bytes: &[u8], current: &str, arch: &str) -> Result<Option<Availa
     let mut packages = manifest
         .packages
         .into_iter()
-        .filter(|p| p.platform == "windows" && p.arch == arch);
-    let mut package = packages
+        .filter(|p| p.platform == "windows" && p.arch == arch && p.channel == channel);
+    let package = packages
         .next()
         .ok_or("发布清单没有适用于这台电脑的安装包。")?;
     if packages.next().is_some() {
@@ -257,16 +271,18 @@ fn parse_update(bytes: &[u8], current: &str, arch: &str) -> Result<Option<Availa
     }
     let new = version(&package.version).ok_or("新版的版本号无效。")?;
     let old = version(current).ok_or("当前版本号无效。")?;
-    package.channel = if new[0] == 0 { "preview" } else { "stable" }.into();
-    Ok((new > old).then_some(Available {
+    if (new[0] == 0) != (channel == "preview") { return Err("更新包版本与所选通道不符。".into()); }
+    let baseline = if channel == "preview" && old[0] != 0 { [0, 0, 0] } else { old };
+    Ok((new > baseline).then_some(Available {
         package,
         notes: manifest.notes,
     }))
 }
 
 #[tauri::command]
-pub(crate) async fn check_workbench_update(app: AppHandle) -> Result<Option<Available>, String> {
-    lookup(&client()?, &app.package_info().version.to_string()).await
+pub(crate) async fn check_workbench_update(app: AppHandle, channel: String) -> Result<Option<Available>, String> {
+    if !matches!(channel.as_str(), "stable" | "preview") { return Err("更新通道无效。".into()); }
+    lookup(&client()?, &app.package_info().version.to_string(), &channel).await
 }
 
 #[tauri::command]
@@ -288,7 +304,7 @@ pub(crate) async fn download_workbench_update(
     state.staged.lock().map_err(|_| "更新状态不可用。")?.take();
     let client = client()?;
     let current = app.package_info().version.to_string();
-    let latest = lookup(&client, &current).await?;
+    let latest = lookup(&client, &current, &expected.channel).await?;
     if latest.as_ref().map(|item| &item.package) != Some(&expected) {
         return Err("可用版本已变化，请重新检查更新。".into());
     }
@@ -515,7 +531,7 @@ mod tests {
 
     #[test]
     fn package_maturity_comes_from_version_not_release_metadata() {
-        let manifest = serde_json::json!({
+        let mut manifest = serde_json::json!({
             "schema": 1,
             "notes": "test",
             "packages": [{
@@ -528,11 +544,32 @@ mod tests {
                 "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             }]
         });
-        let result = parse_update(&serde_json::to_vec(&manifest).unwrap(), "0.1.0", "x64")
+        manifest["packages"][0]["channel"] = serde_json::Value::String("preview".into());
+        let result = parse_update(&serde_json::to_vec(&manifest).unwrap(), "0.1.0", "x64", "preview")
             .unwrap()
             .unwrap();
         assert_eq!(result.package.channel, "preview");
         assert_eq!(result.package.version, "0.2.0");
+    }
+
+    #[test]
+    fn stable_clients_can_opt_into_preview_and_channels_reject_mismatched_versions() {
+        let manifest = serde_json::json!({
+            "schema": 1,
+            "notes": "test",
+            "packages": [{
+                "platform": "windows",
+                "arch": "x64",
+                "channel": "preview",
+                "version": "0.2.0",
+                "url": "https://github.com/Cass-ette/agent-workbench/releases/download/test/app-setup.exe",
+                "size": 10,
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }]
+        });
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        assert_eq!(parse_update(&bytes, "1.0.0", "x64", "preview").unwrap().unwrap().package.version, "0.2.0");
+        assert!(parse_update(&bytes, "1.0.0", "x64", "stable").is_err());
     }
 
     #[test]

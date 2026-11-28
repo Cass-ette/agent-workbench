@@ -2,7 +2,7 @@
 
 日常构建发布到 GitHub，通常标记为测试版（Pre-release），允许用户下载安装。客户端成熟度只由版本号决定：`0.x.y` 显示为测试版，`1.0.0` 及更高主版本显示为正式版。GitHub Release 的 Latest / Pre-release 标记不参与客户端更新筛选或成熟度判断；无需为应用内更新把 Release 改成正式版。
 
-工作台在前台运行时低频检查更新。检查成功后至少隔 24 小时，失败后至少隔 30 分钟。三端优先读取 `update-feed` 分支的固定 `update.json`，降低 GitHub API 限流造成的漏检；固定清单不可用或无效时，再查最近 20 个 Release 的清单作为备用。两种来源都按安装包版本更新，并忽略 Release 的 Pre-release 标记。测试版依据版本号显示。不能读取清单时同时显示主、备用来源的错误，不能误报已是最新版。
+工作台在前台运行时低频检查更新。检查成功后至少隔 24 小时，失败后至少隔 30 分钟。默认稳定版读取 `update-feed/stable.json`，用户在更新面板勾选「接收测试版更新」后读取 `preview.json`，两种通道的缓存和检查时间彼此隔离。固定清单不可用或无效时，再查最近 20 个 Release 的清单作为备用。稳定版同时同步旧客户端使用的 `update.json`。客户端成熟度由版本号决定，`0.x.y` 是测试版，`1.x.y` 及更高版本是正式版。
 
 用户查看说明后选择下载。下载前重新读取清单，确认包仍与所选版本相同。三端核对大小和 SHA-256；下载与检查不会自动关闭终端。
 
@@ -16,7 +16,7 @@
 
 ## 自动测试版
 
-推送到 `main` 或手动运行 **Tri-platform build** 会构建、测试三端。CI 在独立 checkout 内按 `github.run_number` 增加各端数字版本，不改写源码中的版本。全部成功后先建草稿，上传三端安装包、`SHA256SUMS.txt`、`update.json`，最后公开 Release。Release 完整公开后才推进 `update-feed/update.json`；发布脚本会拒绝低于 feed 现有版本或 Android build 的旧构建，避免并行工作流使更新清单倒退。
+推送到 `main` 或手动运行 **Tri-platform build** 会构建、测试三端。CI 在独立 checkout 内按 `github.run_number` 增加各端数字版本，不改写源码中的版本。全部成功后先建草稿，上传三端安装包、`SHA256SUMS.txt`、`update.json`，最后公开 Release。Release 完整公开后才推进对应的 `update-feed/stable.json` 或 `preview.json`；稳定版另外推进兼容用的 `update.json`。发布脚本按通道保留另一通道文件，并拒绝低于当前通道现有版本或 Android build 的旧构建，避免并行工作流使更新清单倒退。
 
 更新说明默认取 `docs/preview-notes.zh-CN.md`，可手动输入本批说明。版本从真实产物读取，清单由 `scripts/build-update-manifest.py` 生成，包含渠道、架构、版本、地址、大小、哈希；Android 额外记录版本代码和签名类型。
 
